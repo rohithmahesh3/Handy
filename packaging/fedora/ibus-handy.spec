@@ -23,7 +23,6 @@ BuildRequires:  clang-devel
 BuildRequires:  glslc
 
 Requires:       ibus >= 1.5.0
-Requires:       pipewire-pulse
 Supplements:    (gnome-shell and fedora-release-workstation)
 
 %description
