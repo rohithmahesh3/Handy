@@ -1,7 +1,7 @@
 use gtk4::prelude::*;
-use gtk4::{Box, ComboBoxText, Orientation, PolicyType, ScrolledWindow, Switch, Widget};
-use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt};
-use libadwaita::{ActionRow, PreferencesGroup};
+use gtk4::{ComboBoxText, PolicyType, ScrolledWindow, Switch, Widget};
+use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt, PreferencesPageExt};
+use libadwaita::{ActionRow, Clamp, PreferencesGroup, PreferencesPage};
 use std::sync::Arc;
 
 use super::Page;
@@ -14,14 +14,16 @@ pub struct AdvancedPage {
 
 impl AdvancedPage {
     pub fn new(state: &Arc<AppState>) -> Self {
-        let main_box = Box::builder()
-            .orientation(Orientation::Vertical)
-            .spacing(12)
-            .margin_top(24)
-            .margin_bottom(24)
-            .margin_start(24)
-            .margin_end(24)
+        let page = PreferencesPage::new();
+
+        let clamp = Clamp::builder()
+            .maximum_size(900)
+            .tightening_threshold(700)
             .build();
+        clamp.set_margin_top(24);
+        clamp.set_margin_bottom(24);
+        clamp.set_margin_start(24);
+        clamp.set_margin_end(24);
 
         let language_group = PreferencesGroup::builder().title("Language").build();
 
@@ -84,7 +86,7 @@ impl AdvancedPage {
         translate_row.add_suffix(&translate_switch);
         language_group.add(&translate_row);
 
-        main_box.append(&language_group);
+        page.add(&language_group);
 
         let model_group = PreferencesGroup::builder().title("Model").build();
 
@@ -130,7 +132,7 @@ impl AdvancedPage {
         timeout_row.add_suffix(&timeout_combo);
         model_group.add(&timeout_row);
 
-        main_box.append(&model_group);
+        page.add(&model_group);
 
         let debug_group = PreferencesGroup::builder().title("Debug").build();
 
@@ -168,12 +170,13 @@ impl AdvancedPage {
         experimental_row.add_suffix(&experimental_switch);
         debug_group.add(&experimental_row);
 
-        main_box.append(&debug_group);
+        page.add(&debug_group);
 
         let container = ScrolledWindow::builder()
             .hscrollbar_policy(PolicyType::Never)
-            .child(&main_box)
+            .child(&clamp)
             .build();
+        clamp.set_child(Some(&page));
 
         Self { container }
     }

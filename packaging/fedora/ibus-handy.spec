@@ -43,7 +43,7 @@ install -Dm644 resources/icons/handy.svg %{buildroot}%{_datadir}/icons/hicolor/s
 install -Dm644 resources/icons/handy.svg %{buildroot}%{_datadir}/handy/icons/handy.svg
 install -Dm644 packaging/fedora/com.handy.Transcription.service %{buildroot}%{_datadir}/dbus-1/services/com.handy.Transcription.service
 install -Dm644 packaging/fedora/handy.service %{buildroot}%{_userunitdir}/handy.service
-install -Dm644 packaging/fedora/handy.xml %{buildroot}%{_datadir}/ibus/components/handy.xml
+install -Dm644 packaging/fedora/handy.xml %{buildroot}%{_datadir}/ibus/component/handy.xml
 install -Dm644 data/com.handy.Transcription.gschema.xml %{buildroot}%{_datadir}/glib-2.0/schemas/com.handy.Transcription.gschema.xml
 
 %post
@@ -64,7 +64,7 @@ glib-compile-schemas %{_datadir}/glib-2.0/schemas 2>/dev/null || :
 %{_bindir}/handy
 %{_libexecdir}/ibus-handy-engine
 %{_datadir}/handy/icons/handy.svg
-%{_datadir}/ibus/components/handy.xml
+%{_datadir}/ibus/component/handy.xml
 %{_datadir}/applications/handy.desktop
 %{_datadir}/icons/hicolor/scalable/apps/handy.svg
 %{_datadir}/dbus-1/services/com.handy.Transcription.service

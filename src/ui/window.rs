@@ -30,9 +30,8 @@ impl MainWindow {
             .hexpand(true)
             .build();
 
-        let header = HeaderBar::builder()
-            .title_widget(&WindowTitle::new("Handy", "General"))
-            .build();
+        let window_title = WindowTitle::new("Handy", "General");
+        let header = HeaderBar::builder().title_widget(&window_title).build();
         content_box.append(&header);
 
         let stack = gtk4::Stack::builder().hexpand(true).vexpand(true).build();
@@ -48,6 +47,15 @@ impl MainWindow {
 
         let about_page = super::pages::about::AboutPage::new();
         stack.add_titled(about_page.widget(), Some("about"), "About");
+
+        stack.connect_visible_child_name_notify({
+            let window_title = window_title.clone();
+            move |stack| {
+                let subtitle = page_subtitle(stack.visible_child_name().as_deref());
+                window_title.set_subtitle(subtitle);
+            }
+        });
+        stack.set_visible_child_name("general");
 
         content_box.append(&stack);
 
@@ -67,5 +75,14 @@ impl MainWindow {
 
     pub fn widget(&self) -> &Window {
         &self.window
+    }
+}
+
+fn page_subtitle(page_name: Option<&str>) -> &'static str {
+    match page_name {
+        Some("models") => "Models",
+        Some("advanced") => "Advanced",
+        Some("about") => "About",
+        _ => "General",
     }
 }

@@ -16,9 +16,11 @@
             <author>Handy Team</author>
             <icon>/usr/share/handy/icons/handy.svg</icon>
             <layout>us</layout>
+            <symbol>H</symbol>
+            <setup>/usr/bin/handy</setup>
             <longname>Handy Speech-to-Text</longname>
             <description>Voice dictation using Handy</description>
-            <rank>0</rank>
+            <rank>80</rank>
         </engine>
     </engines>
 </component>

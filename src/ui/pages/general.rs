@@ -1,9 +1,7 @@
 use gtk4::prelude::*;
-use gtk4::{
-    Adjustment, Box, ComboBoxText, Orientation, PolicyType, Scale, ScrolledWindow, Switch, Widget,
-};
-use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt};
-use libadwaita::{ActionRow, PreferencesGroup};
+use gtk4::{Adjustment, ComboBoxText, PolicyType, Scale, ScrolledWindow, Switch, Widget};
+use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt, PreferencesPageExt};
+use libadwaita::{ActionRow, Clamp, PreferencesGroup, PreferencesPage};
 use std::sync::Arc;
 
 use super::Page;
@@ -19,14 +17,16 @@ impl GeneralPage {
             .hscrollbar_policy(PolicyType::Never)
             .build();
 
-        let vbox = Box::builder()
-            .orientation(Orientation::Vertical)
-            .spacing(24)
-            .margin_top(24)
-            .margin_bottom(24)
-            .margin_start(24)
-            .margin_end(24)
+        let clamp = Clamp::builder()
+            .maximum_size(900)
+            .tightening_threshold(700)
             .build();
+        clamp.set_margin_top(24);
+        clamp.set_margin_bottom(24);
+        clamp.set_margin_start(24);
+        clamp.set_margin_end(24);
+
+        let page = PreferencesPage::new();
 
         let recording_group = PreferencesGroup::builder()
             .title("Recording")
@@ -49,7 +49,7 @@ impl GeneralPage {
         });
         recording_group.add(&mute_row);
 
-        vbox.append(&recording_group);
+        page.add(&recording_group);
 
         let audio_feedback_group = PreferencesGroup::builder().title("Audio Feedback").build();
 
@@ -84,7 +84,7 @@ impl GeneralPage {
         volume_row.add_suffix(&volume_scale);
         audio_feedback_group.add(&volume_row);
 
-        vbox.append(&audio_feedback_group);
+        page.add(&audio_feedback_group);
 
         let language_group = PreferencesGroup::builder().title("Language").build();
 
@@ -145,9 +145,10 @@ impl GeneralPage {
         });
         language_group.add(&translate_row);
 
-        vbox.append(&language_group);
+        page.add(&language_group);
 
-        container.set_child(Some(&vbox));
+        clamp.set_child(Some(&page));
+        container.set_child(Some(&clamp));
 
         Self { container }
     }

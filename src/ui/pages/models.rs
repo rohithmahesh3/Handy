@@ -2,8 +2,8 @@ use gtk4::prelude::*;
 use gtk4::{
     Box, Button, Image, Label, Orientation, PolicyType, ProgressBar, ScrolledWindow, Widget,
 };
-use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt};
-use libadwaita::{ActionRow, PreferencesGroup, ToastOverlay};
+use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt, PreferencesPageExt};
+use libadwaita::{ActionRow, Clamp, PreferencesGroup, PreferencesPage, ToastOverlay};
 use std::sync::Arc;
 
 use super::Page;
@@ -18,14 +18,16 @@ impl ModelsPage {
     pub fn new(state: &Arc<AppState>) -> Self {
         let toast_overlay = ToastOverlay::new();
 
-        let main_box = Box::builder()
-            .orientation(Orientation::Vertical)
-            .spacing(12)
-            .margin_top(24)
-            .margin_bottom(24)
-            .margin_start(24)
-            .margin_end(24)
+        let page = PreferencesPage::new();
+
+        let clamp = Clamp::builder()
+            .maximum_size(900)
+            .tightening_threshold(700)
             .build();
+        clamp.set_margin_top(24);
+        clamp.set_margin_bottom(24);
+        clamp.set_margin_start(24);
+        clamp.set_margin_end(24);
 
         let models_group = PreferencesGroup::builder()
             .title("Available Models")
@@ -40,7 +42,7 @@ impl ModelsPage {
             models_group.add(&row);
         }
 
-        main_box.append(&models_group);
+        page.add(&models_group);
 
         let custom_group = PreferencesGroup::builder()
             .title("Custom Models")
@@ -55,9 +57,10 @@ impl ModelsPage {
             .build();
         custom_group.add(&info_label);
 
-        main_box.append(&custom_group);
+        page.add(&custom_group);
 
-        toast_overlay.set_child(Some(&main_box));
+        clamp.set_child(Some(&page));
+        toast_overlay.set_child(Some(&clamp));
 
         let container = ScrolledWindow::builder()
             .hscrollbar_policy(PolicyType::Never)

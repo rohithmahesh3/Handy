@@ -1,5 +1,5 @@
 use gtk4::prelude::*;
-use gtk4::{Box, Image, Label, ListBox, ListBoxRow, Orientation};
+use gtk4::{Box, Image, Label, ListBox, ListBoxRow, Orientation, SelectionMode};
 use std::sync::Arc;
 
 use crate::app::AppState;
@@ -12,6 +12,9 @@ impl Sidebar {
     pub fn new(_state: &Arc<AppState>) -> Self {
         let list = ListBox::builder()
             .css_classes(["navigation-sidebar"])
+            .selection_mode(SelectionMode::Single)
+            .width_request(180)
+            .vexpand(true)
             .build();
 
         add_item(&list, "general", "General", "preferences-system-symbolic");
@@ -23,6 +26,9 @@ impl Sidebar {
             "applications-engineering-symbolic",
         );
         add_item(&list, "about", "About", "help-about-symbolic");
+        if let Some(first_row) = list.row_at_index(0) {
+            list.select_row(Some(&first_row));
+        }
 
         Self { list }
     }
