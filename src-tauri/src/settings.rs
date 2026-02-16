@@ -1,12 +1,11 @@
-use log::{debug, warn};
-use serde::de::{self, Visitor};
-use serde::{Deserialize, Deserializer, Serialize};
-use specta::Type;
+use gio::Settings as GioSettings;
+use glib::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tauri::AppHandle;
-use tauri_plugin_store::StoreExt;
 
-#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
+const SETTINGS_SCHEMA: &str = "com.handy.Transcription";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
     Trace,
@@ -16,208 +15,13 @@ pub enum LogLevel {
     Error,
 }
 
-// Custom deserializer to handle both old numeric format (1-5) and new string format ("trace", "debug", etc.)
-impl<'de> Deserialize<'de> for LogLevel {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct LogLevelVisitor;
-
-        impl<'de> Visitor<'de> for LogLevelVisitor {
-            type Value = LogLevel;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a string or integer representing log level")
-            }
-
-            fn visit_str<E: de::Error>(self, value: &str) -> Result<LogLevel, E> {
-                match value.to_lowercase().as_str() {
-                    "trace" => Ok(LogLevel::Trace),
-                    "debug" => Ok(LogLevel::Debug),
-                    "info" => Ok(LogLevel::Info),
-                    "warn" => Ok(LogLevel::Warn),
-                    "error" => Ok(LogLevel::Error),
-                    _ => Err(E::unknown_variant(
-                        value,
-                        &["trace", "debug", "info", "warn", "error"],
-                    )),
-                }
-            }
-
-            fn visit_u64<E: de::Error>(self, value: u64) -> Result<LogLevel, E> {
-                match value {
-                    1 => Ok(LogLevel::Trace),
-                    2 => Ok(LogLevel::Debug),
-                    3 => Ok(LogLevel::Info),
-                    4 => Ok(LogLevel::Warn),
-                    5 => Ok(LogLevel::Error),
-                    _ => Err(E::invalid_value(de::Unexpected::Unsigned(value), &"1-5")),
-                }
-            }
-        }
-
-        deserializer.deserialize_any(LogLevelVisitor)
-    }
-}
-
-impl From<LogLevel> for tauri_plugin_log::LogLevel {
-    fn from(level: LogLevel) -> Self {
-        match level {
-            LogLevel::Trace => tauri_plugin_log::LogLevel::Trace,
-            LogLevel::Debug => tauri_plugin_log::LogLevel::Debug,
-            LogLevel::Info => tauri_plugin_log::LogLevel::Info,
-            LogLevel::Warn => tauri_plugin_log::LogLevel::Warn,
-            LogLevel::Error => tauri_plugin_log::LogLevel::Error,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Type)]
-pub struct ShortcutBinding {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub default_binding: String,
-    pub current_binding: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Type)]
-pub struct LLMPrompt {
-    pub id: String,
-    pub name: String,
-    pub prompt: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Type)]
-pub struct PostProcessProvider {
-    pub id: String,
-    pub label: String,
-    pub base_url: String,
-    #[serde(default)]
-    pub allow_base_url_edit: bool,
-    #[serde(default)]
-    pub models_endpoint: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
-#[serde(rename_all = "lowercase")]
-pub enum OverlayPosition {
-    None,
-    Top,
-    Bottom,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelUnloadTimeout {
-    Never,
-    Immediately,
-    Min2,
-    Min5,
-    Min10,
-    Min15,
-    Hour1,
-    Sec5, // Debug mode only
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum PasteMethod {
-    CtrlV,
-    Direct,
-    None,
-    ShiftInsert,
-    CtrlShiftV,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum ClipboardHandling {
-    DontModify,
-    CopyToClipboard,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum AutoSubmitKey {
-    Enter,
-    CtrlEnter,
-    CmdEnter,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum RecordingRetentionPeriod {
-    Never,
-    PreserveLimit,
-    Days3,
-    Weeks2,
-    Months3,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum KeyboardImplementation {
-    Tauri,
-    HandyKeys,
-}
-
-impl Default for KeyboardImplementation {
+impl Default for LogLevel {
     fn default() -> Self {
-        KeyboardImplementation::HandyKeys
+        LogLevel::Debug
     }
 }
 
-impl Default for ModelUnloadTimeout {
-    fn default() -> Self {
-        ModelUnloadTimeout::Never
-    }
-}
-
-impl Default for PasteMethod {
-    fn default() -> Self {
-        PasteMethod::Direct
-    }
-}
-
-impl Default for ClipboardHandling {
-    fn default() -> Self {
-        ClipboardHandling::DontModify
-    }
-}
-
-impl Default for AutoSubmitKey {
-    fn default() -> Self {
-        AutoSubmitKey::Enter
-    }
-}
-
-impl ModelUnloadTimeout {
-    pub fn to_minutes(self) -> Option<u64> {
-        match self {
-            ModelUnloadTimeout::Never => None,
-            ModelUnloadTimeout::Immediately => Some(0), // Special case for immediate unloading
-            ModelUnloadTimeout::Min2 => Some(2),
-            ModelUnloadTimeout::Min5 => Some(5),
-            ModelUnloadTimeout::Min10 => Some(10),
-            ModelUnloadTimeout::Min15 => Some(15),
-            ModelUnloadTimeout::Hour1 => Some(60),
-            ModelUnloadTimeout::Sec5 => Some(0), // Special case for debug - handled separately
-        }
-    }
-
-    pub fn to_seconds(self) -> Option<u64> {
-        match self {
-            ModelUnloadTimeout::Never => None,
-            ModelUnloadTimeout::Immediately => Some(0), // Special case for immediate unloading
-            ModelUnloadTimeout::Sec5 => Some(5),
-            _ => self.to_minutes().map(|m| m * 60),
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SoundTheme {
     Marimba,
@@ -225,8 +29,14 @@ pub enum SoundTheme {
     Custom,
 }
 
+impl Default for SoundTheme {
+    fn default() -> Self {
+        SoundTheme::Marimba
+    }
+}
+
 impl SoundTheme {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             SoundTheme::Marimba => "marimba",
             SoundTheme::Pop => "pop",
@@ -243,7 +53,100 @@ impl SoundTheme {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelUnloadTimeout {
+    Never,
+    Immediately,
+    Min2,
+    Min5,
+    Min10,
+    Min15,
+    Hour1,
+    Sec5,
+}
+
+impl Default for ModelUnloadTimeout {
+    fn default() -> Self {
+        ModelUnloadTimeout::Never
+    }
+}
+
+impl ModelUnloadTimeout {
+    pub fn to_seconds(self) -> Option<u64> {
+        match self {
+            ModelUnloadTimeout::Never => None,
+            ModelUnloadTimeout::Immediately => Some(0),
+            ModelUnloadTimeout::Sec5 => Some(5),
+            ModelUnloadTimeout::Min2 => Some(120),
+            ModelUnloadTimeout::Min5 => Some(300),
+            ModelUnloadTimeout::Min10 => Some(600),
+            ModelUnloadTimeout::Min15 => Some(900),
+            ModelUnloadTimeout::Hour1 => Some(3600),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PasteMethod {
+    CtrlV,
+    Direct,
+    None,
+    ShiftInsert,
+    CtrlShiftV,
+}
+
+impl Default for PasteMethod {
+    fn default() -> Self {
+        PasteMethod::Direct
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipboardHandling {
+    DontModify,
+    CopyToClipboard,
+}
+
+impl Default for ClipboardHandling {
+    fn default() -> Self {
+        ClipboardHandling::DontModify
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoSubmitKey {
+    Enter,
+    CtrlEnter,
+    CmdEnter,
+}
+
+impl Default for AutoSubmitKey {
+    fn default() -> Self {
+        AutoSubmitKey::Enter
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingRetentionPeriod {
+    Never,
+    PreserveLimit,
+    Days3,
+    Weeks2,
+    Months3,
+}
+
+impl Default for RecordingRetentionPeriod {
+    fn default() -> Self {
+        RecordingRetentionPeriod::PreserveLimit
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TypingTool {
     Auto,
@@ -260,524 +163,402 @@ impl Default for TypingTool {
     }
 }
 
-/* still handy for composing the initial JSON in the store ------------- */
-#[derive(Serialize, Deserialize, Debug, Clone, Type)]
-pub struct AppSettings {
-    pub bindings: HashMap<String, ShortcutBinding>,
-    pub push_to_talk: bool,
-    pub audio_feedback: bool,
-    #[serde(default = "default_audio_feedback_volume")]
-    pub audio_feedback_volume: f32,
-    #[serde(default = "default_sound_theme")]
-    pub sound_theme: SoundTheme,
-    #[serde(default = "default_start_hidden")]
-    pub start_hidden: bool,
-    #[serde(default = "default_autostart_enabled")]
-    pub autostart_enabled: bool,
-    #[serde(default = "default_update_checks_enabled")]
-    pub update_checks_enabled: bool,
-    #[serde(default = "default_model")]
-    pub selected_model: String,
-    #[serde(default = "default_always_on_microphone")]
-    pub always_on_microphone: bool,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShortcutBinding {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub default_binding: String,
+    pub current_binding: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LLMPrompt {
+    pub id: String,
+    pub name: String,
+    pub prompt: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostProcessProvider {
+    pub id: String,
+    pub label: String,
+    pub base_url: String,
     #[serde(default)]
-    pub selected_microphone: Option<String>,
-    #[serde(default)]
-    pub selected_output_device: Option<String>,
-    #[serde(default = "default_translate_to_english")]
-    pub translate_to_english: bool,
-    #[serde(default = "default_selected_language")]
-    pub selected_language: String,
-    #[serde(default = "default_overlay_position")]
-    pub overlay_position: OverlayPosition,
-    #[serde(default = "default_debug_mode")]
-    pub debug_mode: bool,
-    #[serde(default = "default_log_level")]
-    pub log_level: LogLevel,
-    #[serde(default)]
-    pub custom_words: Vec<String>,
-    #[serde(default)]
-    pub model_unload_timeout: ModelUnloadTimeout,
-    #[serde(default = "default_word_correction_threshold")]
-    pub word_correction_threshold: f64,
-    #[serde(default = "default_history_limit")]
-    pub history_limit: usize,
-    #[serde(default = "default_recording_retention_period")]
-    pub recording_retention_period: RecordingRetentionPeriod,
-    #[serde(default)]
-    pub paste_method: PasteMethod,
-    #[serde(default)]
-    pub clipboard_handling: ClipboardHandling,
-    #[serde(default = "default_auto_submit")]
-    pub auto_submit: bool,
-    #[serde(default)]
-    pub auto_submit_key: AutoSubmitKey,
-    #[serde(default = "default_post_process_enabled")]
-    pub post_process_enabled: bool,
-    #[serde(default = "default_post_process_provider_id")]
-    pub post_process_provider_id: String,
-    #[serde(default = "default_post_process_providers")]
-    pub post_process_providers: Vec<PostProcessProvider>,
-    #[serde(default = "default_post_process_api_keys")]
-    pub post_process_api_keys: HashMap<String, String>,
-    #[serde(default = "default_post_process_models")]
-    pub post_process_models: HashMap<String, String>,
-    #[serde(default = "default_post_process_prompts")]
-    pub post_process_prompts: Vec<LLMPrompt>,
-    #[serde(default)]
-    pub post_process_selected_prompt_id: Option<String>,
-    #[serde(default)]
-    pub mute_while_recording: bool,
-    #[serde(default)]
-    pub append_trailing_space: bool,
-    #[serde(default = "default_app_language")]
-    pub app_language: String,
-    #[serde(default)]
-    pub experimental_enabled: bool,
-    #[serde(default)]
-    pub keyboard_implementation: KeyboardImplementation,
-    #[serde(default = "default_show_tray_icon")]
-    pub show_tray_icon: bool,
-    #[serde(default = "default_paste_delay_ms")]
-    pub paste_delay_ms: u64,
-    #[serde(default = "default_typing_tool")]
-    pub typing_tool: TypingTool,
+    pub allow_base_url_edit: bool,
 }
 
-fn default_model() -> String {
-    "".to_string()
+#[derive(Clone)]
+pub struct Settings {
+    gio_settings: GioSettings,
 }
 
-fn default_always_on_microphone() -> bool {
-    false
-}
-
-fn default_translate_to_english() -> bool {
-    false
-}
-
-fn default_start_hidden() -> bool {
-    false
-}
-
-fn default_autostart_enabled() -> bool {
-    false
-}
-
-fn default_update_checks_enabled() -> bool {
-    true
-}
-
-fn default_selected_language() -> String {
-    "auto".to_string()
-}
-
-fn default_overlay_position() -> OverlayPosition {
-    OverlayPosition::None
-}
-
-fn default_debug_mode() -> bool {
-    false
-}
-
-fn default_log_level() -> LogLevel {
-    LogLevel::Debug
-}
-
-fn default_word_correction_threshold() -> f64 {
-    0.18
-}
-
-fn default_paste_delay_ms() -> u64 {
-    60
-}
-
-fn default_auto_submit() -> bool {
-    false
-}
-
-fn default_history_limit() -> usize {
-    5
-}
-
-fn default_recording_retention_period() -> RecordingRetentionPeriod {
-    RecordingRetentionPeriod::PreserveLimit
-}
-
-fn default_audio_feedback_volume() -> f32 {
-    1.0
-}
-
-fn default_sound_theme() -> SoundTheme {
-    SoundTheme::Marimba
-}
-
-fn default_post_process_enabled() -> bool {
-    false
-}
-
-fn default_app_language() -> String {
-    tauri_plugin_os::locale()
-        .map(|l| l.replace('_', "-"))
-        .unwrap_or_else(|| "en".to_string())
-}
-
-fn default_show_tray_icon() -> bool {
-    true
-}
-
-fn default_post_process_provider_id() -> String {
-    "openai".to_string()
-}
-
-fn default_post_process_providers() -> Vec<PostProcessProvider> {
-    let mut providers = vec![
-        PostProcessProvider {
-            id: "openai".to_string(),
-            label: "OpenAI".to_string(),
-            base_url: "https://api.openai.com/v1".to_string(),
-            allow_base_url_edit: false,
-            models_endpoint: Some("/models".to_string()),
-        },
-        PostProcessProvider {
-            id: "openrouter".to_string(),
-            label: "OpenRouter".to_string(),
-            base_url: "https://openrouter.ai/api/v1".to_string(),
-            allow_base_url_edit: false,
-            models_endpoint: Some("/models".to_string()),
-        },
-        PostProcessProvider {
-            id: "anthropic".to_string(),
-            label: "Anthropic".to_string(),
-            base_url: "https://api.anthropic.com/v1".to_string(),
-            allow_base_url_edit: false,
-            models_endpoint: Some("/models".to_string()),
-        },
-        PostProcessProvider {
-            id: "groq".to_string(),
-            label: "Groq".to_string(),
-            base_url: "https://api.groq.com/openai/v1".to_string(),
-            allow_base_url_edit: false,
-            models_endpoint: Some("/models".to_string()),
-        },
-        PostProcessProvider {
-            id: "cerebras".to_string(),
-            label: "Cerebras".to_string(),
-            base_url: "https://api.cerebras.ai/v1".to_string(),
-            allow_base_url_edit: false,
-            models_endpoint: Some("/models".to_string()),
-        },
-    ];
-
-    // Custom provider always comes last
-    providers.push(PostProcessProvider {
-        id: "custom".to_string(),
-        label: "Custom".to_string(),
-        base_url: "http://localhost:11434/v1".to_string(),
-        allow_base_url_edit: true,
-        models_endpoint: Some("/models".to_string()),
-    });
-
-    providers
-}
-
-fn default_post_process_api_keys() -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for provider in default_post_process_providers() {
-        map.insert(provider.id, String::new());
+impl Settings {
+    pub fn new() -> Self {
+        let gio_settings = GioSettings::new(SETTINGS_SCHEMA);
+        Self { gio_settings }
     }
-    map
-}
 
-fn default_model_for_provider(_provider_id: &str) -> String {
-    String::new()
-}
-
-fn default_post_process_models() -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for provider in default_post_process_providers() {
-        map.insert(
-            provider.id.clone(),
-            default_model_for_provider(&provider.id),
-        );
+    // Bindings
+    pub fn bindings(&self) -> HashMap<String, ShortcutBinding> {
+        let json = self.gio_settings.string("bindings");
+        serde_json::from_str(json.as_str()).unwrap_or_default()
     }
-    map
-}
 
-fn default_post_process_prompts() -> Vec<LLMPrompt> {
-    vec![LLMPrompt {
-        id: "default_improve_transcriptions".to_string(),
-        name: "Improve Transcriptions".to_string(),
-        prompt: "Clean this transcript:\n1. Fix spelling, capitalization, and punctuation errors\n2. Convert number words to digits (twenty-five → 25, ten percent → 10%, five dollars → $5)\n3. Replace spoken punctuation with symbols (period → ., comma → ,, question mark → ?)\n4. Remove filler words (um, uh, like as filler)\n5. Keep the language in the original version (if it was french, keep it in french for example)\n\nPreserve exact meaning and word order. Do not paraphrase or reorder content.\n\nReturn only the cleaned transcript.\n\nTranscript:\n${output}".to_string(),
-    }]
-}
+    pub fn set_bindings(&self, bindings: HashMap<String, ShortcutBinding>) {
+        let json = serde_json::to_string(&bindings).unwrap_or_default();
+        self.gio_settings.set_string("bindings", &json).ok();
+    }
 
-fn default_typing_tool() -> TypingTool {
-    TypingTool::Auto
-}
+    // General Settings
+    pub fn push_to_talk(&self) -> bool {
+        self.gio_settings.boolean("push-to-talk")
+    }
 
-fn ensure_post_process_defaults(settings: &mut AppSettings) -> bool {
-    let mut changed = false;
-    for provider in default_post_process_providers() {
-        if settings
-            .post_process_providers
-            .iter()
-            .all(|existing| existing.id != provider.id)
-        {
-            settings.post_process_providers.push(provider.clone());
-            changed = true;
-        }
+    pub fn set_push_to_talk(&self, value: bool) {
+        self.gio_settings.set_boolean("push-to-talk", value).ok();
+    }
 
-        if !settings.post_process_api_keys.contains_key(&provider.id) {
-            settings
-                .post_process_api_keys
-                .insert(provider.id.clone(), String::new());
-            changed = true;
-        }
+    pub fn audio_feedback(&self) -> bool {
+        self.gio_settings.boolean("audio-feedback")
+    }
 
-        let default_model = default_model_for_provider(&provider.id);
-        match settings.post_process_models.get_mut(&provider.id) {
-            Some(existing) => {
-                if existing.is_empty() && !default_model.is_empty() {
-                    *existing = default_model.clone();
-                    changed = true;
-                }
-            }
-            None => {
-                settings
-                    .post_process_models
-                    .insert(provider.id.clone(), default_model);
-                changed = true;
-            }
+    pub fn set_audio_feedback(&self, value: bool) {
+        self.gio_settings.set_boolean("audio-feedback", value).ok();
+    }
+
+    pub fn audio_feedback_volume(&self) -> f32 {
+        self.gio_settings.double("audio-feedback-volume") as f32
+    }
+
+    pub fn set_audio_feedback_volume(&self, value: f32) {
+        self.gio_settings.set_double("audio-feedback-volume", value as f64).ok();
+    }
+
+    pub fn sound_theme(&self) -> SoundTheme {
+        let value = self.gio_settings.enum_("sound-theme");
+        match value {
+            0 => SoundTheme::Marimba,
+            1 => SoundTheme::Pop,
+            2 => SoundTheme::Custom,
+            _ => SoundTheme::default(),
         }
     }
 
-    changed
-}
-
-pub const SETTINGS_STORE_PATH: &str = "settings_store.json";
-
-pub fn get_default_settings() -> AppSettings {
-    let default_shortcut = "ctrl+space";
-
-    let mut bindings = HashMap::new();
-    bindings.insert(
-        "transcribe".to_string(),
-        ShortcutBinding {
-            id: "transcribe".to_string(),
-            name: "Transcribe".to_string(),
-            description: "Converts your speech into text.".to_string(),
-            default_binding: default_shortcut.to_string(),
-            current_binding: default_shortcut.to_string(),
-        },
-    );
-    let default_post_process_shortcut = "ctrl+shift+space";
-
-    bindings.insert(
-        "transcribe_with_post_process".to_string(),
-        ShortcutBinding {
-            id: "transcribe_with_post_process".to_string(),
-            name: "Transcribe with Post-Processing".to_string(),
-            description: "Converts your speech into text and applies AI post-processing."
-                .to_string(),
-            default_binding: default_post_process_shortcut.to_string(),
-            current_binding: default_post_process_shortcut.to_string(),
-        },
-    );
-    bindings.insert(
-        "cancel".to_string(),
-        ShortcutBinding {
-            id: "cancel".to_string(),
-            name: "Cancel".to_string(),
-            description: "Cancels the current recording.".to_string(),
-            default_binding: "escape".to_string(),
-            current_binding: "escape".to_string(),
-        },
-    );
-
-    AppSettings {
-        bindings,
-        push_to_talk: true,
-        audio_feedback: false,
-        audio_feedback_volume: default_audio_feedback_volume(),
-        sound_theme: default_sound_theme(),
-        start_hidden: default_start_hidden(),
-        autostart_enabled: default_autostart_enabled(),
-        update_checks_enabled: default_update_checks_enabled(),
-        selected_model: "".to_string(),
-        always_on_microphone: false,
-        selected_microphone: None,
-        selected_output_device: None,
-        translate_to_english: false,
-        selected_language: "auto".to_string(),
-        overlay_position: default_overlay_position(),
-        debug_mode: false,
-        log_level: default_log_level(),
-        custom_words: Vec::new(),
-        model_unload_timeout: ModelUnloadTimeout::Never,
-        word_correction_threshold: default_word_correction_threshold(),
-        history_limit: default_history_limit(),
-        recording_retention_period: default_recording_retention_period(),
-        paste_method: PasteMethod::default(),
-        clipboard_handling: ClipboardHandling::default(),
-        auto_submit: default_auto_submit(),
-        auto_submit_key: AutoSubmitKey::default(),
-        post_process_enabled: default_post_process_enabled(),
-        post_process_provider_id: default_post_process_provider_id(),
-        post_process_providers: default_post_process_providers(),
-        post_process_api_keys: default_post_process_api_keys(),
-        post_process_models: default_post_process_models(),
-        post_process_prompts: default_post_process_prompts(),
-        post_process_selected_prompt_id: None,
-        mute_while_recording: false,
-        append_trailing_space: false,
-        app_language: default_app_language(),
-        experimental_enabled: false,
-        keyboard_implementation: KeyboardImplementation::default(),
-        show_tray_icon: default_show_tray_icon(),
-        paste_delay_ms: default_paste_delay_ms(),
-        typing_tool: default_typing_tool(),
-    }
-}
-
-impl AppSettings {
-    pub fn active_post_process_provider(&self) -> Option<&PostProcessProvider> {
-        self.post_process_providers
-            .iter()
-            .find(|provider| provider.id == self.post_process_provider_id)
+    pub fn selected_microphone(&self) -> Option<String> {
+        let value = self.gio_settings.string("selected-microphone");
+        if value.is_empty() { None } else { Some(value.to_string()) }
     }
 
-    pub fn post_process_provider(&self, provider_id: &str) -> Option<&PostProcessProvider> {
-        self.post_process_providers
-            .iter()
-            .find(|provider| provider.id == provider_id)
+    pub fn set_selected_microphone(&self, value: Option<&str>) {
+        self.gio_settings.set_string("selected-microphone", value.unwrap_or("")).ok();
     }
 
-    pub fn post_process_provider_mut(
-        &mut self,
-        provider_id: &str,
-    ) -> Option<&mut PostProcessProvider> {
-        self.post_process_providers
-            .iter_mut()
-            .find(|provider| provider.id == provider_id)
+    pub fn selected_output_device(&self) -> Option<String> {
+        let value = self.gio_settings.string("selected-output-device");
+        if value.is_empty() { None } else { Some(value.to_string()) }
     }
-}
 
-pub fn load_or_create_app_settings(app: &AppHandle) -> AppSettings {
-    // Initialize store
-    let store = app
-        .store(SETTINGS_STORE_PATH)
-        .expect("Failed to initialize store");
+    pub fn set_selected_output_device(&self, value: Option<&str>) {
+        self.gio_settings.set_string("selected-output-device", value.unwrap_or("")).ok();
+    }
 
-    let mut settings = if let Some(settings_value) = store.get("settings") {
-        // Parse the entire settings object
-        match serde_json::from_value::<AppSettings>(settings_value) {
-            Ok(mut settings) => {
-                debug!("Found existing settings: {:?}", settings);
-                let default_settings = get_default_settings();
-                let mut updated = false;
+    pub fn selected_language(&self) -> String {
+        self.gio_settings.string("selected-language").to_string()
+    }
 
-                // Merge default bindings into existing settings
-                for (key, value) in default_settings.bindings {
-                    if !settings.bindings.contains_key(&key) {
-                        debug!("Adding missing binding: {}", key);
-                        settings.bindings.insert(key, value);
-                        updated = true;
-                    }
-                }
+    pub fn set_selected_language(&self, value: &str) {
+        self.gio_settings.set_string("selected-language", value).ok();
+    }
 
-                if updated {
-                    debug!("Settings updated with new bindings");
-                    store.set("settings", serde_json::to_value(&settings).unwrap());
-                }
+    pub fn translate_to_english(&self) -> bool {
+        self.gio_settings.boolean("translate-to-english")
+    }
 
-                settings
-            }
-            Err(e) => {
-                warn!("Failed to parse settings: {}", e);
-                // Fall back to default settings if parsing fails
-                let default_settings = get_default_settings();
-                store.set("settings", serde_json::to_value(&default_settings).unwrap());
-                default_settings
-            }
+    pub fn set_translate_to_english(&self, value: bool) {
+        self.gio_settings.set_boolean("translate-to-english", value).ok();
+    }
+
+    pub fn mute_while_recording(&self) -> bool {
+        self.gio_settings.boolean("mute-while-recording")
+    }
+
+    pub fn set_mute_while_recording(&self, value: bool) {
+        self.gio_settings.set_boolean("mute-while-recording", value).ok();
+    }
+
+    // Model Settings
+    pub fn selected_model(&self) -> String {
+        self.gio_settings.string("selected-model").to_string()
+    }
+
+    pub fn set_selected_model(&self, value: &str) {
+        self.gio_settings.set_string("selected-model", value).ok();
+    }
+
+    pub fn model_unload_timeout(&self) -> ModelUnloadTimeout {
+        let value = self.gio_settings.enum_("model-unload-timeout");
+        match value {
+            0 => ModelUnloadTimeout::Never,
+            1 => ModelUnloadTimeout::Immediately,
+            2 => ModelUnloadTimeout::Min2,
+            3 => ModelUnloadTimeout::Min5,
+            4 => ModelUnloadTimeout::Min10,
+            5 => ModelUnloadTimeout::Min15,
+            6 => ModelUnloadTimeout::Hour1,
+            7 => ModelUnloadTimeout::Sec5,
+            _ => ModelUnloadTimeout::default(),
         }
-    } else {
-        let default_settings = get_default_settings();
-        store.set("settings", serde_json::to_value(&default_settings).unwrap());
-        default_settings
-    };
-
-    if ensure_post_process_defaults(&mut settings) {
-        store.set("settings", serde_json::to_value(&settings).unwrap());
     }
 
-    settings
-}
-
-pub fn get_settings(app: &AppHandle) -> AppSettings {
-    let store = app
-        .store(SETTINGS_STORE_PATH)
-        .expect("Failed to initialize store");
-
-    let mut settings = if let Some(settings_value) = store.get("settings") {
-        serde_json::from_value::<AppSettings>(settings_value).unwrap_or_else(|_| {
-            let default_settings = get_default_settings();
-            store.set("settings", serde_json::to_value(&default_settings).unwrap());
-            default_settings
-        })
-    } else {
-        let default_settings = get_default_settings();
-        store.set("settings", serde_json::to_value(&default_settings).unwrap());
-        default_settings
-    };
-
-    if ensure_post_process_defaults(&mut settings) {
-        store.set("settings", serde_json::to_value(&settings).unwrap());
+    // App Behavior
+    pub fn start_hidden(&self) -> bool {
+        self.gio_settings.boolean("start-hidden")
     }
 
-    settings
-}
-
-pub fn write_settings(app: &AppHandle, settings: AppSettings) {
-    let store = app
-        .store(SETTINGS_STORE_PATH)
-        .expect("Failed to initialize store");
-
-    store.set("settings", serde_json::to_value(&settings).unwrap());
-}
-
-pub fn get_bindings(app: &AppHandle) -> HashMap<String, ShortcutBinding> {
-    let settings = get_settings(app);
-
-    settings.bindings
-}
-
-pub fn get_stored_binding(app: &AppHandle, id: &str) -> ShortcutBinding {
-    let bindings = get_bindings(app);
-
-    let binding = bindings.get(id).unwrap().clone();
-
-    binding
-}
-
-pub fn get_history_limit(app: &AppHandle) -> usize {
-    let settings = get_settings(app);
-    settings.history_limit
-}
-
-pub fn get_recording_retention_period(app: &AppHandle) -> RecordingRetentionPeriod {
-    let settings = get_settings(app);
-    settings.recording_retention_period
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_settings_disable_auto_submit() {
-        let settings = get_default_settings();
-        assert!(!settings.auto_submit);
-        assert_eq!(settings.auto_submit_key, AutoSubmitKey::Enter);
+    pub fn set_start_hidden(&self, value: bool) {
+        self.gio_settings.set_boolean("start-hidden", value).ok();
     }
+
+    pub fn autostart_enabled(&self) -> bool {
+        self.gio_settings.boolean("autostart-enabled")
+    }
+
+    pub fn set_autostart_enabled(&self, value: bool) {
+        self.gio_settings.set_boolean("autostart-enabled", value).ok();
+    }
+
+    pub fn show_tray_icon(&self) -> bool {
+        self.gio_settings.boolean("show-tray-icon")
+    }
+
+    pub fn set_show_tray_icon(&self, value: bool) {
+        self.gio_settings.set_boolean("show-tray-icon", value).ok();
+    }
+
+    pub fn update_checks_enabled(&self) -> bool {
+        self.gio_settings.boolean("update-checks-enabled")
+    }
+
+    pub fn set_update_checks_enabled(&self, value: bool) {
+        self.gio_settings.set_boolean("update-checks-enabled", value).ok();
+    }
+
+    // Advanced Settings
+    pub fn paste_method(&self) -> PasteMethod {
+        let value = self.gio_settings.enum_("paste-method");
+        match value {
+            0 => PasteMethod::CtrlV,
+            1 => PasteMethod::Direct,
+            2 => PasteMethod::None,
+            3 => PasteMethod::ShiftInsert,
+            4 => PasteMethod::CtrlShiftV,
+            _ => PasteMethod::default(),
+        }
+    }
+
+    pub fn clipboard_handling(&self) -> ClipboardHandling {
+        let value = self.gio_settings.enum_("clipboard-handling");
+        match value {
+            0 => ClipboardHandling::DontModify,
+            1 => ClipboardHandling::CopyToClipboard,
+            _ => ClipboardHandling::default(),
+        }
+    }
+
+    pub fn auto_submit(&self) -> bool {
+        self.gio_settings.boolean("auto-submit")
+    }
+
+    pub fn set_auto_submit(&self, value: bool) {
+        self.gio_settings.set_boolean("auto-submit", value).ok();
+    }
+
+    pub fn auto_submit_key(&self) -> AutoSubmitKey {
+        let value = self.gio_settings.enum_("auto-submit-key");
+        match value {
+            0 => AutoSubmitKey::Enter,
+            1 => AutoSubmitKey::CtrlEnter,
+            2 => AutoSubmitKey::CmdEnter,
+            _ => AutoSubmitKey::default(),
+        }
+    }
+
+    pub fn paste_delay_ms(&self) -> u64 {
+        self.gio_settings.uint("paste-delay-ms") as u64
+    }
+
+    pub fn append_trailing_space(&self) -> bool {
+        self.gio_settings.boolean("append-trailing-space")
+    }
+
+    pub fn set_append_trailing_space(&self, value: bool) {
+        self.gio_settings.set_boolean("append-trailing-space", value).ok();
+    }
+
+    pub fn typing_tool(&self) -> TypingTool {
+        let value = self.gio_settings.enum_("typing-tool");
+        match value {
+            0 => TypingTool::Auto,
+            1 => TypingTool::Wtype,
+            2 => TypingTool::Kwtype,
+            3 => TypingTool::Dotool,
+            4 => TypingTool::Ydotool,
+            5 => TypingTool::Xdotool,
+            _ => TypingTool::default(),
+        }
+    }
+
+    pub fn custom_words(&self) -> Vec<String> {
+        self.gio_settings.strv("custom-words").iter().map(|s| s.to_string()).collect()
+    }
+
+    pub fn set_custom_words(&self, words: &[String]) {
+        let strv: Vec<&str> = words.iter().map(|s| s.as_str()).collect();
+        self.gio_settings.set_strv("custom-words", &strv).ok();
+    }
+
+    // History Settings
+    pub fn history_limit(&self) -> usize {
+        self.gio_settings.uint("history-limit") as usize
+    }
+
+    pub fn set_history_limit(&self, value: usize) {
+        self.gio_settings.set_uint("history-limit", value as u32).ok();
+    }
+
+    pub fn recording_retention_period(&self) -> RecordingRetentionPeriod {
+        let value = self.gio_settings.enum_("recording-retention-period");
+        match value {
+            0 => RecordingRetentionPeriod::Never,
+            1 => RecordingRetentionPeriod::PreserveLimit,
+            2 => RecordingRetentionPeriod::Days3,
+            3 => RecordingRetentionPeriod::Weeks2,
+            4 => RecordingRetentionPeriod::Months3,
+            _ => RecordingRetentionPeriod::default(),
+        }
+    }
+
+    // Debug Settings
+    pub fn debug_mode(&self) -> bool {
+        self.gio_settings.boolean("debug-mode")
+    }
+
+    pub fn set_debug_mode(&self, value: bool) {
+        self.gio_settings.set_boolean("debug-mode", value).ok();
+    }
+
+    pub fn log_level(&self) -> LogLevel {
+        let value = self.gio_settings.enum_("log-level");
+        match value {
+            0 => LogLevel::Trace,
+            1 => LogLevel::Debug,
+            2 => LogLevel::Info,
+            3 => LogLevel::Warn,
+            4 => LogLevel::Error,
+            _ => LogLevel::default(),
+        }
+    }
+
+    pub fn set_log_level(&self, level: LogLevel) {
+        let value = match level {
+            LogLevel::Trace => 0,
+            LogLevel::Debug => 1,
+            LogLevel::Info => 2,
+            LogLevel::Warn => 3,
+            LogLevel::Error => 4,
+        };
+        self.gio_settings.set_enum("log-level", value).ok();
+    }
+
+    pub fn word_correction_threshold(&self) -> f64 {
+        self.gio_settings.double("word-correction-threshold")
+    }
+
+    pub fn always_on_microphone(&self) -> bool {
+        self.gio_settings.boolean("always-on-microphone")
+    }
+
+    pub fn experimental_enabled(&self) -> bool {
+        self.gio_settings.boolean("experimental-enabled")
+    }
+
+    pub fn set_experimental_enabled(&self, value: bool) {
+        self.gio_settings.set_boolean("experimental-enabled", value).ok();
+    }
+
+    // Post-Processing Settings
+    pub fn post_process_enabled(&self) -> bool {
+        self.gio_settings.boolean("post-process-enabled")
+    }
+
+    pub fn set_post_process_enabled(&self, value: bool) {
+        self.gio_settings.set_boolean("post-process-enabled", value).ok();
+    }
+
+    pub fn post_process_provider_id(&self) -> String {
+        self.gio_settings.string("post-process-provider-id").to_string()
+    }
+
+    pub fn set_post_process_provider_id(&self, value: &str) {
+        self.gio_settings.set_string("post-process-provider-id", value).ok();
+    }
+
+    pub fn post_process_api_keys(&self) -> HashMap<String, String> {
+        let json = self.gio_settings.string("post-process-api-keys");
+        serde_json::from_str(json.as_str()).unwrap_or_default()
+    }
+
+    pub fn set_post_process_api_keys(&self, keys: HashMap<String, String>) {
+        let json = serde_json::to_string(&keys).unwrap_or_default();
+        self.gio_settings.set_string("post-process-api-keys", &json).ok();
+    }
+
+    pub fn post_process_models(&self) -> HashMap<String, String> {
+        let json = self.gio_settings.string("post-process-models");
+        serde_json::from_str(json.as_str()).unwrap_or_default()
+    }
+
+    pub fn set_post_process_models(&self, models: HashMap<String, String>) {
+        let json = serde_json::to_string(&models).unwrap_or_default();
+        self.gio_settings.set_string("post-process-models", &json).ok();
+    }
+
+    pub fn post_process_prompts(&self) -> Vec<LLMPrompt> {
+        let json = self.gio_settings.string("post-process-prompts");
+        serde_json::from_str(json.as_str()).unwrap_or_default()
+    }
+
+    pub fn set_post_process_prompts(&self, prompts: Vec<LLMPrompt>) {
+        let json = serde_json::to_string(&prompts).unwrap_or_default();
+        self.gio_settings.set_string("post-process-prompts", &json).ok();
+    }
+
+    pub fn post_process_selected_prompt_id(&self) -> Option<String> {
+        let value = self.gio_settings.string("post-process-selected-prompt-id");
+        if value.is_empty() { None } else { Some(value.to_string()) }
+    }
+
+    pub fn set_post_process_selected_prompt_id(&self, value: Option<&str>) {
+        self.gio_settings.set_string("post-process-selected-prompt-id", value.unwrap_or("")).ok();
+    }
+
+    // UI Settings
+    pub fn app_language(&self) -> String {
+        self.gio_settings.string("app-language").to_string()
+    }
+
+    pub fn set_app_language(&self, value: &str) {
+        self.gio_settings.set_string("app-language", value).ok();
+    }
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub fn get_default_settings() -> Settings {
+    Settings::new()
 }

@@ -2,50 +2,56 @@
 //!
 //! This module provides a D-Bus interface that allows the handy-ibus engine
 //! to control Handy's transcription functionality.
-//!
-//! # D-Bus Interface
-//!
-//! **Bus Name:** `com.handy.Transcription`
-//! **Object Path:** `/com/handy/Transcription`
-//!
-//! ## Methods
-//! - `StartRecording()` - Start recording audio
-//! - `StopRecording()` → `s` (text) - Stop recording and return transcribed text
-//! - `CancelRecording()` - Cancel current recording without transcription
-//! - `GetState()` → `(bb)` - Returns (is_recording, is_model_loaded)
-//!
-//! ## Signals
-//! - `TranscriptionReady(s: text)` - Emitted when transcription is complete
-//! - `RecordingStateChanged(b: is_recording)` - Emitted when recording state changes
-//! - `Error(s: message)` - Emitted when an error occurs
 
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::history::HistoryManager;
 use crate::managers::transcription::TranscriptionManager;
-use crate::settings::get_settings;
-use crate::tray::{change_tray_icon, TrayIconState};
+use crate::settings::Settings;
 use log::{debug, error, info, warn};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tauri::{AppHandle, Manager};
 use zbus::fdo;
 use zbus::object_server::SignalEmitter;
 use zbus::Connection;
 
-/// State for the D-Bus server
+/// Shared state for the D-Bus server and handlers
+pub struct HandyState {
+    pub settings: Settings,
+    pub recording_manager: Arc<AudioRecordingManager>,
+    pub transcription_manager: Arc<TranscriptionManager>,
+    pub history_manager: Arc<HistoryManager>,
+    pub is_recording: AtomicBool,
+}
+
+impl HandyState {
+    pub fn new(
+        settings: Settings,
+        recording_manager: Arc<AudioRecordingManager>,
+        transcription_manager: Arc<TranscriptionManager>,
+        history_manager: Arc<HistoryManager>,
+    ) -> Self {
+        Self {
+            settings,
+            recording_manager,
+            transcription_manager,
+            history_manager,
+            is_recording: AtomicBool::new(false),
+        }
+    }
+}
+
+/// D-Bus state for connection management
 pub struct HandyDbusState {
-    /// Whether the D-Bus server is running
     running: AtomicBool,
-    /// The D-Bus connection handle
-    connection: std::sync::Mutex<Option<Connection>>,
+    connection: Mutex<Option<Connection>>,
 }
 
 impl HandyDbusState {
     pub fn new() -> Self {
         Self {
             running: AtomicBool::new(false),
-            connection: std::sync::Mutex::new(None),
+            connection: Mutex::new(None),
         }
     }
 
@@ -56,7 +62,8 @@ impl HandyDbusState {
 
 /// The D-Bus interface for Handy transcription
 struct HandyTranscription {
-    app: AppHandle,
+    state: Arc<HandyState>,
+    dbus_state: Arc<HandyDbusState>,
 }
 
 #[zbus::interface(name = "com.handy.Transcription")]
@@ -66,37 +73,19 @@ impl HandyTranscription {
         debug!("D-Bus: StartRecording called");
         let start_time = Instant::now();
 
-        let tm = self.app.state::<Arc<TranscriptionManager>>();
-        tm.initiate_model_load();
+        self.state.transcription_manager.initiate_model_load();
 
-        let rm = self.app.state::<Arc<AudioRecordingManager>>();
-        let settings = get_settings(&self.app);
-
-        change_tray_icon(&self.app, TrayIconState::Recording);
-
-        let is_always_on = settings.always_on_microphone;
+        let is_always_on = self.state.settings.always_on_microphone();
         let recording_started = if is_always_on {
-            let rm_clone = Arc::clone(&rm);
-            let app_clone = self.app.clone();
-            std::thread::spawn(move || {
-                crate::audio_feedback::play_feedback_sound_blocking(
-                    &app_clone,
-                    crate::audio_feedback::SoundType::Start,
-                );
-                rm_clone.apply_mute();
-            });
-            rm.try_start_recording("ibus")
+            self.state.recording_manager.try_start_recording("ibus")
         } else {
-            if rm.try_start_recording("ibus") {
-                let app_clone = self.app.clone();
-                let rm_clone = Arc::clone(&rm);
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    crate::audio_feedback::play_feedback_sound_blocking(
-                        &app_clone,
-                        crate::audio_feedback::SoundType::Start,
-                    );
-                    rm_clone.apply_mute();
+            if self.state.recording_manager.try_start_recording("ibus") {
+                std::thread::spawn({
+                    let rm = self.state.recording_manager.clone();
+                    move || {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        rm.apply_mute();
+                    }
                 });
                 true
             } else {
@@ -105,11 +94,11 @@ impl HandyTranscription {
         };
 
         if recording_started {
+            self.state.is_recording.store(true, Ordering::SeqCst);
             self.emit_recording_state_changed(true).await?;
             info!("D-Bus: Recording started in {:?}", start_time.elapsed());
             Ok(())
         } else {
-            change_tray_icon(&self.app, TrayIconState::Idle);
             Err(fdo::Error::Failed("Failed to start recording".to_string()))
         }
     }
@@ -119,19 +108,9 @@ impl HandyTranscription {
         debug!("D-Bus: StopRecording called");
         let stop_time = Instant::now();
 
-        let rm = self.app.state::<Arc<AudioRecordingManager>>();
-        let tm = self.app.state::<Arc<TranscriptionManager>>();
-        let hm = self.app.state::<Arc<HistoryManager>>();
+        self.state.recording_manager.remove_mute();
 
-        change_tray_icon(&self.app, TrayIconState::Transcribing);
-
-        rm.remove_mute();
-        crate::audio_feedback::play_feedback_sound(
-            &self.app,
-            crate::audio_feedback::SoundType::Stop,
-        );
-
-        if let Some(samples) = rm.stop_recording("ibus") {
+        if let Some(samples) = self.state.recording_manager.stop_recording("ibus") {
             debug!(
                 "D-Bus: Recording stopped, {} samples retrieved in {:?}",
                 samples.len(),
@@ -139,7 +118,7 @@ impl HandyTranscription {
             );
 
             let transcription_time = Instant::now();
-            match tm.transcribe(samples.clone()) {
+            match self.state.transcription_manager.transcribe(samples.clone()) {
                 Ok(transcription) => {
                     debug!(
                         "D-Bus: Transcription completed in {:?}: '{}'",
@@ -147,12 +126,12 @@ impl HandyTranscription {
                         transcription
                     );
 
-                    let settings = get_settings(&self.app);
                     let mut final_text = transcription.clone();
 
                     // Handle Chinese variant conversion
-                    let is_simplified = settings.selected_language == "zh-Hans";
-                    let is_traditional = settings.selected_language == "zh-Hant";
+                    let lang = self.state.settings.selected_language();
+                    let is_simplified = lang == "zh-Hans";
+                    let is_traditional = lang == "zh-Hant";
 
                     if is_simplified || is_traditional {
                         let config = if is_simplified {
@@ -167,11 +146,11 @@ impl HandyTranscription {
                     }
 
                     // Save to history
-                    let hm_clone = Arc::clone(&hm);
+                    let hm = self.state.history_manager.clone();
                     let transcription_for_history = transcription.clone();
                     let samples_for_history = samples;
-                    tauri::async_runtime::spawn(async move {
-                        if let Err(e) = hm_clone
+                    tokio::spawn(async move {
+                        if let Err(e) = hm
                             .save_transcription(
                                 samples_for_history,
                                 transcription_for_history,
@@ -184,25 +163,23 @@ impl HandyTranscription {
                         }
                     });
 
+                    self.state.is_recording.store(false, Ordering::SeqCst);
                     self.emit_recording_state_changed(false).await?;
-                    change_tray_icon(&self.app, TrayIconState::Idle);
-
-                    // Emit the transcription ready signal
                     self.emit_transcription_ready(&final_text).await?;
 
                     Ok(final_text)
                 }
                 Err(err) => {
                     error!("D-Bus: Transcription error: {}", err);
+                    self.state.is_recording.store(false, Ordering::SeqCst);
                     self.emit_recording_state_changed(false).await?;
-                    change_tray_icon(&self.app, TrayIconState::Idle);
                     Err(fdo::Error::Failed(format!("Transcription failed: {}", err)))
                 }
             }
         } else {
             warn!("D-Bus: No samples retrieved from recording stop");
+            self.state.is_recording.store(false, Ordering::SeqCst);
             self.emit_recording_state_changed(false).await?;
-            change_tray_icon(&self.app, TrayIconState::Idle);
             Ok(String::new())
         }
     }
@@ -211,17 +188,11 @@ impl HandyTranscription {
     async fn cancel_recording(&self) -> fdo::Result<()> {
         debug!("D-Bus: CancelRecording called");
 
-        let rm = self.app.state::<Arc<AudioRecordingManager>>();
-        rm.remove_mute();
-        rm.cancel_recording();
+        self.state.recording_manager.remove_mute();
+        self.state.recording_manager.cancel_recording();
 
-        crate::audio_feedback::play_feedback_sound(
-            &self.app,
-            crate::audio_feedback::SoundType::Stop,
-        );
-
+        self.state.is_recording.store(false, Ordering::SeqCst);
         self.emit_recording_state_changed(false).await?;
-        change_tray_icon(&self.app, TrayIconState::Idle);
 
         info!("D-Bus: Recording cancelled");
         Ok(())
@@ -229,26 +200,20 @@ impl HandyTranscription {
 
     /// Get current state: (is_recording, is_model_loaded)
     async fn get_state(&self) -> fdo::Result<(bool, bool)> {
-        let rm = self.app.state::<Arc<AudioRecordingManager>>();
-        let tm = self.app.state::<Arc<TranscriptionManager>>();
-
-        let is_recording = rm.is_recording();
-        let is_model_loaded = tm.is_model_loaded();
+        let is_recording = self.state.is_recording.load(Ordering::SeqCst);
+        let is_model_loaded = self.state.transcription_manager.is_model_loaded();
 
         Ok((is_recording, is_model_loaded))
     }
 
     /// Get the currently selected language
     async fn get_language(&self) -> fdo::Result<String> {
-        let settings = get_settings(&self.app);
-        Ok(settings.selected_language.clone())
+        Ok(self.state.settings.selected_language())
     }
 
     /// Set the language for transcription
     async fn set_language(&self, language: String) -> fdo::Result<()> {
-        let mut settings = get_settings(&self.app);
-        settings.selected_language = language;
-        crate::settings::write_settings(&self.app, settings);
+        self.state.settings.set_selected_language(&language);
         Ok(())
     }
 
@@ -269,17 +234,12 @@ impl HandyTranscription {
 }
 
 impl HandyTranscription {
-    fn new(app: AppHandle) -> Self {
-        Self { app }
+    fn new(state: Arc<HandyState>, dbus_state: Arc<HandyDbusState>) -> Self {
+        Self { state, dbus_state }
     }
 
     async fn emit_transcription_ready(&self, text: &str) -> fdo::Result<()> {
-        let connection = self
-            .app
-            .try_state::<HandyDbusState>()
-            .and_then(|state| state.connection.lock().ok().and_then(|c| c.clone()));
-
-        if let Some(conn) = connection {
+        if let Some(conn) = self.dbus_state.connection.lock().ok().and_then(|c| c.clone()) {
             if let Err(e) = Self::transcription_ready(&conn.object_server(), text).await {
                 error!("Failed to emit TranscriptionReady signal: {}", e);
             }
@@ -288,12 +248,7 @@ impl HandyTranscription {
     }
 
     async fn emit_recording_state_changed(&self, is_recording: bool) -> fdo::Result<()> {
-        let connection = self
-            .app
-            .try_state::<HandyDbusState>()
-            .and_then(|state| state.connection.lock().ok().and_then(|c| c.clone()));
-
-        if let Some(conn) = connection {
+        if let Some(conn) = self.dbus_state.connection.lock().ok().and_then(|c| c.clone()) {
             if let Err(e) = Self::recording_state_changed(&conn.object_server(), is_recording).await
             {
                 error!("Failed to emit RecordingStateChanged signal: {}", e);
@@ -304,17 +259,10 @@ impl HandyTranscription {
 }
 
 /// Start the D-Bus server
-pub async fn start_dbus_server(app: &AppHandle) -> Result<(), String> {
+pub async fn start_dbus_server(state: Arc<HandyState>) -> Result<Arc<HandyDbusState>, String> {
     info!("Starting D-Bus server for IBus integration...");
 
-    let dbus_state = app.state::<HandyDbusState>();
-
-    if dbus_state.is_running() {
-        warn!("D-Bus server is already running");
-        return Ok(());
-    }
-
-    let app_clone = app.clone();
+    let dbus_state = Arc::new(HandyDbusState::new());
 
     // Build the connection
     let connection = Connection::session()
@@ -328,7 +276,7 @@ pub async fn start_dbus_server(app: &AppHandle) -> Result<(), String> {
         .map_err(|e| format!("Failed to request bus name: {}", e))?;
 
     // Create the interface
-    let transcription = HandyTranscription::new(app_clone);
+    let transcription = HandyTranscription::new(state, dbus_state.clone());
 
     // Register the object
     connection
@@ -349,14 +297,12 @@ pub async fn start_dbus_server(app: &AppHandle) -> Result<(), String> {
     dbus_state.running.store(true, Ordering::SeqCst);
 
     info!("D-Bus server started successfully on com.handy.Transcription");
-    Ok(())
+    Ok(dbus_state)
 }
 
 /// Stop the D-Bus server
-pub async fn stop_dbus_server(app: &AppHandle) -> Result<(), String> {
+pub async fn stop_dbus_server(dbus_state: &HandyDbusState) -> Result<(), String> {
     info!("Stopping D-Bus server...");
-
-    let dbus_state = app.state::<HandyDbusState>();
 
     if !dbus_state.is_running() {
         return Ok(());

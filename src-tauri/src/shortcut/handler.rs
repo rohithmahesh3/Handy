@@ -1,91 +1,23 @@
-//! Shared shortcut event handling logic
-//!
-//! This module contains the common logic for handling shortcut events,
-//! used by both the Tauri and handy-keys implementations.
+pub fn init_shortcuts() {
+    log::info!("Shortcuts not needed in IBus mode");
+}
 
-use log::warn;
-use std::sync::Arc;
-use tauri::{AppHandle, Manager};
+pub fn change_binding(_id: &str, _binding: &str) -> Result<(), String> {
+    Ok(())
+}
 
-use crate::actions::ACTION_MAP;
-use crate::managers::audio::AudioRecordingManager;
-use crate::settings::get_settings;
-use crate::ManagedToggleState;
+pub fn reset_binding(_id: &str) -> Result<(), String> {
+    Ok(())
+}
 
-/// Handle a shortcut event from either implementation.
-///
-/// This function contains the shared logic for:
-/// - Looking up the action in ACTION_MAP
-/// - Handling the cancel binding (only fires when recording)
-/// - Handling push-to-talk mode (start on press, stop on release)
-/// - Handling toggle mode (toggle state on press only)
-///
-/// # Arguments
-/// * `app` - The Tauri app handle
-/// * `binding_id` - The ID of the binding (e.g., "transcribe", "cancel")
-/// * `hotkey_string` - The string representation of the hotkey
-/// * `is_pressed` - Whether this is a key press (true) or release (false)
-pub fn handle_shortcut_event(
-    app: &AppHandle,
-    binding_id: &str,
-    hotkey_string: &str,
-    is_pressed: bool,
-) {
-    let settings = get_settings(app);
+pub fn suspend_binding(_id: &str) {
+    log::debug!("Suspend binding: {}", _id);
+}
 
-    let Some(action) = ACTION_MAP.get(binding_id) else {
-        warn!(
-            "No action defined in ACTION_MAP for shortcut ID '{}'. Shortcut: '{}', Pressed: {}",
-            binding_id, hotkey_string, is_pressed
-        );
-        return;
-    };
+pub fn resume_binding(_id: &str) {
+    log::debug!("Resume binding: {}", _id);
+}
 
-    // Cancel binding: only fires when recording and key is pressed
-    if binding_id == "cancel" {
-        let audio_manager = app.state::<Arc<AudioRecordingManager>>();
-        if audio_manager.is_recording() && is_pressed {
-            action.start(app, binding_id, hotkey_string);
-        }
-        return;
-    }
-
-    // Push-to-talk mode: start on press, stop on release
-    if settings.push_to_talk {
-        if is_pressed {
-            action.start(app, binding_id, hotkey_string);
-        } else {
-            action.stop(app, binding_id, hotkey_string);
-        }
-        return;
-    }
-
-    // Toggle mode: toggle state on press only
-    if is_pressed {
-        // Determine action and update state while holding the lock,
-        // but RELEASE the lock before calling the action to avoid deadlocks.
-        // (Actions may need to acquire the lock themselves, e.g., cancel_current_operation)
-        let should_start: bool;
-        {
-            let toggle_state_manager = app.state::<ManagedToggleState>();
-            let mut states = toggle_state_manager
-                .lock()
-                .expect("Failed to lock toggle state manager");
-
-            let is_currently_active = states
-                .active_toggles
-                .entry(binding_id.to_string())
-                .or_insert(false);
-
-            should_start = !*is_currently_active;
-            *is_currently_active = should_start;
-        } // Lock released here
-
-        // Now call the action without holding the lock
-        if should_start {
-            action.start(app, binding_id, hotkey_string);
-        } else {
-            action.stop(app, binding_id, hotkey_string);
-        }
-    }
+pub fn unregister_cancel_shortcut() {
+    log::debug!("Unregister cancel shortcut");
 }

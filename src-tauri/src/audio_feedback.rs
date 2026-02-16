@@ -1,97 +1,71 @@
-use crate::settings::SoundTheme;
-use crate::settings::{self, AppSettings};
-use cpal::traits::{DeviceTrait, HostTrait};
+use crate::settings::{Settings, SoundTheme};
+use cpal::traits::HostTrait;
 use log::{debug, error, warn};
 use rodio::OutputStreamBuilder;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::thread;
-use tauri::{AppHandle, Manager};
 
 pub enum SoundType {
     Start,
     Stop,
 }
 
-fn resolve_sound_path(
-    app: &AppHandle,
-    settings: &AppSettings,
-    sound_type: SoundType,
-) -> Option<PathBuf> {
-    let sound_file = get_sound_path(settings, sound_type);
-    let base_dir = get_sound_base_dir(settings);
-    app.path().resolve(&sound_file, base_dir).ok()
-}
+fn get_sound_path(settings: &Settings, sound_type: SoundType) -> PathBuf {
+    let filename = match (settings.sound_theme(), sound_type) {
+        (SoundTheme::Custom, SoundType::Start) => "custom_start.wav",
+        (SoundTheme::Custom, SoundType::Stop) => "custom_stop.wav",
+        (_, SoundType::Start) => "marimba_start.wav",
+        (_, SoundType::Stop) => "marimba_stop.wav",
+    };
 
-fn get_sound_path(settings: &AppSettings, sound_type: SoundType) -> String {
-    match (settings.sound_theme, sound_type) {
-        (SoundTheme::Custom, SoundType::Start) => "custom_start.wav".to_string(),
-        (SoundTheme::Custom, SoundType::Stop) => "custom_stop.wav".to_string(),
-        (_, SoundType::Start) => settings.sound_theme.to_start_path(),
-        (_, SoundType::Stop) => settings.sound_theme.to_stop_path(),
+    let data_dir = std::env::var("XDG_DATA_HOME")
+        .map(|p| PathBuf::from(p).join("handy").join("sounds"))
+        .unwrap_or_else(|_| {
+            PathBuf::from("/usr/share/handy/sounds")
+        });
+
+    if settings.sound_theme() == SoundTheme::Custom {
+        data_dir.join(filename)
+    } else {
+        PathBuf::from("/usr/share/handy/sounds").join(filename)
     }
 }
 
-fn get_sound_base_dir(settings: &AppSettings) -> tauri::path::BaseDirectory {
-    match settings.sound_theme {
-        SoundTheme::Custom => tauri::path::BaseDirectory::AppData,
-        _ => tauri::path::BaseDirectory::Resource,
-    }
-}
-
-pub fn play_feedback_sound(app: &AppHandle, sound_type: SoundType) {
-    let settings = settings::get_settings(app);
-    if !settings.audio_feedback {
+pub fn play_feedback_sound(settings: &Settings, sound_type: SoundType) {
+    if !settings.audio_feedback() {
         return;
     }
-    if let Some(path) = resolve_sound_path(app, &settings, sound_type) {
-        play_sound_async(app, path);
-    }
-}
-
-pub fn play_feedback_sound_blocking(app: &AppHandle, sound_type: SoundType) {
-    let settings = settings::get_settings(app);
-    if !settings.audio_feedback {
-        return;
-    }
-    if let Some(path) = resolve_sound_path(app, &settings, sound_type) {
-        play_sound_blocking(app, &path);
-    }
-}
-
-pub fn play_test_sound(app: &AppHandle, sound_type: SoundType) {
-    let settings = settings::get_settings(app);
-    if let Some(path) = resolve_sound_path(app, &settings, sound_type) {
-        play_sound_blocking(app, &path);
-    }
-}
-
-fn play_sound_async(app: &AppHandle, path: PathBuf) {
-    let app_handle = app.clone();
+    let path = get_sound_path(settings, sound_type);
+    let settings = settings.clone();
     thread::spawn(move || {
-        if let Err(e) = play_sound_at_path(&app_handle, path.as_path()) {
+        if let Err(e) = play_audio_file(&path, settings.selected_output_device().as_deref(), settings.audio_feedback_volume()) {
             error!("Failed to play sound '{}': {}", path.display(), e);
         }
     });
 }
 
-fn play_sound_blocking(app: &AppHandle, path: &Path) {
-    if let Err(e) = play_sound_at_path(app, path) {
+pub fn play_feedback_sound_blocking(settings: &Settings, sound_type: SoundType) {
+    if !settings.audio_feedback() {
+        return;
+    }
+    let path = get_sound_path(settings, sound_type);
+    if let Err(e) = play_audio_file(&path, settings.selected_output_device().as_deref(), settings.audio_feedback_volume()) {
         error!("Failed to play sound '{}': {}", path.display(), e);
     }
 }
 
-fn play_sound_at_path(app: &AppHandle, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let settings = settings::get_settings(app);
-    let volume = settings.audio_feedback_volume;
-    let selected_device = settings.selected_output_device.clone();
-    play_audio_file(path, selected_device, volume)
+pub fn play_test_sound(settings: &Settings, sound_type: SoundType) {
+    let path = get_sound_path(settings, sound_type);
+    if let Err(e) = play_audio_file(&path, settings.selected_output_device().as_deref(), settings.audio_feedback_volume()) {
+        error!("Failed to play sound '{}': {}", path.display(), e);
+    }
 }
 
 fn play_audio_file(
-    path: &std::path::Path,
-    selected_device: Option<String>,
+    path: &Path,
+    selected_device: Option<&str>,
     volume: f32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let stream_builder = if let Some(device_name) = selected_device {

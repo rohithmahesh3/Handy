@@ -5,7 +5,7 @@ VERSION="0.7.5"
 RELEASE="1"
 DIST="fc40"
 
-echo "=== Building Handy ${VERSION}-${RELEASE}.${DIST} ==="
+echo "=== Building ibus-handy ${VERSION}-${RELEASE}.${DIST} ==="
 
 # Check for required commands
 command -v cargo >/dev/null 2>&1 || { echo "Error: cargo not found. Please install Rust."; exit 1; }
@@ -18,8 +18,8 @@ cd "$SCRIPT_DIR"
 
 # Create source tarball
 echo "Creating source tarball..."
-TARBALL="handy-${VERSION}.tar.gz"
-git archive --format=tar.gz --prefix=Handy-fedora-gnome/ HEAD > "$TARBALL"
+TARBALL="ibus-handy-${VERSION}.tar.gz"
+git archive --format=tar.gz --prefix=ibus-handy-${VERSION}/ HEAD > "$TARBALL"
 echo "Created $TARBALL"
 
 # Build SRPM
@@ -30,9 +30,9 @@ rpmbuild -bs \
     --define "_specdir $(pwd)" \
     --define "_srcrpmdir $(pwd)" \
     --define "_rpmdir $(pwd)" \
-    packaging/fedora/handy.spec
+    packaging/fedora/ibus-handy.spec
 
-SRPM=$(ls handy-${VERSION}-${RELEASE}*.src.rpm 2>/dev/null | head -1)
+SRPM=$(ls ibus-handy-${VERSION}-${RELEASE}*.src.rpm 2>/dev/null | head -1)
 if [ -n "$SRPM" ]; then
     echo "Created SRPM: $SRPM"
 else
@@ -49,16 +49,16 @@ rpmbuild -bb \
     --define "_srcrpmdir $(pwd)" \
     --define "_rpmdir $(pwd)" \
     --define "dist .${DIST}" \
-    packaging/fedora/handy.spec
+    packaging/fedora/ibus-handy.spec
 
 echo ""
 echo "=== Build Complete ==="
 echo "SRPM: $SRPM"
 echo "RPM packages:"
-find . -name "handy-${VERSION}-${RELEASE}.${DIST}*.rpm" -type f 2>/dev/null | while read rpm; do
+find . -name "ibus-handy-${VERSION}-${RELEASE}.${DIST}*.rpm" -type f 2>/dev/null | while read rpm; do
     echo "  - $rpm"
 done
 
 echo ""
 echo "To install:"
-echo "  sudo dnf install ./handy-${VERSION}-${RELEASE}.${DIST}.x86_64.rpm"
+echo "  sudo dnf install ./ibus-handy-${VERSION}-${RELEASE}.${DIST}.x86_64.rpm"
