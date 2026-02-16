@@ -1,10 +1,10 @@
 use gtk::prelude::*;
-use gtk::{Widget, ScrolledWindow, Box, Orientation, Label, Switch, ComboBoxText, Scale, Button};
-use libadwaita::{PreferencesGroup, ActionRow, ExpanderRow};
+use gtk::{Widget, ScrolledWindow, Box, Orientation, Label, Switch, ComboBoxText};
+use libadwaita::{PreferencesGroup, ActionRow};
 use std::sync::Arc;
 
 use crate::app::AppState;
-use crate::settings::{ModelUnloadTimeout, PasteMethod, TypingTool};
+use crate::settings::ModelUnloadTimeout;
 use super::Page;
 
 pub struct AdvancedPage {
@@ -130,102 +130,6 @@ impl AdvancedPage {
         model_group.add(&timeout_row);
 
         main_box.append(&model_group);
-
-        let output_group = PreferencesGroup::builder()
-            .title("Output")
-            .build();
-
-        let paste_method_row = ActionRow::builder()
-            .title("Paste Method")
-            .subtitle("How to insert transcribed text")
-            .build();
-
-        let paste_combo = ComboBoxText::new();
-        let paste_methods = [
-            (PasteMethod::Direct, "Type directly"),
-            (PasteMethod::CtrlV, "Ctrl+V"),
-            (PasteMethod::CtrlShiftV, "Ctrl+Shift+V"),
-            (PasteMethod::ShiftInsert, "Shift+Insert"),
-            (PasteMethod::None, "No paste (clipboard only)"),
-        ];
-
-        let current_paste = state.settings.paste_method();
-        let mut paste_index = 0;
-        for (i, (method, name)) in paste_methods.iter().enumerate() {
-            paste_combo.append(Some(&format!("{}", i)), name);
-            if *method == current_paste {
-                paste_index = i as u32;
-            }
-        }
-        paste_combo.set_active(Some(paste_index));
-
-        let state_clone = state.clone();
-        paste_combo.connect_changed(move |combo| {
-            if let Some(id) = combo.active_id() {
-                if let Ok(idx) = id.parse::<usize>() {
-                    if idx < paste_methods.len() {
-                        state_clone.settings.set_paste_method(paste_methods[idx].0);
-                    }
-                }
-            }
-        });
-        paste_method_row.add_suffix(&paste_combo);
-        output_group.add(&paste_method_row);
-
-        let typing_tool_row = ActionRow::builder()
-            .title("Typing Tool")
-            .subtitle("Tool for typing text (wtype recommended)")
-            .build();
-
-        let typing_combo = ComboBoxText::new();
-        let typing_tools = [
-            (TypingTool::Auto, "Auto"),
-            (TypingTool::Wtype, "wtype"),
-            (TypingTool::Kwtype, "kwtype"),
-            (TypingTool::Dotool, "dotool"),
-            (TypingTool::Ydotool, "ydotool"),
-        ];
-
-        let current_tool = state.settings.typing_tool();
-        let mut tool_index = 0;
-        for (i, (tool, name)) in typing_tools.iter().enumerate() {
-            typing_combo.append(Some(&format!("{}", i)), name);
-            if *tool == current_tool {
-                tool_index = i as u32;
-            }
-        }
-        typing_combo.set_active(Some(tool_index));
-
-        let state_clone = state.clone();
-        typing_combo.connect_changed(move |combo| {
-            if let Some(id) = combo.active_id() {
-                if let Ok(idx) = id.parse::<usize>() {
-                    if idx < typing_tools.len() {
-                        state_clone.settings.set_typing_tool(typing_tools[idx].0);
-                    }
-                }
-            }
-        });
-        typing_tool_row.add_suffix(&typing_combo);
-        output_group.add(&typing_tool_row);
-
-        let space_row = ActionRow::builder()
-            .title("Append Trailing Space")
-            .subtitle("Add space after each transcription")
-            .build();
-
-        let space_switch = Switch::builder()
-            .active(state.settings.append_trailing_space())
-            .build();
-        
-        let state_clone = state.clone();
-        space_switch.connect_active_notify(move |switch| {
-            state_clone.settings.set_append_trailing_space(switch.is_active());
-        });
-        space_row.add_suffix(&space_switch);
-        output_group.add(&space_row);
-
-        main_box.append(&output_group);
 
         let debug_group = PreferencesGroup::builder()
             .title("Debug")

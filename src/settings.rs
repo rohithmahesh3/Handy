@@ -87,65 +87,6 @@ impl ModelUnloadTimeout {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PasteMethod {
-    CtrlV,
-    Direct,
-    None,
-    ShiftInsert,
-    CtrlShiftV,
-}
-
-impl Default for PasteMethod {
-    fn default() -> Self {
-        PasteMethod::Direct
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClipboardHandling {
-    DontModify,
-    CopyToClipboard,
-}
-
-impl Default for ClipboardHandling {
-    fn default() -> Self {
-        ClipboardHandling::DontModify
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AutoSubmitKey {
-    Enter,
-    CtrlEnter,
-    SuperEnter,
-}
-
-impl Default for AutoSubmitKey {
-    fn default() -> Self {
-        AutoSubmitKey::Enter
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TypingTool {
-    Auto,
-    Wtype,
-    Kwtype,
-    Dotool,
-    Ydotool,
-}
-
-impl Default for TypingTool {
-    fn default() -> Self {
-        TypingTool::Auto
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShortcutBinding {
     pub id: String,
@@ -180,17 +121,6 @@ impl Settings {
     pub fn new() -> Self {
         let gio_settings = GioSettings::new(SETTINGS_SCHEMA);
         Self { gio_settings }
-    }
-
-    // Bindings
-    pub fn bindings(&self) -> HashMap<String, ShortcutBinding> {
-        let json = self.gio_settings.string("bindings");
-        serde_json::from_str(json.as_str()).unwrap_or_default()
-    }
-
-    pub fn set_bindings(&self, bindings: HashMap<String, ShortcutBinding>) {
-        let json = serde_json::to_string(&bindings).unwrap_or_default();
-        self.gio_settings.set_string("bindings", &json).ok();
     }
 
     // General Settings
@@ -350,109 +280,7 @@ impl Settings {
         self.gio_settings.set_boolean("update-checks-enabled", value).ok();
     }
 
-    // Advanced Settings
-    pub fn paste_method(&self) -> PasteMethod {
-        let value = self.gio_settings.enum_("paste-method");
-        match value {
-            0 => PasteMethod::CtrlV,
-            1 => PasteMethod::Direct,
-            2 => PasteMethod::None,
-            3 => PasteMethod::ShiftInsert,
-            4 => PasteMethod::CtrlShiftV,
-            _ => PasteMethod::default(),
-        }
-    }
-
-    pub fn set_paste_method(&self, method: PasteMethod) {
-        let value = match method {
-            PasteMethod::CtrlV => 0,
-            PasteMethod::Direct => 1,
-            PasteMethod::None => 2,
-            PasteMethod::ShiftInsert => 3,
-            PasteMethod::CtrlShiftV => 4,
-        };
-        self.gio_settings.set_enum("paste-method", value).ok();
-    }
-
-    pub fn clipboard_handling(&self) -> ClipboardHandling {
-        let value = self.gio_settings.enum_("clipboard-handling");
-        match value {
-            0 => ClipboardHandling::DontModify,
-            1 => ClipboardHandling::CopyToClipboard,
-            _ => ClipboardHandling::default(),
-        }
-    }
-
-    pub fn set_clipboard_handling(&self, handling: ClipboardHandling) {
-        let value = match handling {
-            ClipboardHandling::DontModify => 0,
-            ClipboardHandling::CopyToClipboard => 1,
-        };
-        self.gio_settings.set_enum("clipboard-handling", value).ok();
-    }
-
-    pub fn auto_submit(&self) -> bool {
-        self.gio_settings.boolean("auto-submit")
-    }
-
-    pub fn set_auto_submit(&self, value: bool) {
-        self.gio_settings.set_boolean("auto-submit", value).ok();
-    }
-
-    pub fn auto_submit_key(&self) -> AutoSubmitKey {
-        let value = self.gio_settings.enum_("auto-submit-key");
-        match value {
-            0 => AutoSubmitKey::Enter,
-            1 => AutoSubmitKey::CtrlEnter,
-            2 => AutoSubmitKey::SuperEnter,
-            _ => AutoSubmitKey::default(),
-        }
-    }
-
-    pub fn set_auto_submit_key(&self, key: AutoSubmitKey) {
-        let value = match key {
-            AutoSubmitKey::Enter => 0,
-            AutoSubmitKey::CtrlEnter => 1,
-            AutoSubmitKey::SuperEnter => 2,
-        };
-        self.gio_settings.set_enum("auto-submit-key", value).ok();
-    }
-
-    pub fn paste_delay_ms(&self) -> u64 {
-        self.gio_settings.uint("paste-delay-ms") as u64
-    }
-
-    pub fn append_trailing_space(&self) -> bool {
-        self.gio_settings.boolean("append-trailing-space")
-    }
-
-    pub fn set_append_trailing_space(&self, value: bool) {
-        self.gio_settings.set_boolean("append-trailing-space", value).ok();
-    }
-
-    pub fn typing_tool(&self) -> TypingTool {
-        let value = self.gio_settings.enum_("typing-tool");
-        match value {
-            0 => TypingTool::Auto,
-            1 => TypingTool::Wtype,
-            2 => TypingTool::Kwtype,
-            3 => TypingTool::Dotool,
-            4 => TypingTool::Ydotool,
-            _ => TypingTool::default(),
-        }
-    }
-
-    pub fn set_typing_tool(&self, tool: TypingTool) {
-        let value = match tool {
-            TypingTool::Auto => 0,
-            TypingTool::Wtype => 1,
-            TypingTool::Kwtype => 2,
-            TypingTool::Dotool => 3,
-            TypingTool::Ydotool => 4,
-        };
-        self.gio_settings.set_enum("typing-tool", value).ok();
-    }
-
+    // Custom Words
     pub fn custom_words(&self) -> Vec<String> {
         self.gio_settings.strv("custom-words").iter().map(|s| s.to_string()).collect()
     }

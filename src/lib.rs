@@ -2,7 +2,6 @@ pub mod actions;
 pub mod app;
 pub mod audio_feedback;
 pub mod audio_toolkit;
-pub mod clipboard;
 pub mod dbus;
 pub mod ibus_engine;
 pub mod llm_client;

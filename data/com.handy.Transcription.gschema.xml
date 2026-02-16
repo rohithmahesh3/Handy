@@ -24,41 +24,8 @@
     <value nick="hour1" value="6"/>
     <value nick="sec5" value="7"/>
   </enum>
-  
-  <enum id="com.handy.Transcription.PasteMethod">
-    <value nick="ctrl-v" value="0"/>
-    <value nick="direct" value="1"/>
-    <value nick="none" value="2"/>
-    <value nick="shift-insert" value="3"/>
-    <value nick="ctrl-shift-v" value="4"/>
-  </enum>
-  
-  <enum id="com.handy.Transcription.ClipboardHandling">
-    <value nick="dont-modify" value="0"/>
-    <value nick="copy-to-clipboard" value="1"/>
-  </enum>
-  
-  <enum id="com.handy.Transcription.AutoSubmitKey">
-    <value nick="enter" value="0"/>
-    <value nick="ctrl-enter" value="1"/>
-    <value nick="super-enter" value="2"/>
-  </enum>
-  
-  <enum id="com.handy.Transcription.TypingTool">
-    <value nick="auto" value="0"/>
-    <value nick="wtype" value="1"/>
-    <value nick="kwtype" value="2"/>
-    <value nick="dotool" value="3"/>
-    <value nick="ydotool" value="4"/>
-  </enum>
 
   <schema id="com.handy.Transcription" path="/com/handy/Transcription/">
-    <!-- Bindings (stored as JSON) -->
-    <key name="bindings" type="s">
-      <default>'{}'</default>
-      <summary>Keyboard shortcut bindings (deprecated - IBus handles shortcuts)</summary>
-    </key>
-    
     <!-- General Settings -->
     <key name="push-to-talk" type="b">
       <default>true</default>
@@ -138,42 +105,7 @@
       <summary>Check for updates automatically</summary>
     </key>
     
-    <!-- Advanced Settings -->
-    <key name="paste-method" enum="com.handy.Transcription.PasteMethod">
-      <default>'direct'</default>
-      <summary>Method for pasting transcribed text</summary>
-    </key>
-    
-    <key name="clipboard-handling" enum="com.handy.Transcription.ClipboardHandling">
-      <default>'dont-modify'</default>
-      <summary>How to handle clipboard</summary>
-    </key>
-    
-    <key name="auto-submit" type="b">
-      <default>false</default>
-      <summary>Auto submit after transcription</summary>
-    </key>
-    
-    <key name="auto-submit-key" enum="com.handy.Transcription.AutoSubmitKey">
-      <default>'enter'</default>
-      <summary>Key to press for auto submit</summary>
-    </key>
-    
-    <key name="paste-delay-ms" type="u">
-      <default>60</default>
-      <summary>Delay before pasting in milliseconds</summary>
-    </key>
-    
-    <key name="append-trailing-space" type="b">
-      <default>false</default>
-      <summary>Append space after transcription</summary>
-    </key>
-    
-    <key name="typing-tool" enum="com.handy.Transcription.TypingTool">
-      <default>'auto'</default>
-      <summary>Tool to use for typing text</summary>
-    </key>
-    
+    <!-- Custom Words -->
     <key name="custom-words" type="as">
       <default>[]</default>
       <summary>Custom words for transcription</summary>
