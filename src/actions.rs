@@ -4,7 +4,6 @@ use crate::managers::transcription::TranscriptionManager;
 use crate::settings::Settings;
 use crate::text_utils::convert_chinese_variant;
 use log::{debug, info};
-use std::sync::Arc;
 
 pub struct TranscriptionResult {
     pub text: String,
@@ -25,7 +24,11 @@ pub async fn perform_transcription(
         .stop_recording("transcribe")
         .ok_or("No samples retrieved")?;
 
-    info!("Recording stopped, {} samples in {:?}", samples.len(), start_time.elapsed());
+    info!(
+        "Recording stopped, {} samples in {:?}",
+        samples.len(),
+        start_time.elapsed()
+    );
 
     let transcription = transcription_manager
         .transcribe(samples.clone())
@@ -51,7 +54,7 @@ pub async fn perform_transcription(
 async fn post_process_transcription(settings: &Settings, text: &str) -> Option<String> {
     let provider_id = settings.post_process_provider_id();
     let api_key = settings.post_process_api_keys().get(&provider_id)?.clone();
-    
+
     if api_key.is_empty() {
         debug!("No API key for provider {}", provider_id);
         return None;
@@ -59,7 +62,7 @@ async fn post_process_transcription(settings: &Settings, text: &str) -> Option<S
 
     let prompts = settings.post_process_prompts();
     let selected_id = settings.post_process_selected_prompt_id();
-    
+
     let prompt = if let Some(id) = selected_id {
         prompts.iter().find(|p| p.id == id)
     } else {

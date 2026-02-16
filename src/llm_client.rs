@@ -75,17 +75,19 @@ fn create_client(provider: &PostProcessProvider, api_key: &str) -> Result<reqwes
 fn get_provider(settings: &Settings) -> Option<PostProcessProvider> {
     let provider_id = settings.post_process_provider_id();
     let base_urls = settings.post_process_base_urls();
-    
-    let base_url = base_urls.get(&provider_id).cloned().unwrap_or_else(|| {
-        match provider_id.as_str() {
-            "openai" => "https://api.openai.com/v1".to_string(),
-            "anthropic" => "https://api.anthropic.com/v1".to_string(),
-            "openrouter" => "https://openrouter.ai/api/v1".to_string(),
-            "groq" => "https://api.groq.com/openai/v1".to_string(),
-            "cerebras" => "https://api.cerebras.ai/v1".to_string(),
-            _ => "http://localhost:11434/v1".to_string(),
-        }
-    });
+
+    let base_url =
+        base_urls
+            .get(&provider_id)
+            .cloned()
+            .unwrap_or_else(|| match provider_id.as_str() {
+                "openai" => "https://api.openai.com/v1".to_string(),
+                "anthropic" => "https://api.anthropic.com/v1".to_string(),
+                "openrouter" => "https://openrouter.ai/api/v1".to_string(),
+                "groq" => "https://api.groq.com/openai/v1".to_string(),
+                "cerebras" => "https://api.cerebras.ai/v1".to_string(),
+                _ => "http://localhost:11434/v1".to_string(),
+            });
 
     Some(PostProcessProvider {
         id: provider_id.clone(),
@@ -99,7 +101,7 @@ pub async fn call_llm(settings: &Settings, prompt: &str) -> Option<String> {
     let provider = get_provider(settings)?;
     let api_keys = settings.post_process_api_keys();
     let api_key = api_keys.get(&provider.id)?.clone();
-    
+
     if api_key.is_empty() {
         debug!("No API key for provider {}", provider.id);
         return None;
@@ -107,7 +109,7 @@ pub async fn call_llm(settings: &Settings, prompt: &str) -> Option<String> {
 
     let models = settings.post_process_models();
     let model = models.get(&provider.id).cloned().unwrap_or_default();
-    
+
     if model.is_empty() {
         debug!("No model selected for provider {}", provider.id);
         return None;
@@ -170,13 +172,11 @@ pub async fn send_chat_completion(
         .and_then(|choice| choice.message.content.clone()))
 }
 
-pub async fn fetch_models(
-    settings: &Settings,
-) -> Result<Vec<String>, String> {
+pub async fn fetch_models(settings: &Settings) -> Result<Vec<String>, String> {
     let provider = get_provider(settings).ok_or("No provider configured")?;
     let api_keys = settings.post_process_api_keys();
     let api_key = api_keys.get(&provider.id).cloned().unwrap_or_default();
-    
+
     let base_url = provider.base_url.trim_end_matches('/');
     let url = format!("{}/models", base_url);
 

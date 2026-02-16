@@ -10,7 +10,7 @@ pub mod settings;
 pub mod text_utils;
 pub mod ui;
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::AtomicU8;
 
 pub static FILE_LOG_LEVEL: AtomicU8 = AtomicU8::new(log::LevelFilter::Debug as u8);
 

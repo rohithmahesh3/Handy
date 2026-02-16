@@ -461,13 +461,13 @@ impl ModelManager {
             ));
         }
 
-        let total_size = if resume_from > 0 {
+        let _total_size = if resume_from > 0 {
             resume_from + response.content_length().unwrap_or(0)
         } else {
             response.content_length().unwrap_or(0)
         };
 
-        let mut downloaded = resume_from;
+        let mut _downloaded = resume_from;
         let mut stream = response.bytes_stream();
 
         let mut file = if resume_from > 0 {
@@ -497,7 +497,7 @@ impl ModelManager {
 
             let chunk = chunk?;
             file.write_all(&chunk)?;
-            downloaded += chunk.len() as u64;
+            _downloaded += chunk.len() as u64;
         }
 
         drop(file);

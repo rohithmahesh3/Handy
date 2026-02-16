@@ -58,6 +58,7 @@ pub struct TranscriptionManager {
     shared: Arc<SharedState>,
     model_manager: Arc<ModelManager>,
     shutdown_signal: Arc<AtomicBool>,
+    #[allow(dead_code)]
     watcher_handle: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
@@ -65,7 +66,7 @@ impl TranscriptionManager {
     pub fn new(model_manager: Arc<ModelManager>) -> Result<Self> {
         let settings = Settings::new();
         let config = TranscriptionConfig::from_settings(&settings);
-        let unload_timeout = config.model_unload_timeout;
+        let _unload_timeout = config.model_unload_timeout;
 
         let shared = Arc::new(SharedState {
             engine: Mutex::new(None),

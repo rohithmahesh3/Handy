@@ -90,7 +90,7 @@ impl HandyContext {
 
     pub fn process_key_event(
         &mut self,
-        engine: *mut IBusEngine,
+        _engine: *mut IBusEngine,
         keyval: guint,
         _keycode: guint,
         modifiers: guint,

@@ -20,7 +20,7 @@ pub struct AppState {
 
 pub fn run_app() {
     gtk4::init().expect("Failed to initialize GTK");
-    libadwaita::init();
+    let _ = libadwaita::init();
 
     let settings = Settings::new();
 

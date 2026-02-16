@@ -3,7 +3,6 @@ pub mod advanced;
 pub mod general;
 pub mod models;
 
-use gtk4::prelude::*;
 use gtk4::Widget;
 
 pub trait Page {

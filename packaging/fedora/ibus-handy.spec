@@ -35,7 +35,7 @@ start dictating.
 %autosetup -n ibus-handy-%{version}
 
 %build
-cargo build --release
+cargo build --release --features cli
 
 %install
 install -Dm755 target/release/handy %{buildroot}%{_bindir}/handy
