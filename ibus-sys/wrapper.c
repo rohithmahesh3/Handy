@@ -54,6 +54,7 @@ static void ibus_handy_engine_class_init(IBusHandyEngineClass *klass) {
 }
 
 static void ibus_handy_engine_init(IBusHandyEngine *engine) {
+    (void)engine;
 }
 
 static void ibus_handy_engine_destroy(IBusHandyEngine *engine) {
@@ -104,6 +105,8 @@ static void ibus_handy_engine_disable(IBusEngine *engine) {
 }
 
 static void ibus_disconnected_cb(IBusBus *bus, gpointer user_data) {
+    (void)bus;
+    (void)user_data;
     ibus_quit();
 }
 
