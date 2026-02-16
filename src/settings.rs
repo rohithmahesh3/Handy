@@ -88,15 +88,6 @@ impl ModelUnloadTimeout {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ShortcutBinding {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub default_binding: String,
-    pub current_binding: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LLMPrompt {
     pub id: String,
     pub name: String,
@@ -123,15 +114,7 @@ impl Settings {
         Self { gio_settings }
     }
 
-    // General Settings
-    pub fn push_to_talk(&self) -> bool {
-        self.gio_settings.boolean("push-to-talk")
-    }
-
-    pub fn set_push_to_talk(&self, value: bool) {
-        self.gio_settings.set_boolean("push-to-talk", value).ok();
-    }
-
+    // Audio Feedback
     pub fn audio_feedback(&self) -> bool {
         self.gio_settings.boolean("audio-feedback")
     }
@@ -167,6 +150,7 @@ impl Settings {
         self.gio_settings.set_enum("sound-theme", value).ok();
     }
 
+    // Device Selection
     pub fn selected_microphone(&self) -> Option<String> {
         let value = self.gio_settings.string("selected-microphone");
         if value.is_empty() { None } else { Some(value.to_string()) }
@@ -185,6 +169,7 @@ impl Settings {
         self.gio_settings.set_string("selected-output-device", value.unwrap_or("")).ok();
     }
 
+    // Language
     pub fn selected_language(&self) -> String {
         self.gio_settings.string("selected-language").to_string()
     }
@@ -201,6 +186,7 @@ impl Settings {
         self.gio_settings.set_boolean("translate-to-english", value).ok();
     }
 
+    // Recording
     pub fn mute_while_recording(&self) -> bool {
         self.gio_settings.boolean("mute-while-recording")
     }
@@ -245,39 +231,6 @@ impl Settings {
             ModelUnloadTimeout::Sec5 => 7,
         };
         self.gio_settings.set_enum("model-unload-timeout", value).ok();
-    }
-
-    // App Behavior
-    pub fn start_hidden(&self) -> bool {
-        self.gio_settings.boolean("start-hidden")
-    }
-
-    pub fn set_start_hidden(&self, value: bool) {
-        self.gio_settings.set_boolean("start-hidden", value).ok();
-    }
-
-    pub fn autostart_enabled(&self) -> bool {
-        self.gio_settings.boolean("autostart-enabled")
-    }
-
-    pub fn set_autostart_enabled(&self, value: bool) {
-        self.gio_settings.set_boolean("autostart-enabled", value).ok();
-    }
-
-    pub fn show_tray_icon(&self) -> bool {
-        self.gio_settings.boolean("show-tray-icon")
-    }
-
-    pub fn set_show_tray_icon(&self, value: bool) {
-        self.gio_settings.set_boolean("show-tray-icon", value).ok();
-    }
-
-    pub fn update_checks_enabled(&self) -> bool {
-        self.gio_settings.boolean("update-checks-enabled")
-    }
-
-    pub fn set_update_checks_enabled(&self, value: bool) {
-        self.gio_settings.set_boolean("update-checks-enabled", value).ok();
     }
 
     // Custom Words
@@ -402,15 +355,6 @@ impl Settings {
 
     pub fn set_post_process_selected_prompt_id(&self, value: Option<&str>) {
         self.gio_settings.set_string("post-process-selected-prompt-id", value.unwrap_or("")).ok();
-    }
-
-    // UI Settings
-    pub fn app_language(&self) -> String {
-        self.gio_settings.string("app-language").to_string()
-    }
-
-    pub fn set_app_language(&self, value: &str) {
-        self.gio_settings.set_string("app-language", value).ok();
     }
 }
 

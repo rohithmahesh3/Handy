@@ -1,6 +1,6 @@
 use gtk::prelude::*;
-use gtk::{Widget, Box, Orientation, ScrolledWindow};
-use libadwaita::{PreferencesGroup, ActionRow, Switch, ComboRow};
+use gtk::{Widget, Box, Orientation, ScrolledWindow, ComboBoxText};
+use libadwaita::{PreferencesGroup, ActionRow, Switch};
 use std::sync::Arc;
 
 use crate::app::AppState;
@@ -25,46 +25,14 @@ impl GeneralPage {
             .margin_end(24)
             .build();
 
-        let shortcut_group = PreferencesGroup::builder()
-            .title("Keyboard Shortcut")
-            .build();
-
-        let shortcut_row = ActionRow::builder()
-            .title("Transcription Shortcut")
-            .subtitle("Press to record shortcut")
-            .build();
-        shortcut_group.add(&shortcut_row);
-
-        vbox.append(&shortcut_group);
-
         let recording_group = PreferencesGroup::builder()
             .title("Recording")
+            .description("Use Super+Space to switch to Handy IM and start recording")
             .build();
-
-        let ptt_row = ActionRow::builder()
-            .title("Push to Talk")
-            .subtitle("Hold shortcut to record")
-            .build();
-        let ptt_switch = Switch::builder()
-            .active(state.settings.push_to_talk())
-            .build();
-        ptt_row.add_suffix(&ptt_switch);
-        ptt_switch.connect_active_notify({
-            let settings = state.settings.clone();
-            move |switch| {
-                settings.set_push_to_talk(switch.is_active());
-            }
-        });
-        recording_group.add(&ptt_row);
-
-        let mic_row = ActionRow::builder()
-            .title("Microphone")
-            .subtitle("Select input device")
-            .build();
-        recording_group.add(&mic_row);
 
         let mute_row = ActionRow::builder()
             .title("Mute While Recording")
+            .subtitle("Mute system audio during recording")
             .build();
         let mute_switch = Switch::builder()
             .active(state.settings.mute_while_recording())
@@ -117,12 +85,6 @@ impl GeneralPage {
         volume_row.add_suffix(&volume_scale);
         audio_feedback_group.add(&volume_row);
 
-        let output_row = ActionRow::builder()
-            .title("Output Device")
-            .subtitle("Select audio output device")
-            .build();
-        audio_feedback_group.add(&output_row);
-
         vbox.append(&audio_feedback_group);
 
         let language_group = PreferencesGroup::builder()
@@ -131,12 +93,48 @@ impl GeneralPage {
 
         let lang_row = ActionRow::builder()
             .title("Transcription Language")
-            .subtitle("Language to transcribe")
+            .subtitle("Language for transcription")
             .build();
+
+        let language_combo = ComboBoxText::new();
+        let languages = [
+            ("auto", "Auto Detect"),
+            ("en", "English"),
+            ("zh", "Chinese"),
+            ("zh-Hans", "Chinese (Simplified)"),
+            ("zh-Hant", "Chinese (Traditional)"),
+            ("de", "German"),
+            ("es", "Spanish"),
+            ("fr", "French"),
+            ("ja", "Japanese"),
+            ("ko", "Korean"),
+            ("pt", "Portuguese"),
+            ("ru", "Russian"),
+            ("it", "Italian"),
+        ];
+
+        let selected_lang = state.settings.selected_language();
+        let mut selected_index = 0;
+        for (i, (code, name)) in languages.iter().enumerate() {
+            language_combo.append(Some(code), name);
+            if *code == selected_lang {
+                selected_index = i as u32;
+            }
+        }
+        language_combo.set_active(Some(selected_index));
+        
+        let state_clone = state.clone();
+        language_combo.connect_changed(move |combo| {
+            if let Some(active) = combo.active_id() {
+                state_clone.settings.set_selected_language(active);
+            }
+        });
+        lang_row.add_suffix(&language_combo);
         language_group.add(&lang_row);
 
         let translate_row = ActionRow::builder()
             .title("Translate to English")
+            .subtitle("Translate non-English speech to English")
             .build();
         let translate_switch = Switch::builder()
             .active(state.settings.translate_to_english())

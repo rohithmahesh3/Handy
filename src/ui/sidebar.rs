@@ -9,7 +9,7 @@ pub struct Sidebar {
 }
 
 impl Sidebar {
-    pub fn new(state: &Arc<AppState>) -> Self {
+    pub fn new(_state: &Arc<AppState>) -> Self {
         let list = ListBox::builder()
             .css_classes(["navigation-sidebar"])
             .build();
@@ -17,11 +17,6 @@ impl Sidebar {
         add_item(&list, "general", "General", "preferences-system-symbolic");
         add_item(&list, "models", "Models", "folder-download-symbolic");
         add_item(&list, "advanced", "Advanced", "applications-engineering-symbolic");
-
-        if state.settings.post_process_enabled() || state.settings.debug_mode() {
-            add_item(&list, "post-process", "Post-Processing", "text-editor-symbolic");
-        }
-
         add_item(&list, "about", "About", "help-about-symbolic");
 
         Self { list }

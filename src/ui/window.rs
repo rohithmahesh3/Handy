@@ -50,19 +50,6 @@ impl MainWindow {
         let advanced_page = super::pages::advanced::AdvancedPage::new(&state);
         stack.add_titled(&advanced_page.widget(), Some("advanced"), "Advanced");
 
-        let history_page = super::pages::history::HistoryPage::new(&state);
-        stack.add_titled(&history_page.widget(), Some("history"), "History");
-
-        if state.settings.post_process_enabled() || state.settings.debug_mode() {
-            let post_process_page = super::pages::post_process::PostProcessPage::new(&state);
-            stack.add_titled(&post_process_page.widget(), Some("post-process"), "Post-Processing");
-        }
-
-        if state.settings.debug_mode() {
-            let debug_page = super::pages::debug::DebugPage::new(&state);
-            stack.add_titled(&debug_page.widget(), Some("debug"), "Debug");
-        }
-
         let about_page = super::pages::about::AboutPage::new();
         stack.add_titled(&about_page.widget(), Some("about"), "About");
 

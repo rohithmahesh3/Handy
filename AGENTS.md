@@ -11,15 +11,13 @@ This is a **Fedora/GNOME-only fork** of Handy with native IBus input method inte
 **Prerequisites:**
 
 - [Rust](https://rustup.rs/) (latest stable)
-- GTK4, Libadwaita, GStreamer, IBus development packages
+- GTK4, Libadwaita, IBus development packages
 
 ```bash
 # Install dependencies (Fedora)
 sudo dnf install -y \
     gtk4-devel \
     libadwaita-devel \
-    gstreamer1-devel \
-    gstreamer1-plugins-base-devel \
     graphene-devel \
     alsa-lib-devel \
     pipewire-devel \
@@ -44,7 +42,6 @@ cargo fmt
 
 # Testing
 cargo test
-cargo test <test_name>
 
 # Run main application
 cargo run --release
@@ -81,6 +78,8 @@ Handy is a speech-to-text application for Fedora Workstation/GNOME/Wayland with 
 - `audio_toolkit/` - Low-level audio processing (device, recorder, resampler, VAD)
 - `settings.rs` - Application settings with GSettings (dconf)
 - `text_utils.rs` - Text processing utilities (Chinese variant conversion)
+- `llm_client.rs` - LLM API client for post-processing
+- `actions.rs` - Transcription actions with post-processing support
 - `dbus/` - D-Bus server for IBus communication
 - `ibus_engine/` - Rust IBus engine implementation
   - `context.rs` - Engine state and D-Bus client
@@ -89,7 +88,6 @@ Handy is a speech-to-text application for Fedora Workstation/GNOME/Wayland with 
   - `window.rs` - Main preferences window
   - `sidebar.rs` - Navigation sidebar
   - `pages/` - Settings pages (general, models, advanced, about)
-- `clipboard.rs` - Clipboard and text output using wtype/wl-copy
 
 **IBus Engine Binary (Rust - src/bin/):**
 
@@ -127,8 +125,7 @@ Handy is a speech-to-text application for Fedora Workstation/GNOME/Wayland with 
 - **GSettings:** Persistent settings via dconf/GSettings
 - **D-Bus Server:** Always-on D-Bus server (`com.handy.Transcription`) for IBus communication
 - **Hybrid IBus Engine:** C wrapper for GObject + Rust callbacks
-- **Pipeline Processing:** Audio → VAD → Whisper → Text output
-- **Wayland Native:** Uses wtype for text input, wl-copy for clipboard
+- **Pipeline Processing:** Audio → VAD → Whisper → Text output via IBus commit
 
 ### IBus Engine Architecture
 
@@ -183,7 +180,7 @@ Handy is a speech-to-text application for Fedora Workstation/GNOME/Wayland with 
 use std::sync::{Arc, Mutex};
 use log::{debug, error, info};
 use gtk::prelude::*;
-use crate::settings::{get_settings, AppSettings};
+use crate::settings::Settings;
 ```
 
 **Naming:**
@@ -201,7 +198,7 @@ use crate::settings::{get_settings, AppSettings};
 **Formatting:**
 
 - `cargo fmt` (Rust 2021 edition)
-- Section comments: `/* ----- section name ----- */`
+- No comments unless requested
 
 ### C (IBus Wrapper)
 
@@ -214,7 +211,7 @@ use crate::settings::{get_settings, AppSettings};
 **Core Libraries:**
 
 - `transcribe-rs` - Local speech recognition (Whisper, Parakeet, Moonshine, SenseVoice)
-- `cpal` - Audio I/O (ALSA/PipeWire)
+- `cpal` - Audio I/O (PipeWire)
 - `vad-rs` - Voice Activity Detection (Silero)
 - `zbus` - D-Bus communication
 
@@ -234,11 +231,6 @@ use crate::settings::{get_settings, AppSettings};
 - C wrapper for GObject subclassing
 - Direct D-Bus calls to Handy
 
-**Wayland:**
-
-- `wtype` - Native Wayland text input
-- `wl-copy` - Wayland clipboard
-
 ## Platform Support
 
 This fork supports **Fedora Workstation on GNOME/Wayland only**.
@@ -246,7 +238,7 @@ This fork supports **Fedora Workstation on GNOME/Wayland only**.
 - Requires IBus >= 1.5.0
 - Requires PipeWire for audio
 - Uses GSettings for configuration
-- Requires `wtype` and `wl-clipboard` for text output
+- Text committed directly via IBus (no external typing tools)
 
 ## Important Files
 
@@ -254,7 +246,7 @@ This fork supports **Fedora Workstation on GNOME/Wayland only**.
 - `src/app.rs` - GTK application initialization
 - `src/dbus/server.rs` - D-Bus server implementation
 - `src/ibus_engine/context.rs` - IBus engine implementation
-- `src/settings.rs` - Settings schema and GSettings integration
+- `src/settings.rs` - Settings and GSettings integration
 - `src/ui/window.rs` - Main preferences window
 - `src/ui/pages/models.rs` - Model management page
 - `src/ui/pages/advanced.rs` - Advanced settings page

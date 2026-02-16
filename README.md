@@ -9,15 +9,15 @@ This is a fork of [Handy](https://github.com/cjpais/Handy) specifically optimize
 ## Features
 
 - **Native IBus Integration** - Works like any other input method (Super+Space)
-- **Local Processing** - Uses Whisper for offline speech recognition
+- **Local Processing** - Uses Whisper/Parakeet for offline speech recognition
 - **Multi-language Support** - Supports 50+ languages
-- **Visual Feedback** - System tray indicator and optional overlay
-- **Transcription History** - Review and manage past transcriptions
+- **Native GTK4/Libadwaita UI** - GNOME-native preferences window
+- **Post-Processing** - Optional AI cleanup of transcripts via LLM
 
 ## Installation
 
 ```bash
-sudo dnf install handy
+sudo dnf install ibus-handy
 ```
 
 After installation, Handy automatically registers with IBus.
@@ -39,7 +39,12 @@ After installation, Handy automatically registers with IBus.
 
 ### Preferences
 
-Open Handy from the application menu or click **Preferences** in Keyboard Settings → Input Sources → Handy.
+Open Handy from the application menu to configure:
+
+- Language selection
+- Audio feedback
+- Model management
+- Post-processing settings
 
 ## Requirements
 
@@ -52,73 +57,40 @@ Open Handy from the application menu or click **Preferences** in Keyboard Settin
 
 ```bash
 # Install build dependencies
-sudo dnf install rustc cargo python3-devel meson \
-    gtk3-devel gtk-layer-shell-devel webkit2gtk4.1-devel \
-    alsa-lib-devel pipewire-devel openssl-devel
+sudo dnf install -y \
+    gtk4-devel libadwaita-devel graphene-devel \
+    alsa-lib-devel pipewire-devel libevdev-devel \
+    openssl-devel ibus-devel cmake clang-devel glslc
 
 # Clone and build
 git clone -b fedora-gnome https://github.com/rohithmahesh/Handy.git
 cd Handy
-
-# Build the Rust backend
-cd src-tauri
 cargo build --release
-
-# Build the IBus engine
-cd ../ibus
-meson setup builddir --prefix=/usr
-cd builddir
-meson compile
-
-# Install (requires sudo)
-sudo meson install
 ```
 
 ## How It Works
 
 1. **D-Bus Server**: Handy starts a D-Bus server (`com.handy.Transcription`) on launch
-2. **IBus Engine**: The `handy-ibus` engine connects to Handy via D-Bus
+2. **IBus Engine**: The `ibus-handy-engine` connects to Handy via D-Bus
 3. **Recording**: When you switch to Handy IM, the engine signals Handy to start recording
 4. **Transcription**: When you switch away, Handy transcribes and sends text back to IBus
 5. **Commit**: IBus commits the text to the focused application
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Fedora Workstation                       │
-├─────────────────────────────────────────────────────────────┤
-│  User presses Super+Space → IBus switches to Handy IM      │
-│                               │                             │
-│                               ▼                             │
-│  ┌──────────────┐    D-Bus   ┌──────────────┐              │
-│  │ handy-ibus   │◄──────────►│    Handy     │              │
-│  │ (IBus Engine)│             │ (Background) │              │
-│  └──────────────┘             └──────────────┘              │
-│         │                                                    │
-│         │ IBus commit                                        │
-│         ▼                                                    │
-│  ┌──────────────┐                                           │
-│  │ Focused App  │                                           │
-│  └──────────────┘                                           │
-└─────────────────────────────────────────────────────────────┘
-```
 
 ## Model Support
 
 Handy supports multiple speech recognition models:
 
-- **Whisper Models** (Small/Medium/Turbo/Large) with GPU acceleration
-- **Parakeet V3** - CPU-optimized model with automatic language detection
+- **Whisper** (Small/Medium/Turbo) - OpenAI's speech recognition
+- **Parakeet V3** - CPU-optimized with automatic language detection
+- **SenseVoice** - Fast Chinese/English/Japanese/Korean
 
-Models are downloaded automatically when you first use Handy.
+Models are downloaded from the preferences window.
 
 ## Troubleshooting
 
 ### Handy not appearing in IBus
 
 ```bash
-# Refresh IBus cache
 ibus write-cache
 ibus restart
 ```
@@ -132,21 +104,12 @@ sudo usermod -aG audio $USER
 # Log out and back in
 ```
 
-### Model download fails
-
-Check your network connection. If behind a proxy, see [Manual Model Installation](#manual-model-installation) below.
-
 ### Manual Model Installation
 
-If you can't download models automatically:
+Place models in `~/.local/share/handy/models/`:
 
-1. Find your app data directory: `~/.config/com.handy.handy/`
-2. Create a `models` folder
-3. Download models from:
-   - Whisper Small: `https://blob.handy.computer/ggml-small.bin`
-   - Parakeet V3: `https://blob.handy.computer/parakeet-v3-int8.tar.gz`
-4. Place `.bin` files directly in `models/`
-5. Extract `.tar.gz` files to `models/parakeet-tdt-0.6b-v3-int8/`
+- Whisper: `.bin` files directly
+- Parakeet/SenseVoice: extract `.tar.gz` to subdirectory
 
 ## Related Projects
 

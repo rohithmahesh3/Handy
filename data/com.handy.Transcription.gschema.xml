@@ -26,12 +26,7 @@
   </enum>
 
   <schema id="com.handy.Transcription" path="/com/handy/Transcription/">
-    <!-- General Settings -->
-    <key name="push-to-talk" type="b">
-      <default>true</default>
-      <summary>Push to talk mode</summary>
-    </key>
-    
+    <!-- Audio Feedback -->
     <key name="audio-feedback" type="b">
       <default>false</default>
       <summary>Play audio feedback on start/stop</summary>
@@ -48,6 +43,7 @@
       <summary>Sound theme for audio feedback</summary>
     </key>
     
+    <!-- Device Selection -->
     <key name="selected-microphone" type="s">
       <default>''</default>
       <summary>Selected microphone device</summary>
@@ -58,6 +54,7 @@
       <summary>Selected output device for audio feedback</summary>
     </key>
     
+    <!-- Language -->
     <key name="selected-language" type="s">
       <default>'auto'</default>
       <summary>Selected transcription language</summary>
@@ -68,6 +65,7 @@
       <summary>Translate transcriptions to English</summary>
     </key>
     
+    <!-- Recording -->
     <key name="mute-while-recording" type="b">
       <default>false</default>
       <summary>Mute system audio while recording</summary>
@@ -82,27 +80,6 @@
     <key name="model-unload-timeout" enum="com.handy.Transcription.ModelUnloadTimeout">
       <default>'never'</default>
       <summary>Time to keep model loaded in memory</summary>
-    </key>
-    
-    <!-- App Behavior -->
-    <key name="start-hidden" type="b">
-      <default>true</default>
-      <summary>Start application hidden</summary>
-    </key>
-    
-    <key name="autostart-enabled" type="b">
-      <default>true</default>
-      <summary>Start automatically on login</summary>
-    </key>
-    
-    <key name="show-tray-icon" type="b">
-      <default>true</default>
-      <summary>Show system tray icon</summary>
-    </key>
-    
-    <key name="update-checks-enabled" type="b">
-      <default>false</default>
-      <summary>Check for updates automatically</summary>
     </key>
     
     <!-- Custom Words -->
@@ -172,12 +149,6 @@
     <key name="post-process-selected-prompt-id" type="s">
       <default>''</default>
       <summary>Selected post-processing prompt ID</summary>
-    </key>
-    
-    <!-- UI Settings -->
-    <key name="app-language" type="s">
-      <default>'en'</default>
-      <summary>Application language</summary>
     </key>
   </schema>
 </schemalist>

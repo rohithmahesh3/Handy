@@ -1,5 +1,4 @@
 use gtk::prelude::*;
-use gtk::{Box, Orientation};
 use libadwaita::Application as AdwApplication;
 use std::sync::Arc;
 
@@ -64,10 +63,7 @@ pub fn run_app() {
     let state_clone = state.clone();
     app.connect_activate(move |app| {
         let main_window = MainWindow::new(app, state_clone.clone());
-
-        if !state_clone.settings.start_hidden() {
-            main_window.present();
-        }
+        main_window.present();
     });
 
     app.run();
