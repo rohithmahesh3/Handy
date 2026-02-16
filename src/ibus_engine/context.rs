@@ -1,0 +1,308 @@
+use std::ffi::{c_char, c_void, CString};
+use std::sync::{Arc, Mutex};
+
+use log::{debug, error, info, warn};
+use zbus::blocking::Connection;
+
+use ibus_sys::{gboolean, guint, IBusEngine, IBusText, TRUE};
+use ibus_sys::keys::IBUS_KEY_Escape;
+use ibus_sys::modifiers::IBUS_RELEASE_MASK;
+
+const HANDY_BUS_NAME: &str = "com.handy.Transcription";
+const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
+const HANDY_INTERFACE: &str = "com.handy.Transcription";
+
+pub struct HandyContext {
+    connection: Option<Connection>,
+    is_recording: bool,
+    is_focused: bool,
+}
+
+impl HandyContext {
+    pub fn new() -> Self {
+        Self {
+            connection: None,
+            is_recording: false,
+            is_focused: false,
+        }
+    }
+
+    fn try_connect(&mut self) -> bool {
+        if self.connection.is_some() {
+            return true;
+        }
+
+        match Connection::session() {
+            Ok(conn) => {
+                self.connection = Some(conn);
+                info!("Connected to D-Bus session bus");
+                true
+            }
+            Err(e) => {
+                error!("Failed to connect to D-Bus: {}", e);
+                false
+            }
+        }
+    }
+
+    pub fn focus_in(&mut self, engine: *mut IBusEngine) {
+        debug!("Focus in");
+        self.is_focused = true;
+
+        if self.connection.is_none() {
+            if !self.try_connect() {
+                return;
+            }
+        }
+
+        if !self.is_recording {
+            self.start_recording(engine);
+        }
+    }
+
+    pub fn focus_out(&mut self, engine: *mut IBusEngine) {
+        debug!("Focus out");
+        self.is_focused = false;
+
+        if self.is_recording {
+            self.stop_and_commit(engine);
+        }
+    }
+
+    pub fn reset(&mut self, _engine: *mut IBusEngine) {
+        debug!("Reset");
+        if self.is_recording {
+            self.cancel_recording();
+        }
+    }
+
+    pub fn enable(&mut self, _engine: *mut IBusEngine) {
+        debug!("Engine enabled");
+    }
+
+    pub fn disable(&mut self, _engine: *mut IBusEngine) {
+        debug!("Engine disabled");
+        self.is_focused = false;
+        if self.is_recording {
+            self.cancel_recording();
+        }
+    }
+
+    pub fn process_key_event(
+        &mut self,
+        engine: *mut IBusEngine,
+        keyval: guint,
+        _keycode: guint,
+        modifiers: guint,
+    ) -> gboolean {
+        if modifiers & IBUS_RELEASE_MASK != 0 {
+            return 0;
+        }
+
+        if keyval == IBUS_KEY_Escape && self.is_recording {
+            debug!("Escape pressed, cancelling recording");
+            self.cancel_recording();
+            return TRUE;
+        }
+
+        0
+    }
+
+    fn start_recording(&mut self, _engine: *mut IBusEngine) {
+        if self.is_recording {
+            return;
+        }
+
+        let Some(conn) = &self.connection else {
+            warn!("Cannot start recording: not connected to D-Bus");
+            return;
+        };
+
+        info!("Starting recording");
+        match conn.call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "StartRecording",
+            &(),
+        ) {
+            Ok(_) => {
+                self.is_recording = true;
+            }
+            Err(e) => {
+                error!("Failed to start recording: {}", e);
+            }
+        }
+    }
+
+    fn stop_and_commit(&mut self, engine: *mut IBusEngine) {
+        if !self.is_recording {
+            return;
+        }
+
+        info!("Stopping recording");
+        self.is_recording = false;
+
+        let Some(conn) = &self.connection else {
+            return;
+        };
+
+        match conn.call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "StopRecording",
+            &(),
+        ) {
+            Ok(reply) => {
+                if let Ok(text) = reply.body::<String>() {
+                    if !text.is_empty() {
+                        self.commit_text(engine, &text);
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Failed to stop recording: {}", e);
+            }
+        }
+    }
+
+    fn cancel_recording(&mut self) {
+        if !self.is_recording {
+            return;
+        }
+
+        info!("Cancelling recording");
+        self.is_recording = false;
+
+        let Some(conn) = &self.connection else {
+            return;
+        };
+
+        if let Err(e) = conn.call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "CancelRecording",
+            &(),
+        ) {
+            error!("Failed to cancel recording: {}", e);
+        }
+    }
+
+    fn commit_text(&self, engine: *mut IBusEngine, text: &str) {
+        if text.is_empty() || engine.is_null() {
+            return;
+        }
+
+        info!("Committing text: {}...", &text[..text.len().min(50)]);
+
+        let c_text = match CString::new(text) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to create CString: {}", e);
+                return;
+            }
+        };
+
+        unsafe {
+            let ibus_text = ibus_sys::ibus_text_new_from_string(c_text.as_ptr());
+            if !ibus_text.is_null() {
+                ibus_sys::ibus_engine_commit_text(engine, ibus_text);
+            }
+        }
+    }
+}
+
+pub type SharedContext = Arc<Mutex<HandyContext>>;
+
+pub fn create_context() -> SharedContext {
+    Arc::new(Mutex::new(HandyContext::new()))
+}
+
+unsafe extern "C" fn process_key_event_callback(
+    context: *mut c_void,
+    engine: *mut IBusEngine,
+    keyval: guint,
+    keycode: guint,
+    modifiers: guint,
+) -> gboolean {
+    let context = &*(context as *const SharedContext);
+    if let Ok(mut ctx) = context.lock() {
+        ctx.process_key_event(engine, keyval, keycode, modifiers)
+    } else {
+        0
+    }
+}
+
+unsafe extern "C" fn focus_in_callback(context: *mut c_void, engine: *mut IBusEngine) {
+    let context = &*(context as *const SharedContext);
+    if let Ok(mut ctx) = context.lock() {
+        ctx.focus_in(engine);
+    }
+}
+
+unsafe extern "C" fn focus_out_callback(context: *mut c_void, engine: *mut IBusEngine) {
+    let context = &*(context as *const SharedContext);
+    if let Ok(mut ctx) = context.lock() {
+        ctx.focus_out(engine);
+    }
+}
+
+unsafe extern "C" fn reset_callback(context: *mut c_void, engine: *mut IBusEngine) {
+    let context = &*(context as *const SharedContext);
+    if let Ok(mut ctx) = context.lock() {
+        ctx.reset(engine);
+    }
+}
+
+unsafe extern "C" fn enable_callback(context: *mut c_void, engine: *mut IBusEngine) {
+    let context = &*(context as *const SharedContext);
+    if let Ok(mut ctx) = context.lock() {
+        ctx.enable(engine);
+    }
+}
+
+unsafe extern "C" fn disable_callback(context: *mut c_void, engine: *mut IBusEngine) {
+    let context = &*(context as *const SharedContext);
+    if let Ok(mut ctx) = context.lock() {
+        ctx.disable(engine);
+    }
+}
+
+extern "C" {
+    fn ibus_handy_set_callback(
+        ctx: *mut c_void,
+        key_event_cb: unsafe extern "C" fn(*mut c_void, *mut IBusEngine, guint, guint, guint) -> gboolean,
+        focus_in_cb: unsafe extern "C" fn(*mut c_void, *mut IBusEngine),
+        focus_out_cb: unsafe extern "C" fn(*mut c_void, *mut IBusEngine),
+        reset_cb: unsafe extern "C" fn(*mut c_void, *mut IBusEngine),
+        enable_cb: unsafe extern "C" fn(*mut c_void, *mut IBusEngine),
+        disable_cb: unsafe extern "C" fn(*mut c_void, *mut IBusEngine),
+    );
+
+    fn ibus_handy_init(ibus_mode: bool);
+    fn ibus_main();
+}
+
+pub fn init(context: &SharedContext, ibus_mode: bool) {
+    unsafe {
+        ibus_handy_set_callback(
+            Arc::as_ptr(context) as *mut c_void,
+            process_key_event_callback,
+            focus_in_callback,
+            focus_out_callback,
+            reset_callback,
+            enable_callback,
+            disable_callback,
+        );
+
+        ibus_handy_init(ibus_mode);
+    }
+}
+
+pub fn run_main_loop() {
+    unsafe {
+        ibus_main();
+    }
+}

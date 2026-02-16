@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<component>
+    <name>org.freedesktop.IBus.Handy</name>
+    <description>Handy Speech-to-Text</description>
+    <exec>/usr/libexec/ibus-handy-engine --ibus</exec>
+    <version>0.7.5</version>
+    <author>Handy Team</author>
+    <license>MIT</license>
+    <homepage>https://github.com/rohithmahesh/Handy</homepage>
+    <textdomain>handy-ibus</textdomain>
+    <engines>
+        <engine>
+            <name>handy</name>
+            <language>en</language>
+            <license>MIT</license>
+            <author>Handy Team</author>
+            <icon>/usr/share/handy/icons/handy.svg</icon>
+            <layout>us</layout>
+            <longname>Handy Speech-to-Text</longname>
+            <description>Voice dictation using Handy</description>
+            <rank>0</rank>
+        </engine>
+    </engines>
+</component>
