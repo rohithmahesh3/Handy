@@ -1,6 +1,6 @@
 use natural::phonetics::soundex;
-use once_cell::sync::Lazy;
 use regex::Regex;
+use std::sync::LazyLock;
 use strsim::levenshtein;
 
 /// Builds an n-gram string by cleaning and concatenating words
@@ -200,7 +200,7 @@ const FILLER_WORDS: &[&str] = &[
     "ehh",
 ];
 
-static MULTI_SPACE_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s{2,}").unwrap());
+static MULTI_SPACE_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s{2,}").unwrap());
 
 /// Collapses repeated 1-2 letter words (3+ repetitions) to a single instance.
 /// E.g., "wh wh wh wh" -> "wh", "I I I I" -> "I"
@@ -243,7 +243,7 @@ fn collapse_stutters(text: &str) -> String {
 }
 
 /// Pre-compiled filler word patterns (built lazily)
-static FILLER_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
+static FILLER_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     FILLER_WORDS
         .iter()
         .map(|word| {
