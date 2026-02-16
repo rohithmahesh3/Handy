@@ -1,5 +1,4 @@
 use crate::audio_toolkit::{list_input_devices, vad::SmoothedVad, AudioRecorder, SileroVad};
-use crate::settings::Settings;
 use log::{debug, error, info};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -18,11 +17,11 @@ pub enum MicrophoneMode {
     OnDemand,
 }
 
-#[derive(Clone)]
 pub struct AudioRecordingManager {
     state: Arc<Mutex<RecordingState>>,
     mode: Arc<Mutex<MicrophoneMode>>,
-    settings: Settings,
+    selected_microphone: Arc<Mutex<Option<String>>>,
+    mute_while_recording: Arc<Mutex<bool>>,
     recorder: Arc<Mutex<Option<AudioRecorder>>>,
     is_open: Arc<Mutex<bool>>,
     is_recording: Arc<Mutex<bool>>,
@@ -60,7 +59,7 @@ fn set_mute(mute: bool) {
 
 impl AudioRecordingManager {
     pub fn new() -> Result<Self, anyhow::Error> {
-        let settings = Settings::new();
+        let settings = crate::settings::Settings::new();
         let mode = if settings.always_on_microphone() {
             MicrophoneMode::AlwaysOn
         } else {
@@ -70,7 +69,8 @@ impl AudioRecordingManager {
         let manager = Self {
             state: Arc::new(Mutex::new(RecordingState::Idle)),
             mode: Arc::new(Mutex::new(mode.clone())),
-            settings: settings.clone(),
+            selected_microphone: Arc::new(Mutex::new(settings.selected_microphone())),
+            mute_while_recording: Arc::new(Mutex::new(settings.mute_while_recording())),
             recorder: Arc::new(Mutex::new(None)),
             is_open: Arc::new(Mutex::new(false)),
             is_recording: Arc::new(Mutex::new(false)),
@@ -85,7 +85,7 @@ impl AudioRecordingManager {
     }
 
     fn get_effective_microphone_device(&self) -> Option<cpal::Device> {
-        let device_name = self.settings.selected_microphone()?;
+        let device_name = self.selected_microphone.lock().unwrap().clone()?;
 
         match list_input_devices() {
             Ok(devices) => devices
@@ -102,7 +102,7 @@ impl AudioRecordingManager {
     pub fn apply_mute(&self) {
         let mut did_mute_guard = self.did_mute.lock().unwrap();
 
-        if self.settings.mute_while_recording() && *self.is_open.lock().unwrap() {
+        if *self.mute_while_recording.lock().unwrap() && *self.is_open.lock().unwrap() {
             set_mute(true);
             *did_mute_guard = true;
             debug!("Mute applied");
@@ -120,7 +120,7 @@ impl AudioRecordingManager {
 
     fn create_audio_recorder(&self) -> Result<AudioRecorder, anyhow::Error> {
         let vad_path = std::path::PathBuf::from("/usr/share/handy/models/silero_vad_v4.onnx");
-        
+
         let silero = SileroVad::new(vad_path.to_str().unwrap(), 0.3)
             .map_err(|e| anyhow::anyhow!("Failed to create SileroVad: {}", e))?;
         let smoothed_vad = SmoothedVad::new(Box::new(silero), 15, 15, 2);

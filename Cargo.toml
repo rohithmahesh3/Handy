@@ -24,7 +24,6 @@ path = "src/bin/ibus-handy-engine.rs"
 required-features = ["cli"]
 
 [build-dependencies]
-glib-build-tools = "0.20"
 pkg-config = "0.3"
 cc = "1.0"
 

@@ -1,5 +1,5 @@
-use gtk::prelude::*;
-use gtk::{ListBox, ListBoxRow, Box, Orientation, Image, Label};
+use gtk4::prelude::*;
+use gtk4::{Box, Image, Label, ListBox, ListBoxRow, Orientation};
 use std::sync::Arc;
 
 use crate::app::AppState;
@@ -16,7 +16,12 @@ impl Sidebar {
 
         add_item(&list, "general", "General", "preferences-system-symbolic");
         add_item(&list, "models", "Models", "folder-download-symbolic");
-        add_item(&list, "advanced", "Advanced", "applications-engineering-symbolic");
+        add_item(
+            &list,
+            "advanced",
+            "Advanced",
+            "applications-engineering-symbolic",
+        );
         add_item(&list, "about", "About", "help-about-symbolic");
 
         Self { list }
@@ -26,7 +31,7 @@ impl Sidebar {
         &self.list
     }
 
-    pub fn connect_stack(&self, stack: &gtk::Stack) {
+    pub fn connect_stack(&self, stack: &gtk4::Stack) {
         let stack = stack.clone();
         self.list.connect_row_selected(move |_, row| {
             if let Some(row) = row {
@@ -57,10 +62,7 @@ fn add_item(list: &ListBox, name: &str, label: &str, icon: &str) {
     let icon = Image::from_icon_name(icon);
     box_.append(&icon);
 
-    let label = Label::builder()
-        .label(label)
-        .xalign(0.0)
-        .build();
+    let label = Label::builder().label(label).xalign(0.0).build();
     box_.append(&label);
 
     row.set_child(Some(&box_));

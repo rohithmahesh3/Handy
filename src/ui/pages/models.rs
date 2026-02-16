@@ -1,11 +1,14 @@
-use gtk::prelude::*;
-use gtk::{Widget, ScrolledWindow, Box, Orientation, Button, Label, ProgressBar};
-use libadwaita::{PreferencesGroup, ActionRow, ToastOverlay, Toast};
+use gtk4::prelude::*;
+use gtk4::{
+    Box, Button, Image, Label, Orientation, PolicyType, ProgressBar, ScrolledWindow, Widget,
+};
+use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt};
+use libadwaita::{ActionRow, PreferencesGroup, ToastOverlay};
 use std::sync::Arc;
 
+use super::Page;
 use crate::app::AppState;
 use crate::managers::model::ModelInfo;
-use super::Page;
 
 pub struct ModelsPage {
     container: ScrolledWindow,
@@ -14,7 +17,7 @@ pub struct ModelsPage {
 impl ModelsPage {
     pub fn new(state: &Arc<AppState>) -> Self {
         let toast_overlay = ToastOverlay::new();
-        
+
         let main_box = Box::builder()
             .orientation(Orientation::Vertical)
             .spacing(12)
@@ -57,7 +60,7 @@ impl ModelsPage {
         toast_overlay.set_child(Some(&main_box));
 
         let container = ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
+            .hscrollbar_policy(PolicyType::Never)
             .child(&toast_overlay)
             .build();
 
@@ -77,7 +80,7 @@ fn create_model_row(
         .build();
 
     if model.is_recommended {
-        row.add_prefix(&gtk::Image::from_icon_name("starred-symbolic"));
+        row.add_prefix(&Image::from_icon_name("starred-symbolic"));
     }
 
     let size_label = Label::builder()
@@ -103,7 +106,7 @@ fn create_model_row(
                 .label("Select")
                 .css_classes(["pill", "suggested-action"])
                 .build();
-            
+
             let model_id = model.id.clone();
             let state_clone = state.clone();
             select_btn.connect_clicked(move |_| {
@@ -119,7 +122,7 @@ fn create_model_row(
                 .icon_name("user-trash-symbolic")
                 .css_classes(["destructive-action", "pill"])
                 .build();
-            
+
             let model_id = model.id.clone();
             let state_clone = state.clone();
             delete_btn.connect_clicked(move |_| {
@@ -142,13 +145,13 @@ fn create_model_row(
             .label("Download")
             .css_classes(["pill", "suggested-action"])
             .build();
-        
+
         let model_id = model.id.clone();
         let state_clone = state.clone();
         download_btn.connect_clicked(move |_| {
             let model_id = model_id.clone();
             let state = state_clone.clone();
-            tokio::spawn(async move {
+            glib::spawn_future_local(async move {
                 if let Err(e) = state.model_manager.download_model(&model_id).await {
                     log::error!("Failed to download model: {}", e);
                 }

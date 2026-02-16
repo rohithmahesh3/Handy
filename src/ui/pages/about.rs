@@ -1,7 +1,7 @@
-use gtk::prelude::*;
-use gtk::{Widget, Box, Orientation, Label, Image};
-use libadwaita::Clamp;
 use super::Page;
+use gtk4::prelude::*;
+use gtk4::{Align, Box, Button, Image, Justification, Label, Orientation, Widget};
+use libadwaita::Clamp;
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -11,22 +11,17 @@ pub struct AboutPage {
 
 impl AboutPage {
     pub fn new() -> Self {
-        let container = Clamp::builder()
-            .maximum_size(600)
-            .build();
+        let container = Clamp::builder().maximum_size(600).build();
 
         let vbox = Box::builder()
             .orientation(Orientation::Vertical)
             .spacing(24)
             .margin_top(48)
             .margin_bottom(24)
-            .halign(gtk::Align::Center)
+            .halign(Align::Center)
             .build();
 
-        let logo = Image::builder()
-            .icon_name("handy")
-            .pixel_size(128)
-            .build();
+        let logo = Image::builder().icon_name("handy").pixel_size(128).build();
         vbox.append(&logo);
 
         let name = Label::builder()
@@ -44,34 +39,40 @@ impl AboutPage {
         let description = Label::builder()
             .label("Speech-to-text for GNOME/Wayland via IBus")
             .wrap(true)
-            .justify(gtk::Justification::Center)
+            .justify(Justification::Center)
             .build();
         vbox.append(&description);
 
         let links = Box::builder()
             .orientation(Orientation::Horizontal)
             .spacing(12)
-            .halign(gtk::Align::Center)
+            .halign(Align::Center)
             .margin_top(24)
             .build();
 
-        let website_btn = gtk::Button::builder()
+        let website_btn = Button::builder()
             .label("Website")
             .css_classes(["pill", "suggested-action"])
             .build();
         website_btn.connect_clicked(|_| {
-            let _ = gtk::UriLauncher::new("https://github.com/rohithmahesh/Handy")
-                .launch(None::<&gtk::Window>, None::<gio::Cancellable>, |_| {});
+            gtk4::show_uri(
+                None::<&gtk4::Window>,
+                "https://github.com/rohithmahesh/Handy",
+                0,
+            );
         });
         links.append(&website_btn);
 
-        let issue_btn = gtk::Button::builder()
+        let issue_btn = Button::builder()
             .label("Report Issue")
             .css_classes(["pill"])
             .build();
         issue_btn.connect_clicked(|_| {
-            let _ = gtk::UriLauncher::new("https://github.com/rohithmahesh/Handy/issues")
-                .launch(None::<&gtk::Window>, None::<gio::Cancellable>, |_| {});
+            gtk4::show_uri(
+                None::<&gtk4::Window>,
+                "https://github.com/rohithmahesh/Handy/issues",
+                0,
+            );
         });
         links.append(&issue_btn);
 

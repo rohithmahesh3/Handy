@@ -1,11 +1,12 @@
-use gtk::prelude::*;
-use gtk::{Widget, ScrolledWindow, Box, Orientation, Label, Switch, ComboBoxText};
-use libadwaita::{PreferencesGroup, ActionRow};
+use gtk4::prelude::*;
+use gtk4::{Box, ComboBoxText, Orientation, PolicyType, ScrolledWindow, Switch, Widget};
+use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt};
+use libadwaita::{ActionRow, PreferencesGroup};
 use std::sync::Arc;
 
+use super::Page;
 use crate::app::AppState;
 use crate::settings::ModelUnloadTimeout;
-use super::Page;
 
 pub struct AdvancedPage {
     container: ScrolledWindow,
@@ -22,9 +23,7 @@ impl AdvancedPage {
             .margin_end(24)
             .build();
 
-        let language_group = PreferencesGroup::builder()
-            .title("Language")
-            .build();
+        let language_group = PreferencesGroup::builder().title("Language").build();
 
         let language_row = ActionRow::builder()
             .title("Transcription Language")
@@ -57,11 +56,11 @@ impl AdvancedPage {
             }
         }
         language_combo.set_active(Some(selected_index));
-        
+
         let state_clone = state.clone();
         language_combo.connect_changed(move |combo| {
             if let Some(active) = combo.active_id() {
-                state_clone.settings.set_selected_language(active);
+                state_clone.settings.set_selected_language(&active);
             }
         });
         language_row.add_suffix(&language_combo);
@@ -75,19 +74,19 @@ impl AdvancedPage {
         let translate_switch = Switch::builder()
             .active(state.settings.translate_to_english())
             .build();
-        
+
         let state_clone = state.clone();
         translate_switch.connect_active_notify(move |switch| {
-            state_clone.settings.set_translate_to_english(switch.is_active());
+            state_clone
+                .settings
+                .set_translate_to_english(switch.is_active());
         });
         translate_row.add_suffix(&translate_switch);
         language_group.add(&translate_row);
 
         main_box.append(&language_group);
 
-        let model_group = PreferencesGroup::builder()
-            .title("Model")
-            .build();
+        let model_group = PreferencesGroup::builder().title("Model").build();
 
         let timeout_row = ActionRow::builder()
             .title("Unload Model After")
@@ -121,7 +120,9 @@ impl AdvancedPage {
             if let Some(id) = combo.active_id() {
                 if let Ok(idx) = id.parse::<usize>() {
                     if idx < timeouts.len() {
-                        state_clone.settings.set_model_unload_timeout(timeouts[idx].0);
+                        state_clone
+                            .settings
+                            .set_model_unload_timeout(timeouts[idx].0);
                     }
                 }
             }
@@ -131,9 +132,7 @@ impl AdvancedPage {
 
         main_box.append(&model_group);
 
-        let debug_group = PreferencesGroup::builder()
-            .title("Debug")
-            .build();
+        let debug_group = PreferencesGroup::builder().title("Debug").build();
 
         let debug_row = ActionRow::builder()
             .title("Debug Mode")
@@ -143,7 +142,7 @@ impl AdvancedPage {
         let debug_switch = Switch::builder()
             .active(state.settings.debug_mode())
             .build();
-        
+
         let state_clone = state.clone();
         debug_switch.connect_active_notify(move |switch| {
             state_clone.settings.set_debug_mode(switch.is_active());
@@ -159,10 +158,12 @@ impl AdvancedPage {
         let experimental_switch = Switch::builder()
             .active(state.settings.experimental_enabled())
             .build();
-        
+
         let state_clone = state.clone();
         experimental_switch.connect_active_notify(move |switch| {
-            state_clone.settings.set_experimental_enabled(switch.is_active());
+            state_clone
+                .settings
+                .set_experimental_enabled(switch.is_active());
         });
         experimental_row.add_suffix(&experimental_switch);
         debug_group.add(&experimental_row);
@@ -170,7 +171,7 @@ impl AdvancedPage {
         main_box.append(&debug_group);
 
         let container = ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
+            .hscrollbar_policy(PolicyType::Never)
             .child(&main_box)
             .build();
 

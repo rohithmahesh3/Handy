@@ -1,10 +1,15 @@
+pub mod about;
+pub mod advanced;
 pub mod general;
 pub mod models;
-pub mod advanced;
-pub mod about;
 
-use gtk::Widget;
+use gtk4::prelude::*;
+use gtk4::Widget;
 
 pub trait Page {
     fn widget(&self) -> &Widget;
+
+    fn widget_clone(&self) -> Widget {
+        self.widget().clone()
+    }
 }

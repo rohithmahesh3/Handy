@@ -1,5 +1,5 @@
+use gio::prelude::{SettingsExt, SettingsExtManual};
 use gio::Settings as GioSettings;
-use glib::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -128,7 +128,9 @@ impl Settings {
     }
 
     pub fn set_audio_feedback_volume(&self, value: f32) {
-        self.gio_settings.set_double("audio-feedback-volume", value as f64).ok();
+        self.gio_settings
+            .set_double("audio-feedback-volume", value as f64)
+            .ok();
     }
 
     pub fn sound_theme(&self) -> SoundTheme {
@@ -153,20 +155,32 @@ impl Settings {
     // Device Selection
     pub fn selected_microphone(&self) -> Option<String> {
         let value = self.gio_settings.string("selected-microphone");
-        if value.is_empty() { None } else { Some(value.to_string()) }
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
     }
 
     pub fn set_selected_microphone(&self, value: Option<&str>) {
-        self.gio_settings.set_string("selected-microphone", value.unwrap_or("")).ok();
+        self.gio_settings
+            .set_string("selected-microphone", value.unwrap_or(""))
+            .ok();
     }
 
     pub fn selected_output_device(&self) -> Option<String> {
         let value = self.gio_settings.string("selected-output-device");
-        if value.is_empty() { None } else { Some(value.to_string()) }
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
     }
 
     pub fn set_selected_output_device(&self, value: Option<&str>) {
-        self.gio_settings.set_string("selected-output-device", value.unwrap_or("")).ok();
+        self.gio_settings
+            .set_string("selected-output-device", value.unwrap_or(""))
+            .ok();
     }
 
     // Language
@@ -175,7 +189,9 @@ impl Settings {
     }
 
     pub fn set_selected_language(&self, value: &str) {
-        self.gio_settings.set_string("selected-language", value).ok();
+        self.gio_settings
+            .set_string("selected-language", value)
+            .ok();
     }
 
     pub fn translate_to_english(&self) -> bool {
@@ -183,7 +199,9 @@ impl Settings {
     }
 
     pub fn set_translate_to_english(&self, value: bool) {
-        self.gio_settings.set_boolean("translate-to-english", value).ok();
+        self.gio_settings
+            .set_boolean("translate-to-english", value)
+            .ok();
     }
 
     // Recording
@@ -192,7 +210,9 @@ impl Settings {
     }
 
     pub fn set_mute_while_recording(&self, value: bool) {
-        self.gio_settings.set_boolean("mute-while-recording", value).ok();
+        self.gio_settings
+            .set_boolean("mute-while-recording", value)
+            .ok();
     }
 
     // Model Settings
@@ -230,17 +250,23 @@ impl Settings {
             ModelUnloadTimeout::Hour1 => 6,
             ModelUnloadTimeout::Sec5 => 7,
         };
-        self.gio_settings.set_enum("model-unload-timeout", value).ok();
+        self.gio_settings
+            .set_enum("model-unload-timeout", value)
+            .ok();
     }
 
     // Custom Words
     pub fn custom_words(&self) -> Vec<String> {
-        self.gio_settings.strv("custom-words").iter().map(|s| s.to_string()).collect()
+        self.gio_settings
+            .strv("custom-words")
+            .iter()
+            .map(|s| s.as_str().to_string())
+            .collect()
     }
 
     pub fn set_custom_words(&self, words: &[String]) {
         let strv: Vec<&str> = words.iter().map(|s| s.as_str()).collect();
-        self.gio_settings.set_strv("custom-words", &strv).ok();
+        self.gio_settings.set_strv("custom-words", strv).ok();
     }
 
     // Debug Settings
@@ -288,7 +314,9 @@ impl Settings {
     }
 
     pub fn set_experimental_enabled(&self, value: bool) {
-        self.gio_settings.set_boolean("experimental-enabled", value).ok();
+        self.gio_settings
+            .set_boolean("experimental-enabled", value)
+            .ok();
     }
 
     // Post-Processing Settings
@@ -297,15 +325,21 @@ impl Settings {
     }
 
     pub fn set_post_process_enabled(&self, value: bool) {
-        self.gio_settings.set_boolean("post-process-enabled", value).ok();
+        self.gio_settings
+            .set_boolean("post-process-enabled", value)
+            .ok();
     }
 
     pub fn post_process_provider_id(&self) -> String {
-        self.gio_settings.string("post-process-provider-id").to_string()
+        self.gio_settings
+            .string("post-process-provider-id")
+            .to_string()
     }
 
     pub fn set_post_process_provider_id(&self, value: &str) {
-        self.gio_settings.set_string("post-process-provider-id", value).ok();
+        self.gio_settings
+            .set_string("post-process-provider-id", value)
+            .ok();
     }
 
     pub fn post_process_api_keys(&self) -> HashMap<String, String> {
@@ -315,7 +349,9 @@ impl Settings {
 
     pub fn set_post_process_api_keys(&self, keys: HashMap<String, String>) {
         let json = serde_json::to_string(&keys).unwrap_or_default();
-        self.gio_settings.set_string("post-process-api-keys", &json).ok();
+        self.gio_settings
+            .set_string("post-process-api-keys", &json)
+            .ok();
     }
 
     pub fn post_process_models(&self) -> HashMap<String, String> {
@@ -325,7 +361,9 @@ impl Settings {
 
     pub fn set_post_process_models(&self, models: HashMap<String, String>) {
         let json = serde_json::to_string(&models).unwrap_or_default();
-        self.gio_settings.set_string("post-process-models", &json).ok();
+        self.gio_settings
+            .set_string("post-process-models", &json)
+            .ok();
     }
 
     pub fn post_process_base_urls(&self) -> HashMap<String, String> {
@@ -335,7 +373,9 @@ impl Settings {
 
     pub fn set_post_process_base_urls(&self, urls: HashMap<String, String>) {
         let json = serde_json::to_string(&urls).unwrap_or_default();
-        self.gio_settings.set_string("post-process-base-urls", &json).ok();
+        self.gio_settings
+            .set_string("post-process-base-urls", &json)
+            .ok();
     }
 
     pub fn post_process_prompts(&self) -> Vec<LLMPrompt> {
@@ -345,16 +385,24 @@ impl Settings {
 
     pub fn set_post_process_prompts(&self, prompts: Vec<LLMPrompt>) {
         let json = serde_json::to_string(&prompts).unwrap_or_default();
-        self.gio_settings.set_string("post-process-prompts", &json).ok();
+        self.gio_settings
+            .set_string("post-process-prompts", &json)
+            .ok();
     }
 
     pub fn post_process_selected_prompt_id(&self) -> Option<String> {
         let value = self.gio_settings.string("post-process-selected-prompt-id");
-        if value.is_empty() { None } else { Some(value.to_string()) }
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
     }
 
     pub fn set_post_process_selected_prompt_id(&self, value: Option<&str>) {
-        self.gio_settings.set_string("post-process-selected-prompt-id", value.unwrap_or("")).ok();
+        self.gio_settings
+            .set_string("post-process-selected-prompt-id", value.unwrap_or(""))
+            .ok();
     }
 }
 

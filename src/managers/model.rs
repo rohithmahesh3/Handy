@@ -1,8 +1,7 @@
-use crate::settings::Settings;
 use anyhow::Result;
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
-use log::{debug, error, info, warn};
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -11,7 +10,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 use tar::Archive;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,7 +50,7 @@ pub struct DownloadProgress {
 }
 
 pub struct ModelManager {
-    settings: Settings,
+    selected_model: Mutex<String>,
     models_dir: PathBuf,
     available_models: Mutex<HashMap<String, ModelInfo>>,
     cancel_flags: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
@@ -61,7 +59,7 @@ pub struct ModelManager {
 
 impl ModelManager {
     pub fn new() -> Result<Self> {
-        let settings = Settings::new();
+        let settings = crate::settings::Settings::new();
         let models_dir = std::env::var("XDG_DATA_HOME")
             .map(|p| PathBuf::from(p).join("handy").join("models"))
             .unwrap_or_else(|_| {
@@ -202,7 +200,8 @@ impl ModelManager {
             ModelInfo {
                 id: "sense-voice-int8".to_string(),
                 name: "SenseVoice".to_string(),
-                description: "Very fast. Chinese, English, Japanese, Korean, Cantonese.".to_string(),
+                description: "Very fast. Chinese, English, Japanese, Korean, Cantonese."
+                    .to_string(),
                 filename: "sense-voice-int8".to_string(),
                 url: Some("https://blob.handy.computer/sense-voice-int8.tar.gz".to_string()),
                 size_mb: 160,
@@ -224,8 +223,9 @@ impl ModelManager {
             warn!("Failed to discover custom models: {}", e);
         }
 
+        let selected_model = settings.selected_model();
         let manager = Self {
-            settings,
+            selected_model: Mutex::new(selected_model),
             models_dir,
             available_models: Mutex::new(available_models),
             cancel_flags: Arc::new(Mutex::new(HashMap::new())),
@@ -250,7 +250,9 @@ impl ModelManager {
 
     pub fn get_model_path(&self, model_id: &str) -> Option<PathBuf> {
         let models = self.available_models.lock().unwrap();
-        models.get(model_id).map(|m| self.models_dir.join(&m.filename))
+        models
+            .get(model_id)
+            .map(|m| self.models_dir.join(&m.filename))
     }
 
     fn update_download_status(&self) -> Result<()> {
@@ -288,14 +290,15 @@ impl ModelManager {
     }
 
     fn auto_select_model_if_needed(&self) -> Result<()> {
-        let selected = self.settings.selected_model();
-        
+        let selected = self.selected_model.lock().unwrap().clone();
+
         if selected.is_empty() {
             let models = self.available_models.lock().unwrap();
             if let Some(available_model) = models.values().find(|model| model.is_downloaded) {
-                info!("Auto-selecting model: {}", available_model.id);
+                let model_id = available_model.id.clone();
+                info!("Auto-selecting model: {}", model_id);
                 drop(models);
-                self.settings.set_selected_model(&available_model.id);
+                *self.selected_model.lock().unwrap() = model_id;
             }
         }
 
@@ -351,7 +354,10 @@ impl ModelManager {
                 Err(_) => 0,
             };
 
-            info!("Discovered custom Whisper model: {} ({} MB)", model_id, size_mb);
+            info!(
+                "Discovered custom Whisper model: {} ({} MB)",
+                model_id, size_mb
+            );
 
             available_models.insert(
                 model_id.clone(),
@@ -386,11 +392,16 @@ impl ModelManager {
             models.get(model_id).cloned()
         };
 
-        let model_info = model_info.ok_or_else(|| anyhow::anyhow!("Model not found: {}", model_id))?;
+        let model_info =
+            model_info.ok_or_else(|| anyhow::anyhow!("Model not found: {}", model_id))?;
 
-        let url = model_info.url.ok_or_else(|| anyhow::anyhow!("No download URL for model"))?;
+        let url = model_info
+            .url
+            .ok_or_else(|| anyhow::anyhow!("No download URL for model"))?;
         let model_path = self.models_dir.join(&model_info.filename);
-        let partial_path = self.models_dir.join(format!("{}.partial", &model_info.filename));
+        let partial_path = self
+            .models_dir
+            .join(format!("{}.partial", &model_info.filename));
 
         if model_path.exists() {
             if partial_path.exists() {
@@ -435,14 +446,19 @@ impl ModelManager {
             response = client.get(&url).send().await?;
         }
 
-        if !response.status().is_success() && response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+        if !response.status().is_success()
+            && response.status() != reqwest::StatusCode::PARTIAL_CONTENT
+        {
             {
                 let mut models = self.available_models.lock().unwrap();
                 if let Some(model) = models.get_mut(model_id) {
                     model.is_downloading = false;
                 }
             }
-            return Err(anyhow::anyhow!("Failed to download: HTTP {}", response.status()));
+            return Err(anyhow::anyhow!(
+                "Failed to download: HTTP {}",
+                response.status()
+            ));
         }
 
         let total_size = if resume_from > 0 {
@@ -455,7 +471,10 @@ impl ModelManager {
         let mut stream = response.bytes_stream();
 
         let mut file = if resume_from > 0 {
-            std::fs::OpenOptions::new().create(true).append(true).open(&partial_path)?
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&partial_path)?
         } else {
             std::fs::File::create(&partial_path)?
         };
@@ -483,7 +502,6 @@ impl ModelManager {
 
         drop(file);
 
-        // Rename partial to final
         fs::rename(&partial_path, &model_path)?;
 
         if model_info.is_directory {
@@ -535,8 +553,11 @@ impl ModelManager {
         archive.unpack(&extracting_dir)?;
 
         let extracted_name = tar_path.file_stem().unwrap().to_str().unwrap();
-        let final_dir = tar_path.parent().unwrap().join(extracted_name.trim_end_matches(".tar"));
-        
+        let final_dir = tar_path
+            .parent()
+            .unwrap()
+            .join(extracted_name.trim_end_matches(".tar"));
+
         if final_dir.exists() {
             fs::remove_dir_all(&final_dir)?;
         }
@@ -578,8 +599,10 @@ impl ModelManager {
 
             self.update_download_status()?;
 
-            if self.settings.selected_model() == model_id {
-                self.settings.set_selected_model("");
+            let selected = self.selected_model.lock().unwrap();
+            if *selected == model_id {
+                drop(selected);
+                *self.selected_model.lock().unwrap() = String::new();
             }
         }
 
@@ -590,14 +613,14 @@ impl ModelManager {
         let models = self.available_models.lock().unwrap();
         if models.contains_key(model_id) {
             drop(models);
-            self.settings.set_selected_model(model_id);
+            *self.selected_model.lock().unwrap() = model_id.to_string();
             info!("Active model set to: {}", model_id);
         }
         Ok(())
     }
 
     pub fn get_current_model(&self) -> String {
-        self.settings.selected_model()
+        self.selected_model.lock().unwrap().clone()
     }
 
     pub fn has_any_models_available(&self) -> bool {

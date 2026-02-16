@@ -1,12 +1,12 @@
-use std::ffi::{c_char, c_void, CString};
+use std::ffi::{c_void, CString};
 use std::sync::{Arc, Mutex};
 
 use log::{debug, error, info, warn};
 use zbus::blocking::Connection;
 
-use ibus_sys::{gboolean, guint, IBusEngine, IBusText, TRUE};
 use ibus_sys::keys::IBUS_KEY_Escape;
 use ibus_sys::modifiers::IBUS_RELEASE_MASK;
+use ibus_sys::{gboolean, guint, IBusEngine, TRUE};
 
 const HANDY_BUS_NAME: &str = "com.handy.Transcription";
 const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
@@ -154,13 +154,16 @@ impl HandyContext {
             "StopRecording",
             &(),
         ) {
-            Ok(reply) => {
-                if let Ok(text) = reply.body::<String>() {
+            Ok(reply) => match reply.body().deserialize::<String>() {
+                Ok(text) => {
                     if !text.is_empty() {
                         self.commit_text(engine, &text);
                     }
                 }
-            }
+                Err(e) => {
+                    error!("Failed to deserialize transcription response: {}", e);
+                }
+            },
             Err(e) => {
                 error!("Failed to stop recording: {}", e);
             }
@@ -273,7 +276,13 @@ unsafe extern "C" fn disable_callback(context: *mut c_void, engine: *mut IBusEng
 extern "C" {
     fn ibus_handy_set_callback(
         ctx: *mut c_void,
-        key_event_cb: unsafe extern "C" fn(*mut c_void, *mut IBusEngine, guint, guint, guint) -> gboolean,
+        key_event_cb: unsafe extern "C" fn(
+            *mut c_void,
+            *mut IBusEngine,
+            guint,
+            guint,
+            guint,
+        ) -> gboolean,
         focus_in_cb: unsafe extern "C" fn(*mut c_void, *mut IBusEngine),
         focus_out_cb: unsafe extern "C" fn(*mut c_void, *mut IBusEngine),
         reset_cb: unsafe extern "C" fn(*mut c_void, *mut IBusEngine),

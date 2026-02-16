@@ -34,7 +34,7 @@ fn main() {
         build.include(path);
     }
 
-    build.define("PKGDATADIR", Some("/usr/share/handy"));
+    build.define("PKGDATADIR", Some("\"/usr/share/handy\""));
     build.compile("ibus_handy_wrapper");
 
     println!("cargo:rustc-link-lib=ibus-1.0");

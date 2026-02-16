@@ -5,19 +5,19 @@
 
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::transcription::TranscriptionManager;
-use crate::settings::Settings;
 use crate::text_utils::convert_chinese_variant;
 use log::{debug, error, info, warn};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use zbus::fdo;
-use zbus::object_server::SignalEmitter;
+use zbus::object_server::SignalContext;
 use zbus::Connection;
 
 /// Shared state for the D-Bus server and handlers
 pub struct HandyState {
-    pub settings: Settings,
+    pub selected_language: Mutex<String>,
+    pub always_on_microphone: AtomicBool,
     pub recording_manager: Arc<AudioRecordingManager>,
     pub transcription_manager: Arc<TranscriptionManager>,
     pub is_recording: AtomicBool,
@@ -25,12 +25,14 @@ pub struct HandyState {
 
 impl HandyState {
     pub fn new(
-        settings: Settings,
         recording_manager: Arc<AudioRecordingManager>,
         transcription_manager: Arc<TranscriptionManager>,
+        selected_language: String,
+        always_on_microphone: bool,
     ) -> Self {
         Self {
-            settings,
+            selected_language: Mutex::new(selected_language),
+            always_on_microphone: AtomicBool::new(always_on_microphone),
             recording_manager,
             transcription_manager,
             is_recording: AtomicBool::new(false),
@@ -72,17 +74,15 @@ impl HandyTranscription {
 
         self.state.transcription_manager.initiate_model_load();
 
-        let is_always_on = self.state.settings.always_on_microphone();
+        let is_always_on = self.state.always_on_microphone.load(Ordering::SeqCst);
         let recording_started = if is_always_on {
             self.state.recording_manager.try_start_recording("ibus")
         } else {
             if self.state.recording_manager.try_start_recording("ibus") {
-                std::thread::spawn({
-                    let rm = self.state.recording_manager.clone();
-                    move || {
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                        rm.apply_mute();
-                    }
+                let rm = self.state.recording_manager.clone();
+                glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                    rm.apply_mute();
+                    glib::ControlFlow::Break
                 });
                 true
             } else {
@@ -124,7 +124,7 @@ impl HandyTranscription {
                         transcription
                     );
 
-                    let lang = self.state.settings.selected_language();
+                    let lang = self.state.selected_language.lock().unwrap().clone();
                     let final_text = convert_chinese_variant(&transcription, &lang);
 
                     self.state.is_recording.store(false, Ordering::SeqCst);
@@ -137,7 +137,8 @@ impl HandyTranscription {
                     error!("D-Bus: Transcription error: {}", err);
                     self.state.is_recording.store(false, Ordering::SeqCst);
                     self.emit_recording_state_changed(false).await?;
-                    self.emit_error(&format!("Transcription failed: {}", err)).await?;
+                    self.emit_error(&format!("Transcription failed: {}", err))
+                        .await?;
                     Err(fdo::Error::Failed(format!("Transcription failed: {}", err)))
                 }
             }
@@ -173,29 +174,29 @@ impl HandyTranscription {
 
     /// Get the currently selected language
     async fn get_language(&self) -> fdo::Result<String> {
-        Ok(self.state.settings.selected_language())
+        Ok(self.state.selected_language.lock().unwrap().clone())
     }
 
     /// Set the language for transcription
     async fn set_language(&self, language: String) -> fdo::Result<()> {
-        self.state.settings.set_selected_language(&language);
+        *self.state.selected_language.lock().unwrap() = language;
         Ok(())
     }
 
     /// Signal emitted when transcription is ready
     #[zbus(signal)]
-    async fn transcription_ready(ctxt: &SignalEmitter<'_>, text: &str) -> zbus::Result<()>;
+    async fn transcription_ready(ctxt: &SignalContext<'_>, text: &str) -> zbus::Result<()>;
 
     /// Signal emitted when recording state changes
     #[zbus(signal)]
     async fn recording_state_changed(
-        ctxt: &SignalEmitter<'_>,
+        ctxt: &SignalContext<'_>,
         is_recording: bool,
     ) -> zbus::Result<()>;
 
     /// Signal emitted when an error occurs
     #[zbus(signal)]
-    async fn error(ctxt: &SignalEmitter<'_>, message: &str) -> zbus::Result<()>;
+    async fn error(ctxt: &SignalContext<'_>, message: &str) -> zbus::Result<()>;
 }
 
 impl HandyTranscription {
@@ -204,28 +205,65 @@ impl HandyTranscription {
     }
 
     async fn emit_transcription_ready(&self, text: &str) -> fdo::Result<()> {
-        if let Some(conn) = self.dbus_state.connection.lock().ok().and_then(|c| c.clone()) {
-            if let Err(e) = Self::transcription_ready(&conn.object_server(), text).await {
-                error!("Failed to emit TranscriptionReady signal: {}", e);
+        if let Some(conn) = self
+            .dbus_state
+            .connection
+            .lock()
+            .ok()
+            .and_then(|c| c.clone())
+        {
+            let iface_ref = conn
+                .object_server()
+                .interface::<_, Self>("/com/handy/Transcription")
+                .await;
+            if let Ok(iface_ref) = iface_ref {
+                if let Err(e) = Self::transcription_ready(iface_ref.signal_context(), text).await {
+                    error!("Failed to emit TranscriptionReady signal: {}", e);
+                }
             }
         }
         Ok(())
     }
 
     async fn emit_recording_state_changed(&self, is_recording: bool) -> fdo::Result<()> {
-        if let Some(conn) = self.dbus_state.connection.lock().ok().and_then(|c| c.clone()) {
-            if let Err(e) = Self::recording_state_changed(&conn.object_server(), is_recording).await
-            {
-                error!("Failed to emit RecordingStateChanged signal: {}", e);
+        if let Some(conn) = self
+            .dbus_state
+            .connection
+            .lock()
+            .ok()
+            .and_then(|c| c.clone())
+        {
+            let iface_ref = conn
+                .object_server()
+                .interface::<_, Self>("/com/handy/Transcription")
+                .await;
+            if let Ok(iface_ref) = iface_ref {
+                if let Err(e) =
+                    Self::recording_state_changed(iface_ref.signal_context(), is_recording).await
+                {
+                    error!("Failed to emit RecordingStateChanged signal: {}", e);
+                }
             }
         }
         Ok(())
     }
 
     async fn emit_error(&self, message: &str) -> fdo::Result<()> {
-        if let Some(conn) = self.dbus_state.connection.lock().ok().and_then(|c| c.clone()) {
-            if let Err(e) = Self::error(&conn.object_server(), message).await {
-                error!("Failed to emit Error signal: {}", e);
+        if let Some(conn) = self
+            .dbus_state
+            .connection
+            .lock()
+            .ok()
+            .and_then(|c| c.clone())
+        {
+            let iface_ref = conn
+                .object_server()
+                .interface::<_, Self>("/com/handy/Transcription")
+                .await;
+            if let Ok(iface_ref) = iface_ref {
+                if let Err(e) = Self::error(iface_ref.signal_context(), message).await {
+                    error!("Failed to emit Error signal: {}", e);
+                }
             }
         }
         Ok(())

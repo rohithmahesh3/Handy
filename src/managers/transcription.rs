@@ -25,82 +25,120 @@ enum LoadedEngine {
 }
 
 #[derive(Clone)]
+pub struct TranscriptionConfig {
+    pub model_unload_timeout: ModelUnloadTimeout,
+    pub selected_language: String,
+    pub translate_to_english: bool,
+    pub custom_words: Vec<String>,
+    pub word_correction_threshold: f64,
+}
+
+impl TranscriptionConfig {
+    pub fn from_settings(settings: &Settings) -> Self {
+        Self {
+            model_unload_timeout: settings.model_unload_timeout(),
+            selected_language: settings.selected_language(),
+            translate_to_english: settings.translate_to_english(),
+            custom_words: settings.custom_words(),
+            word_correction_threshold: settings.word_correction_threshold(),
+        }
+    }
+}
+
+struct SharedState {
+    engine: Mutex<Option<LoadedEngine>>,
+    config: Mutex<TranscriptionConfig>,
+    current_model_id: Mutex<Option<String>>,
+    last_activity: AtomicU64,
+    is_loading: Mutex<bool>,
+    loading_condvar: Condvar,
+}
+
 pub struct TranscriptionManager {
-    engine: Arc<Mutex<Option<LoadedEngine>>>,
+    shared: Arc<SharedState>,
     model_manager: Arc<ModelManager>,
-    settings: Settings,
-    current_model_id: Arc<Mutex<Option<String>>>,
-    last_activity: Arc<AtomicU64>,
     shutdown_signal: Arc<AtomicBool>,
-    watcher_handle: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
-    is_loading: Arc<Mutex<bool>>,
-    loading_condvar: Arc<Condvar>,
+    watcher_handle: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
 impl TranscriptionManager {
     pub fn new(model_manager: Arc<ModelManager>) -> Result<Self> {
         let settings = Settings::new();
-        
-        let manager = Self {
-            engine: Arc::new(Mutex::new(None)),
-            model_manager,
-            settings: settings.clone(),
-            current_model_id: Arc::new(Mutex::new(None)),
-            last_activity: Arc::new(AtomicU64::new(
+        let config = TranscriptionConfig::from_settings(&settings);
+        let unload_timeout = config.model_unload_timeout;
+
+        let shared = Arc::new(SharedState {
+            engine: Mutex::new(None),
+            config: Mutex::new(config),
+            current_model_id: Mutex::new(None),
+            last_activity: AtomicU64::new(
                 SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
                     .unwrap()
                     .as_millis() as u64,
-            )),
-            shutdown_signal: Arc::new(AtomicBool::new(false)),
-            watcher_handle: Arc::new(Mutex::new(None)),
-            is_loading: Arc::new(Mutex::new(false)),
-            loading_condvar: Arc::new(Condvar::new()),
-        };
+            ),
+            is_loading: Mutex::new(false),
+            loading_condvar: Condvar::new(),
+        });
+
+        let shutdown_signal = Arc::new(AtomicBool::new(false));
 
         {
-            let manager_cloned = manager.clone();
-            let settings_cloned = settings;
-            let shutdown_signal = manager.shutdown_signal.clone();
+            let shared_clone = shared.clone();
+            let shutdown_signal_clone = shutdown_signal.clone();
             let handle = thread::spawn(move || {
-                while !shutdown_signal.load(Ordering::Relaxed) {
+                while !shutdown_signal_clone.load(Ordering::Relaxed) {
                     thread::sleep(Duration::from_secs(10));
 
-                    if shutdown_signal.load(Ordering::Relaxed) {
+                    if shutdown_signal_clone.load(Ordering::Relaxed) {
                         break;
                     }
 
-                    let timeout_seconds = settings_cloned.model_unload_timeout().to_seconds();
+                    let config = shared_clone.config.lock().unwrap();
+                    let timeout = config.model_unload_timeout;
+                    drop(config);
+
+                    let timeout_seconds = timeout.to_seconds();
 
                     if let Some(limit_seconds) = timeout_seconds {
-                        if settings_cloned.model_unload_timeout() == ModelUnloadTimeout::Immediately {
+                        if timeout == ModelUnloadTimeout::Immediately {
                             continue;
                         }
 
-                        let last = manager_cloned.last_activity.load(Ordering::Relaxed);
+                        let last = shared_clone.last_activity.load(Ordering::Relaxed);
                         let now_ms = SystemTime::now()
                             .duration_since(SystemTime::UNIX_EPOCH)
                             .unwrap()
                             .as_millis() as u64;
 
                         if now_ms.saturating_sub(last) > limit_seconds * 1000 {
-                            if manager_cloned.is_model_loaded() {
+                            let engine = shared_clone.engine.lock().unwrap();
+                            if engine.is_some() {
+                                drop(engine);
                                 debug!("Unloading model due to inactivity");
-                                let _ = manager_cloned.unload_model();
+                                let mut engine = shared_clone.engine.lock().unwrap();
+                                *engine = None;
+                                *shared_clone.current_model_id.lock().unwrap() = None;
                             }
                         }
                     }
                 }
                 debug!("Idle watcher thread shutting down");
             });
-            *manager.watcher_handle.lock().unwrap() = Some(handle);
-        }
 
-        Ok(manager)
+            let manager = Self {
+                shared,
+                model_manager,
+                shutdown_signal,
+                watcher_handle: Mutex::new(Some(handle)),
+            };
+
+            Ok(manager)
+        }
     }
 
     pub fn is_model_loaded(&self) -> bool {
-        let engine = self.engine.lock().unwrap();
+        let engine = self.shared.engine.lock().unwrap();
         engine.is_some()
     }
 
@@ -108,7 +146,7 @@ impl TranscriptionManager {
         debug!("Unloading model");
 
         {
-            let mut engine = self.engine.lock().unwrap();
+            let mut engine = self.shared.engine.lock().unwrap();
             if let Some(ref mut loaded_engine) = *engine {
                 match loaded_engine {
                     LoadedEngine::Whisper(ref mut e) => e.unload_model(),
@@ -120,7 +158,7 @@ impl TranscriptionManager {
             *engine = None;
         }
         {
-            let mut current_model = self.current_model_id.lock().unwrap();
+            let mut current_model = self.shared.current_model_id.lock().unwrap();
             *current_model = None;
         }
 
@@ -129,8 +167,11 @@ impl TranscriptionManager {
     }
 
     pub fn maybe_unload_immediately(&self, context: &str) {
-        if self.settings.model_unload_timeout() == ModelUnloadTimeout::Immediately && self.is_model_loaded() {
+        let config = self.shared.config.lock().unwrap();
+        if config.model_unload_timeout == ModelUnloadTimeout::Immediately && self.is_model_loaded()
+        {
             info!("Immediately unloading model after {}", context);
+            drop(config);
             let _ = self.unload_model();
         }
     }
@@ -147,41 +188,51 @@ impl TranscriptionManager {
             return Err(anyhow::anyhow!("Model not downloaded"));
         }
 
-        let model_path = self.model_manager.get_model_path(model_id)
+        let model_path = self
+            .model_manager
+            .get_model_path(model_id)
             .ok_or_else(|| anyhow::anyhow!("Model path not found"))?;
 
         let loaded_engine = match model_info.engine_type {
             EngineType::Whisper => {
                 let mut engine = WhisperEngine::new();
-                engine.load_model(&model_path)?;
+                engine
+                    .load_model(&model_path)
+                    .map_err(|e| anyhow::anyhow!("Failed to load Whisper model: {}", e))?;
                 LoadedEngine::Whisper(engine)
             }
             EngineType::Parakeet => {
                 let mut engine = ParakeetEngine::new();
-                engine.load_model_with_params(&model_path, ParakeetModelParams::int8())?;
+                engine
+                    .load_model_with_params(&model_path, ParakeetModelParams::int8())
+                    .map_err(|e| anyhow::anyhow!("Failed to load Parakeet model: {}", e))?;
                 LoadedEngine::Parakeet(engine)
             }
             EngineType::Moonshine => {
                 let mut engine = MoonshineEngine::new();
-                engine.load_model_with_params(
-                    &model_path,
-                    MoonshineModelParams::variant(ModelVariant::Base),
-                )?;
+                engine
+                    .load_model_with_params(
+                        &model_path,
+                        MoonshineModelParams::variant(ModelVariant::Base),
+                    )
+                    .map_err(|e| anyhow::anyhow!("Failed to load Moonshine model: {}", e))?;
                 LoadedEngine::Moonshine(engine)
             }
             EngineType::SenseVoice => {
                 let mut engine = SenseVoiceEngine::new();
-                engine.load_model_with_params(&model_path, SenseVoiceModelParams::int8())?;
+                engine
+                    .load_model_with_params(&model_path, SenseVoiceModelParams::int8())
+                    .map_err(|e| anyhow::anyhow!("Failed to load SenseVoice model: {}", e))?;
                 LoadedEngine::SenseVoice(engine)
             }
         };
 
         {
-            let mut engine = self.engine.lock().unwrap();
+            let mut engine = self.shared.engine.lock().unwrap();
             *engine = Some(loaded_engine);
         }
         {
-            let mut current_model = self.current_model_id.lock().unwrap();
+            let mut current_model = self.shared.current_model_id.lock().unwrap();
             *current_model = Some(model_id.to_string());
         }
 
@@ -190,32 +241,103 @@ impl TranscriptionManager {
     }
 
     pub fn initiate_model_load(&self) {
-        let mut is_loading = self.is_loading.lock().unwrap();
+        let mut is_loading = self.shared.is_loading.lock().unwrap();
         if *is_loading || self.is_model_loaded() {
             return;
         }
 
         *is_loading = true;
-        let manager = self.clone();
+        let shared = self.shared.clone();
+        let model_manager = self.model_manager.clone();
         drop(is_loading);
 
         thread::spawn(move || {
-            let selected_model = manager.model_manager.get_current_model();
+            let selected_model = model_manager.get_current_model();
             if selected_model.is_empty() {
                 warn!("No model selected");
-                let mut is_loading = manager.is_loading.lock().unwrap();
+                let mut is_loading = shared.is_loading.lock().unwrap();
                 *is_loading = false;
-                manager.loading_condvar.notify_all();
+                shared.loading_condvar.notify_all();
                 return;
             }
 
-            if let Err(e) = manager.load_model(&selected_model) {
-                error!("Failed to load model {}: {}", selected_model, e);
+            let model_info = model_manager.get_model_info(&selected_model);
+            if model_info.is_none() || !model_info.as_ref().unwrap().is_downloaded {
+                error!("Model not found or not downloaded: {}", selected_model);
+                let mut is_loading = shared.is_loading.lock().unwrap();
+                *is_loading = false;
+                shared.loading_condvar.notify_all();
+                return;
             }
 
-            let mut is_loading = manager.is_loading.lock().unwrap();
+            let model_path = model_manager.get_model_path(&selected_model);
+            if model_path.is_none() {
+                error!("Model path not found: {}", selected_model);
+                let mut is_loading = shared.is_loading.lock().unwrap();
+                *is_loading = false;
+                shared.loading_condvar.notify_all();
+                return;
+            }
+
+            let model_path = model_path.unwrap();
+            let model_info = model_info.unwrap();
+
+            let loaded_engine = match model_info.engine_type {
+                EngineType::Whisper => {
+                    let mut engine = WhisperEngine::new();
+                    match engine.load_model(&model_path) {
+                        Ok(_) => Some(LoadedEngine::Whisper(engine)),
+                        Err(e) => {
+                            error!("Failed to load Whisper model: {}", e);
+                            None
+                        }
+                    }
+                }
+                EngineType::Parakeet => {
+                    let mut engine = ParakeetEngine::new();
+                    match engine.load_model_with_params(&model_path, ParakeetModelParams::int8()) {
+                        Ok(_) => Some(LoadedEngine::Parakeet(engine)),
+                        Err(e) => {
+                            error!("Failed to load Parakeet model: {}", e);
+                            None
+                        }
+                    }
+                }
+                EngineType::Moonshine => {
+                    let mut engine = MoonshineEngine::new();
+                    match engine.load_model_with_params(
+                        &model_path,
+                        MoonshineModelParams::variant(ModelVariant::Base),
+                    ) {
+                        Ok(_) => Some(LoadedEngine::Moonshine(engine)),
+                        Err(e) => {
+                            error!("Failed to load Moonshine model: {}", e);
+                            None
+                        }
+                    }
+                }
+                EngineType::SenseVoice => {
+                    let mut engine = SenseVoiceEngine::new();
+                    match engine.load_model_with_params(&model_path, SenseVoiceModelParams::int8())
+                    {
+                        Ok(_) => Some(LoadedEngine::SenseVoice(engine)),
+                        Err(e) => {
+                            error!("Failed to load SenseVoice model: {}", e);
+                            None
+                        }
+                    }
+                }
+            };
+
+            if let Some(loaded_engine) = loaded_engine {
+                *shared.engine.lock().unwrap() = Some(loaded_engine);
+                *shared.current_model_id.lock().unwrap() = Some(selected_model.clone());
+                info!("Model {} loaded successfully", selected_model);
+            }
+
+            let mut is_loading = shared.is_loading.lock().unwrap();
             *is_loading = false;
-            manager.loading_condvar.notify_all();
+            shared.loading_condvar.notify_all();
         });
     }
 
@@ -223,46 +345,60 @@ impl TranscriptionManager {
         self.update_activity();
 
         let model_id = {
-            let current = self.current_model_id.lock().unwrap();
+            let current = self.shared.current_model_id.lock().unwrap();
             current.clone()
         };
 
         if model_id.is_none() || !self.is_model_loaded() {
             self.initiate_model_load();
-            
-            let mut is_loading = self.is_loading.lock().unwrap();
+
+            let mut is_loading = self.shared.is_loading.lock().unwrap();
             while *is_loading {
-                is_loading = self.loading_condvar.wait(is_loading).unwrap();
+                is_loading = self.shared.loading_condvar.wait(is_loading).unwrap();
             }
         }
 
-        let engine = self.engine.lock().unwrap();
-        let loaded_engine = engine.as_ref().ok_or_else(|| anyhow::anyhow!("No engine loaded"))?;
+        let mut engine = self.shared.engine.lock().unwrap();
+        let loaded_engine = engine
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("No engine loaded"))?;
 
-        let settings = &self.settings;
-        let language = settings.selected_language();
-        let translate = settings.translate_to_english();
+        let (language, translate, custom_words, threshold) = {
+            let config = self.shared.config.lock().unwrap();
+            (
+                config.selected_language.clone(),
+                config.translate_to_english,
+                config.custom_words.clone(),
+                config.word_correction_threshold,
+            )
+        };
 
         let result = match loaded_engine {
             LoadedEngine::Whisper(e) => {
                 let mut params = WhisperInferenceParams::default();
                 if language != "auto" {
-                    params.language = language.clone();
+                    params.language = Some(language.clone());
                 }
                 params.translate = translate;
-                e.transcribe_with_params(&samples, params)
+                e.transcribe_samples(samples.clone(), Some(params))
+                    .map_err(|e| anyhow::anyhow!("Whisper transcription failed: {}", e))
             }
-            LoadedEngine::Parakeet(e) => e.transcribe(&samples),
-            LoadedEngine::Moonshine(e) => e.transcribe(&samples),
-            LoadedEngine::SenseVoice(e) => e.transcribe(&samples),
+            LoadedEngine::Parakeet(e) => e
+                .transcribe_samples(samples.clone(), None)
+                .map_err(|e| anyhow::anyhow!("Parakeet transcription failed: {}", e)),
+            LoadedEngine::Moonshine(e) => e
+                .transcribe_samples(samples.clone(), None)
+                .map_err(|e| anyhow::anyhow!("Moonshine transcription failed: {}", e)),
+            LoadedEngine::SenseVoice(e) => e
+                .transcribe_samples(samples, None)
+                .map_err(|e| anyhow::anyhow!("SenseVoice transcription failed: {}", e)),
         };
 
         drop(engine);
 
-        let mut text = result?;
+        let transcription_result = result?;
+        let mut text = transcription_result.text;
 
-        let custom_words = settings.custom_words();
-        let threshold = settings.word_correction_threshold();
         if !custom_words.is_empty() {
             text = apply_custom_words(&text, &custom_words, threshold);
         }
@@ -275,9 +411,9 @@ impl TranscriptionManager {
     }
 
     pub fn get_model_load_status(&self) -> (bool, bool, Option<String>) {
-        let is_loading = *self.is_loading.lock().unwrap();
+        let is_loading = *self.shared.is_loading.lock().unwrap();
         let is_loaded = self.is_model_loaded();
-        let current_model = self.current_model_id.lock().unwrap().clone();
+        let current_model = self.shared.current_model_id.lock().unwrap().clone();
         (is_loading, is_loaded, current_model)
     }
 
@@ -286,7 +422,7 @@ impl TranscriptionManager {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
-        self.last_activity.store(now, Ordering::Relaxed);
+        self.shared.last_activity.store(now, Ordering::Relaxed);
     }
 }
 

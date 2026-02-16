@@ -12,3 +12,4 @@ cc = "1.0"
 [dependencies]
 glib-sys = "0.20"
 gobject-sys = "0.20"
+gio-sys = "0.20"

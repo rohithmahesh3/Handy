@@ -1,11 +1,12 @@
-use gtk::prelude::*;
-use gtk::{Box, Orientation};
+use gtk4::prelude::*;
+use gtk4::{Box, Orientation};
+use libadwaita::prelude::AdwWindowExt;
 use libadwaita::{Application as AdwApplication, HeaderBar, Window, WindowTitle};
 use std::sync::Arc;
 
-use crate::app::AppState;
-use super::sidebar::Sidebar;
 use super::pages::Page;
+use super::sidebar::Sidebar;
+use crate::app::AppState;
 
 pub struct MainWindow {
     window: Window,
@@ -20,12 +21,10 @@ impl MainWindow {
             .default_height(650)
             .build();
 
-        let main_box = Box::builder()
-            .orientation(Orientation::Horizontal)
-            .build();
+        let main_box = Box::builder().orientation(Orientation::Horizontal).build();
 
         let sidebar = Sidebar::new(&state);
-        
+
         let content_box = Box::builder()
             .orientation(Orientation::Vertical)
             .hexpand(true)
@@ -36,28 +35,25 @@ impl MainWindow {
             .build();
         content_box.append(&header);
 
-        let stack = gtk::Stack::builder()
-            .hexpand(true)
-            .vexpand(true)
-            .build();
+        let stack = gtk4::Stack::builder().hexpand(true).vexpand(true).build();
 
         let general_page = super::pages::general::GeneralPage::new(&state);
-        stack.add_titled(&general_page.widget(), Some("general"), "General");
+        stack.add_titled(general_page.widget(), Some("general"), "General");
 
         let models_page = super::pages::models::ModelsPage::new(&state);
-        stack.add_titled(&models_page.widget(), Some("models"), "Models");
+        stack.add_titled(models_page.widget(), Some("models"), "Models");
 
         let advanced_page = super::pages::advanced::AdvancedPage::new(&state);
-        stack.add_titled(&advanced_page.widget(), Some("advanced"), "Advanced");
+        stack.add_titled(advanced_page.widget(), Some("advanced"), "Advanced");
 
         let about_page = super::pages::about::AboutPage::new();
-        stack.add_titled(&about_page.widget(), Some("about"), "About");
+        stack.add_titled(about_page.widget(), Some("about"), "About");
 
         content_box.append(&stack);
 
         sidebar.connect_stack(&stack);
 
-        main_box.append(&sidebar.widget());
+        main_box.append(sidebar.widget());
         main_box.append(&content_box);
 
         window.set_content(Some(&main_box));

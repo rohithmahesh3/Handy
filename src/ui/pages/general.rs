@@ -1,10 +1,13 @@
-use gtk::prelude::*;
-use gtk::{Widget, Box, Orientation, ScrolledWindow, ComboBoxText};
-use libadwaita::{PreferencesGroup, ActionRow, Switch};
+use gtk4::prelude::*;
+use gtk4::{
+    Adjustment, Box, ComboBoxText, Orientation, PolicyType, Scale, ScrolledWindow, Switch, Widget,
+};
+use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt};
+use libadwaita::{ActionRow, PreferencesGroup};
 use std::sync::Arc;
 
-use crate::app::AppState;
 use super::Page;
+use crate::app::AppState;
 
 pub struct GeneralPage {
     container: ScrolledWindow,
@@ -13,7 +16,7 @@ pub struct GeneralPage {
 impl GeneralPage {
     pub fn new(state: &Arc<AppState>) -> Self {
         let container = ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
+            .hscrollbar_policy(PolicyType::Never)
             .build();
 
         let vbox = Box::builder()
@@ -48,9 +51,7 @@ impl GeneralPage {
 
         vbox.append(&recording_group);
 
-        let audio_feedback_group = PreferencesGroup::builder()
-            .title("Audio Feedback")
-            .build();
+        let audio_feedback_group = PreferencesGroup::builder().title("Audio Feedback").build();
 
         let feedback_row = ActionRow::builder()
             .title("Play Sounds")
@@ -68,11 +69,9 @@ impl GeneralPage {
         });
         audio_feedback_group.add(&feedback_row);
 
-        let volume_row = ActionRow::builder()
-            .title("Volume")
-            .build();
-        let volume_scale = gtk::Scale::builder()
-            .adjustment(&gtk::Adjustment::new(
+        let volume_row = ActionRow::builder().title("Volume").build();
+        let volume_scale = Scale::builder()
+            .adjustment(&Adjustment::new(
                 state.settings.audio_feedback_volume() as f64,
                 0.0,
                 1.0,
@@ -87,9 +86,7 @@ impl GeneralPage {
 
         vbox.append(&audio_feedback_group);
 
-        let language_group = PreferencesGroup::builder()
-            .title("Language")
-            .build();
+        let language_group = PreferencesGroup::builder().title("Language").build();
 
         let lang_row = ActionRow::builder()
             .title("Transcription Language")
@@ -122,11 +119,11 @@ impl GeneralPage {
             }
         }
         language_combo.set_active(Some(selected_index));
-        
+
         let state_clone = state.clone();
         language_combo.connect_changed(move |combo| {
             if let Some(active) = combo.active_id() {
-                state_clone.settings.set_selected_language(active);
+                state_clone.settings.set_selected_language(&active);
             }
         });
         lang_row.add_suffix(&language_combo);

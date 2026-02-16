@@ -1,4 +1,4 @@
-use gtk::prelude::*;
+use gtk4::prelude::*;
 use libadwaita::Application as AdwApplication;
 use std::sync::Arc;
 
@@ -19,17 +19,14 @@ pub struct AppState {
 }
 
 pub fn run_app() {
-    gtk::init().expect("Failed to initialize GTK");
+    gtk4::init().expect("Failed to initialize GTK");
     libadwaita::init();
 
     let settings = Settings::new();
 
-    let recording_manager = Arc::new(
-        AudioRecordingManager::new().expect("Failed to initialize recording manager"),
-    );
-    let model_manager = Arc::new(
-        ModelManager::new().expect("Failed to initialize model manager"),
-    );
+    let recording_manager =
+        Arc::new(AudioRecordingManager::new().expect("Failed to initialize recording manager"));
+    let model_manager = Arc::new(ModelManager::new().expect("Failed to initialize model manager"));
     let transcription_manager = Arc::new(
         TranscriptionManager::new(model_manager.clone())
             .expect("Failed to initialize transcription manager"),
@@ -43,9 +40,10 @@ pub fn run_app() {
     });
 
     let handy_state = Arc::new(HandyState::new(
-        settings,
         recording_manager,
         transcription_manager,
+        settings.selected_language(),
+        settings.always_on_microphone(),
     ));
 
     let dbus_state = handy_state.clone();
@@ -56,9 +54,7 @@ pub fn run_app() {
         }
     });
 
-    let app = AdwApplication::builder()
-        .application_id(APP_ID)
-        .build();
+    let app = AdwApplication::builder().application_id(APP_ID).build();
 
     let state_clone = state.clone();
     app.connect_activate(move |app| {
