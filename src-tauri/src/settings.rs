@@ -356,6 +356,9 @@ pub struct AppSettings {
     pub paste_delay_ms: u64,
     #[serde(default = "default_typing_tool")]
     pub typing_tool: TypingTool,
+    #[cfg(target_os = "linux")]
+    #[serde(default)]
+    pub ibus_mode_enabled: bool,
 }
 
 fn default_model() -> String {

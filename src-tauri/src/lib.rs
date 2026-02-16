@@ -5,6 +5,8 @@ mod audio_feedback;
 pub mod audio_toolkit;
 mod clipboard;
 mod commands;
+#[cfg(target_os = "linux")]
+mod dbus;
 mod helpers;
 mod input;
 mod llm_client;
@@ -219,6 +221,23 @@ fn initialize_core_logic(app_handle: &AppHandle) {
         tray::set_tray_visibility(app_handle, false);
     }
 
+    // Initialize D-Bus state for IBus integration (Linux only)
+    #[cfg(target_os = "linux")]
+    {
+        let dbus_state = dbus::HandyDbusState::new();
+        let ibus_enabled = settings.ibus_mode_enabled;
+        app_handle.manage(dbus_state);
+
+        if ibus_enabled {
+            let app_handle_clone = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = dbus::start_dbus_server(&app_handle_clone).await {
+                    log::error!("Failed to start D-Bus server: {}", e);
+                }
+            });
+        }
+    }
+
     // Refresh tray menu when model state changes
     let app_handle_for_listener = app_handle.clone();
     app_handle.listen("model-state-changed", move |_| {
@@ -349,6 +368,12 @@ pub fn run() {
         commands::history::update_history_limit,
         commands::history::update_recording_retention_period,
         helpers::clamshell::is_laptop,
+    ]);
+
+    #[cfg(target_os = "linux")]
+    let specta_builder = specta_builder.commands(collect_commands![
+        shortcut::change_ibus_mode_setting,
+        shortcut::get_ibus_mode,
     ]);
 
     #[cfg(debug_assertions)] // <- Only export on non-release builds

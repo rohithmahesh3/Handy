@@ -34,7 +34,7 @@ tauri = { version = "2.9.1", features = [
   "protocol-asset",
   "macos-private-api",
   "tray-icon",
-  'image-png',
+  "image-png",
 ] }
 tauri-plugin-log = "2.7.1"
 tauri-plugin-opener = "2.5.2"
@@ -100,6 +100,7 @@ tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk-layer-shell = { version = "0.8", features = ["v0_6"] }
 gtk = "0.18"
+zbus = "4.4"
 
 [patch.crates-io]
 tauri-runtime = { git = "https://github.com/cjpais/tauri.git", branch = "handy-2.9.1" }
