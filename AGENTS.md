@@ -2,12 +2,18 @@
 
 This file provides guidance to AI coding agents working in this repository.
 
+## Overview
+
+This is a **Fedora/GNOME-only fork** of Handy with native IBus input method integration. It targets Fedora Workstation on Wayland only.
+
 ## Build/Lint/Test Commands
 
 **Prerequisites:**
 
 - [Rust](https://rustup.rs/) (latest stable)
 - [Bun](https://bun.sh/) package manager
+- meson (for IBus engine build)
+- python3-gobject-base (for IBus engine)
 
 ```bash
 # Install dependencies
@@ -49,9 +55,15 @@ mkdir -p src-tauri/resources/models
 curl -o src-tauri/resources/models/silero_vad_v4.onnx https://blob.handy.computer/silero_vad_v4.onnx
 ```
 
+**RPM Build:**
+
+```bash
+./build-rpm.sh                # Build SRPM and RPM packages
+```
+
 ## Architecture Overview
 
-Handy is a cross-platform desktop speech-to-text application built with Tauri (Rust backend + React/TypeScript frontend).
+Handy is a speech-to-text application for Fedora Workstation/GNOME/Wayland with native IBus integration.
 
 ### Core Components
 
@@ -63,6 +75,7 @@ Handy is a cross-platform desktop speech-to-text application built with Tauri (R
 - `commands/` - Tauri command handlers (audio.rs, models.rs, transcription.rs, history.rs)
 - `settings.rs` - Application settings with Tauri store
 - `shortcut/` - Global keyboard shortcut handling
+- `dbus/` - D-Bus server for IBus communication
 
 **Frontend (React/TypeScript - src/):**
 
@@ -73,11 +86,45 @@ Handy is a cross-platform desktop speech-to-text application built with Tauri (R
 - `bindings.ts` - Auto-generated types from tauri-specta (DO NOT EDIT)
 - `i18n/` - Internationalization with i18next
 
+**IBus Engine (Python - ibus/):**
+
+- `handy_ibus/engine.py` - IBus engine that starts/stops recording on focus
+- `handy_ibus/dbus_client.py` - D-Bus client to communicate with Handy
+- `handy_ibus/main.py` - Entry point for IBus daemon
+
+**Packaging (packaging/fedora/):**
+
+- `handy.spec` - Fedora RPM spec file
+- `handy.desktop` - Desktop entry file
+- `handy.service` - Systemd user service for autostart
+- `com.handy.Transcription.service` - D-Bus service activation
+
 ### Key Patterns
 
 - **Manager Pattern:** Core functionality in managers (Audio, Model, Transcription, History) initialized at startup
 - **Command-Event Architecture:** Frontend calls Tauri commands, backend emits events for updates
+- **D-Bus Server:** Always-on D-Bus server (`com.handy.Transcription`) for IBus communication
 - **Pipeline Processing:** Audio → VAD → Whisper → Text output
+
+### D-Bus Interface
+
+**Bus Name:** `com.handy.Transcription`
+**Object Path:** `/com/handy/Transcription`
+
+**Methods:**
+
+- `StartRecording()` - Start recording audio
+- `StopRecording()` → `string` - Stop and return transcribed text
+- `CancelRecording()` - Cancel without transcribing
+- `GetState()` → `(bool, bool)` - Get (is_recording, is_model_loaded)
+- `GetLanguage()` → `string` - Get current language
+- `SetLanguage(string)` - Set language for transcription
+
+**Signals:**
+
+- `TranscriptionReady(string)` - Emitted when transcription is complete
+- `RecordingStateChanged(bool)` - Emitted when recording state changes
+- `Error(string)` - Emitted on errors
 
 ## Code Style Guidelines
 
@@ -166,14 +213,36 @@ pub fn my_command(app: AppHandle, arg: String) -> Result<MyType, String> {
 - `cargo fmt` (Rust 2021 edition)
 - Section comments: `/* ----- section name ----- */`
 
+### Python (IBus Engine)
+
+**Imports:**
+
+```python
+# Standard library first, then third-party, then local
+import sys
+import os
+
+import gi
+gi.require_version('IBus', '1.0')
+gi.require_version('GLib', '2.0')
+from gi.repository import IBus, GLib
+```
+
+**Naming:**
+
+- Classes: PascalCase (`HandyEngine`, `HandyDBusClient`)
+- Functions: snake_case (`start_recording`, `on_transcription_ready`)
+- Constants: SCREAMING_SNAKE_CASE (`ENGINE_NAME`, `HANDY_BUS_NAME`)
+
 ## Technology Stack
 
 **Core Libraries:**
 
 - `whisper-rs` / `transcribe-rs` - Local speech recognition
-- `cpal` - Cross-platform audio I/O
+- `cpal` - Audio I/O (ALSA/PipeWire)
 - `vad-rs` - Voice Activity Detection (Silero)
 - `tauri-specta` - Type-safe IPC with auto-generated TypeScript bindings
+- `zbus` - D-Bus communication
 
 **Frontend:**
 
@@ -181,23 +250,34 @@ pub fn my_command(app: AppHandle, arg: String) -> Result<MyType, String> {
 - Zustand for state management
 - Tailwind CSS 4 for styling
 - i18next for internationalization
-- React-Select for dropdowns
 
 **Backend:**
 
 - Tauri 2.x for desktop framework
 - Tokio for async runtime
 - rusqlite for local database (history)
+- gtk-layer-shell for overlay
 
-## Platform-Specific Notes
+**IBus:**
 
-- **macOS:** Metal acceleration, accessibility permissions, clamshell detection
-- **Windows:** Vulkan acceleration, code signing, COM for audio mute
-- **Linux:** GTK layer shell, PipeWire/PulseAudio/ALSA for audio
+- Python 3 with PyGObject (gi)
+- D-Bus for Handy communication
+- Meson build system
+
+## Platform Support
+
+This fork supports **Fedora Workstation on GNOME/Wayland only**.
+
+- Requires IBus >= 1.5.0
+- Requires PipeWire for audio
+- Uses gtk-layer-shell for overlay
 
 ## Important Files
 
 - `src/bindings.ts` - Auto-generated, DO NOT EDIT
 - `src-tauri/src/lib.rs` - Main app initialization
+- `src-tauri/src/dbus/server.rs` - D-Bus server implementation
 - `src/stores/settingsStore.ts` - Central settings state
 - `src-tauri/src/settings.rs` - Settings schema and defaults
+- `ibus/handy_ibus/engine.py` - IBus engine implementation
+- `packaging/fedora/handy.spec` - Fedora RPM specification
