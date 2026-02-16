@@ -166,6 +166,9 @@ extern "C" {
     ) -> c_int;
 
     pub fn g_signal_handler_disconnect(instance: gpointer, handler_id: c_int);
+
+    pub fn ibus_handy_init(ibus_mode: bool) -> c_int;
+    pub fn ibus_handy_cleanup();
 }
 
 pub mod keys {
@@ -174,6 +177,14 @@ pub mod keys {
 
 pub mod modifiers {
     pub const IBUS_RELEASE_MASK: u32 = 1 << 30;
+}
+
+pub mod init_error {
+    pub const SUCCESS: i32 = 0;
+    pub const BUS_CREATE_FAILED: i32 = 1;
+    pub const NOT_CONNECTED: i32 = 2;
+    pub const NO_CONNECTION: i32 = 3;
+    pub const FACTORY_CREATE_FAILED: i32 = 4;
 }
 
 #[macro_export]

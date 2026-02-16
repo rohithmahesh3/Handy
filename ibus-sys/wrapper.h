@@ -25,7 +25,8 @@ void ibus_handy_set_callback(
     ibus_handy_callback_disable disable_cb
 );
 
-void ibus_handy_init(bool ibus_mode);
+int ibus_handy_init(bool ibus_mode);
+void ibus_handy_cleanup(void);
 
 typedef struct {
     IBusEngine parent;

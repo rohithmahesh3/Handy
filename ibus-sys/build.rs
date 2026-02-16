@@ -1,4 +1,6 @@
 fn main() {
+    extract_version();
+
     let library = pkg_config::Config::new()
         .atleast_version("1.5.0")
         .probe("ibus-1.0")
@@ -26,6 +28,7 @@ fn main() {
 
     println!("cargo:rerun-if-changed=wrapper.c");
     println!("cargo:rerun-if-changed=wrapper.h");
+    println!("cargo:rerun-if-changed=../Cargo.toml");
 
     let mut build = cc::Build::new();
     build.file("wrapper.c");
@@ -41,4 +44,22 @@ fn main() {
     println!("cargo:rustc-link-lib=glib-2.0");
     println!("cargo:rustc-link-lib=gobject-2.0");
     println!("cargo:rustc-link-lib=gio-2.0");
+}
+
+fn extract_version() {
+    let manifest_path = std::path::Path::new("../Cargo.toml");
+    let manifest = std::fs::read_to_string(manifest_path).expect("Failed to read root Cargo.toml");
+
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("version = \"") {
+            let start = trimmed.find('"').unwrap_or(0) + 1;
+            let end = trimmed.rfind('"').unwrap_or(trimmed.len());
+            let version = &trimmed[start..end];
+            println!("cargo:rustc-env=HANDY_VERSION={}", version);
+            return;
+        }
+    }
+
+    println!("cargo:rustc-env=HANDY_VERSION=unknown");
 }

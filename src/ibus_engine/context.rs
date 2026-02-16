@@ -6,7 +6,7 @@ use zbus::blocking::Connection;
 
 use ibus_sys::keys::IBUS_KEY_Escape;
 use ibus_sys::modifiers::IBUS_RELEASE_MASK;
-use ibus_sys::{gboolean, guint, IBusEngine, TRUE};
+use ibus_sys::{g_object_unref, gboolean, gpointer, guint, IBusEngine, TRUE};
 
 const HANDY_BUS_NAME: &str = "com.handy.Transcription";
 const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
@@ -49,10 +49,8 @@ impl HandyContext {
         debug!("Focus in");
         self.is_focused = true;
 
-        if self.connection.is_none() {
-            if !self.try_connect() {
-                return;
-            }
+        if self.connection.is_none() && !self.try_connect() {
+            return;
         }
 
         if !self.is_recording {
@@ -212,6 +210,7 @@ impl HandyContext {
             let ibus_text = ibus_sys::ibus_text_new_from_string(c_text.as_ptr());
             if !ibus_text.is_null() {
                 ibus_sys::ibus_engine_commit_text(engine, ibus_text);
+                g_object_unref(ibus_text as gpointer);
             }
         }
     }
@@ -230,6 +229,9 @@ unsafe extern "C" fn process_key_event_callback(
     keycode: guint,
     modifiers: guint,
 ) -> gboolean {
+    if context.is_null() || engine.is_null() {
+        return 0;
+    }
     let context = &*(context as *const SharedContext);
     if let Ok(mut ctx) = context.lock() {
         ctx.process_key_event(engine, keyval, keycode, modifiers)
@@ -239,6 +241,9 @@ unsafe extern "C" fn process_key_event_callback(
 }
 
 unsafe extern "C" fn focus_in_callback(context: *mut c_void, engine: *mut IBusEngine) {
+    if context.is_null() || engine.is_null() {
+        return;
+    }
     let context = &*(context as *const SharedContext);
     if let Ok(mut ctx) = context.lock() {
         ctx.focus_in(engine);
@@ -246,6 +251,9 @@ unsafe extern "C" fn focus_in_callback(context: *mut c_void, engine: *mut IBusEn
 }
 
 unsafe extern "C" fn focus_out_callback(context: *mut c_void, engine: *mut IBusEngine) {
+    if context.is_null() || engine.is_null() {
+        return;
+    }
     let context = &*(context as *const SharedContext);
     if let Ok(mut ctx) = context.lock() {
         ctx.focus_out(engine);
@@ -253,6 +261,9 @@ unsafe extern "C" fn focus_out_callback(context: *mut c_void, engine: *mut IBusE
 }
 
 unsafe extern "C" fn reset_callback(context: *mut c_void, engine: *mut IBusEngine) {
+    if context.is_null() || engine.is_null() {
+        return;
+    }
     let context = &*(context as *const SharedContext);
     if let Ok(mut ctx) = context.lock() {
         ctx.reset(engine);
@@ -260,6 +271,9 @@ unsafe extern "C" fn reset_callback(context: *mut c_void, engine: *mut IBusEngin
 }
 
 unsafe extern "C" fn enable_callback(context: *mut c_void, engine: *mut IBusEngine) {
+    if context.is_null() || engine.is_null() {
+        return;
+    }
     let context = &*(context as *const SharedContext);
     if let Ok(mut ctx) = context.lock() {
         ctx.enable(engine);
@@ -267,6 +281,9 @@ unsafe extern "C" fn enable_callback(context: *mut c_void, engine: *mut IBusEngi
 }
 
 unsafe extern "C" fn disable_callback(context: *mut c_void, engine: *mut IBusEngine) {
+    if context.is_null() || engine.is_null() {
+        return;
+    }
     let context = &*(context as *const SharedContext);
     if let Ok(mut ctx) = context.lock() {
         ctx.disable(engine);
@@ -289,12 +306,9 @@ extern "C" {
         enable_cb: unsafe extern "C" fn(*mut c_void, *mut IBusEngine),
         disable_cb: unsafe extern "C" fn(*mut c_void, *mut IBusEngine),
     );
-
-    fn ibus_handy_init(ibus_mode: bool);
-    fn ibus_main();
 }
 
-pub fn init(context: &SharedContext, ibus_mode: bool) {
+pub fn init(context: &SharedContext) {
     unsafe {
         ibus_handy_set_callback(
             Arc::as_ptr(context) as *mut c_void,
@@ -305,13 +319,5 @@ pub fn init(context: &SharedContext, ibus_mode: bool) {
             enable_callback,
             disable_callback,
         );
-
-        ibus_handy_init(ibus_mode);
-    }
-}
-
-pub fn run_main_loop() {
-    unsafe {
-        ibus_main();
     }
 }

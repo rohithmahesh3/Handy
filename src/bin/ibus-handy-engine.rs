@@ -1,7 +1,7 @@
 use clap::Parser;
-use log::info;
+use log::{error, info};
 
-use handy_app_lib::ibus_engine::{create_context, init, run_main_loop};
+use handy_app_lib::ibus_engine::{cleanup, create_context, init, run_main_loop};
 
 #[derive(Debug, clap::Parser)]
 #[command(author, version, about, long_about = None)]
@@ -23,10 +23,15 @@ fn main() -> anyhow::Result<()> {
     info!("Starting Handy IBus Engine");
 
     let context = create_context();
-    init(&context, args.ibus);
+
+    if let Err(code) = init(&context, args.ibus) {
+        error!("Failed to initialize IBus engine: error code {}", code);
+        std::process::exit(code);
+    }
 
     info!("Entering IBus main loop");
     run_main_loop();
 
+    cleanup();
     Ok(())
 }

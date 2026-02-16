@@ -4,6 +4,13 @@
 #include <stdio.h>
 #include "wrapper.h"
 
+#ifndef HANDY_VERSION
+#define HANDY_VERSION "unknown"
+#endif
+
+#define IBUS_BUS_NAME_REQUESTED_PRIMARY 1
+#define IBUS_BUS_NAME_REQUESTED_REPLACED 2
+
 static void* global_context = NULL;
 static ibus_handy_callback_key_event global_key_event_cb = NULL;
 static ibus_handy_callback_focus_in global_focus_in_cb = NULL;
@@ -11,6 +18,8 @@ static ibus_handy_callback_focus_out global_focus_out_cb = NULL;
 static ibus_handy_callback_reset global_reset_cb = NULL;
 static ibus_handy_callback_enable global_enable_cb = NULL;
 static ibus_handy_callback_disable global_disable_cb = NULL;
+static IBusBus *global_bus = NULL;
+static IBusFactory *global_factory = NULL;
 
 #define IBUS_TYPE_HANDY_ENGINE (ibus_handy_engine_get_type())
 
@@ -128,26 +137,54 @@ void ibus_handy_set_callback(
     global_disable_cb = disable_cb;
 }
 
-void ibus_handy_init(bool ibus_mode) {
+int ibus_handy_init(bool ibus_mode) {
     ibus_init();
 
     IBusBus *bus = ibus_bus_new();
-    g_object_ref_sink(bus);
+    if (!bus) {
+        fprintf(stderr, "Failed to create IBus bus\n");
+        return 1;
+    }
+
+    if (!ibus_bus_is_connected(bus)) {
+        fprintf(stderr, "IBus daemon not running\n");
+        g_object_unref(bus);
+        return 2;
+    }
+
+    GDBusConnection *conn = ibus_bus_get_connection(bus);
+    if (!conn) {
+        fprintf(stderr, "IBus bus has no connection\n");
+        g_object_unref(bus);
+        return 3;
+    }
+
+    IBusFactory *factory = ibus_factory_new(conn);
+    if (!factory) {
+        fprintf(stderr, "Failed to create IBus factory\n");
+        g_object_unref(bus);
+        return 4;
+    }
+
     g_signal_connect(bus, "disconnected", G_CALLBACK(ibus_disconnected_cb), NULL);
 
-    IBusFactory *factory = ibus_factory_new(ibus_bus_get_connection(bus));
-    g_object_ref_sink(factory);
     ibus_factory_add_engine(factory, "handy", IBUS_TYPE_HANDY_ENGINE);
 
+    global_bus = bus;
+    global_factory = factory;
+
     if (ibus_mode) {
-        ibus_bus_request_name(bus, "org.freedesktop.IBus.Handy", 0);
+        guint result = ibus_bus_request_name(bus, "org.freedesktop.IBus.Handy", 0);
+        if (result != IBUS_BUS_NAME_REQUESTED_PRIMARY && result != IBUS_BUS_NAME_REQUESTED_REPLACED) {
+            fprintf(stderr, "Warning: Failed to acquire IBus name: %u\n", result);
+        }
     } else {
         IBusComponent *component;
 
         component = ibus_component_new(
             "org.freedesktop.IBus.Handy",
             "Handy Speech-to-Text",
-            "0.7.5",
+            HANDY_VERSION,
             "MIT",
             "Handy Team",
             "https://github.com/rohithmahesh/Handy",
@@ -170,5 +207,19 @@ void ibus_handy_init(bool ibus_mode) {
         );
 
         ibus_bus_register_component(bus, component);
+        g_object_unref(component);
+    }
+
+    return 0;
+}
+
+void ibus_handy_cleanup(void) {
+    if (global_factory) {
+        g_object_unref(global_factory);
+        global_factory = NULL;
+    }
+    if (global_bus) {
+        g_object_unref(global_bus);
+        global_bus = NULL;
     }
 }
