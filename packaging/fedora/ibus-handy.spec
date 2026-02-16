@@ -25,7 +25,7 @@ BuildRequires:  glslc
 Requires:       ibus >= 1.5.0
 Requires:       pipewire-pulse
 Requires:       wtype
-Requires:       wl-clipboard
+Recommends:     wl-clipboard
 Supplements:    (gnome-shell and fedora-release-workstation)
 
 %description
