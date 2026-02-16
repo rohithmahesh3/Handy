@@ -121,28 +121,12 @@ impl Default for ClipboardHandling {
 pub enum AutoSubmitKey {
     Enter,
     CtrlEnter,
-    CmdEnter,
+    SuperEnter,
 }
 
 impl Default for AutoSubmitKey {
     fn default() -> Self {
         AutoSubmitKey::Enter
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RecordingRetentionPeriod {
-    Never,
-    PreserveLimit,
-    Days3,
-    Weeks2,
-    Months3,
-}
-
-impl Default for RecordingRetentionPeriod {
-    fn default() -> Self {
-        RecordingRetentionPeriod::PreserveLimit
     }
 }
 
@@ -154,7 +138,6 @@ pub enum TypingTool {
     Kwtype,
     Dotool,
     Ydotool,
-    Xdotool,
 }
 
 impl Default for TypingTool {
@@ -245,6 +228,15 @@ impl Settings {
         }
     }
 
+    pub fn set_sound_theme(&self, theme: SoundTheme) {
+        let value = match theme {
+            SoundTheme::Marimba => 0,
+            SoundTheme::Pop => 1,
+            SoundTheme::Custom => 2,
+        };
+        self.gio_settings.set_enum("sound-theme", value).ok();
+    }
+
     pub fn selected_microphone(&self) -> Option<String> {
         let value = self.gio_settings.string("selected-microphone");
         if value.is_empty() { None } else { Some(value.to_string()) }
@@ -311,6 +303,20 @@ impl Settings {
         }
     }
 
+    pub fn set_model_unload_timeout(&self, timeout: ModelUnloadTimeout) {
+        let value = match timeout {
+            ModelUnloadTimeout::Never => 0,
+            ModelUnloadTimeout::Immediately => 1,
+            ModelUnloadTimeout::Min2 => 2,
+            ModelUnloadTimeout::Min5 => 3,
+            ModelUnloadTimeout::Min10 => 4,
+            ModelUnloadTimeout::Min15 => 5,
+            ModelUnloadTimeout::Hour1 => 6,
+            ModelUnloadTimeout::Sec5 => 7,
+        };
+        self.gio_settings.set_enum("model-unload-timeout", value).ok();
+    }
+
     // App Behavior
     pub fn start_hidden(&self) -> bool {
         self.gio_settings.boolean("start-hidden")
@@ -357,6 +363,17 @@ impl Settings {
         }
     }
 
+    pub fn set_paste_method(&self, method: PasteMethod) {
+        let value = match method {
+            PasteMethod::CtrlV => 0,
+            PasteMethod::Direct => 1,
+            PasteMethod::None => 2,
+            PasteMethod::ShiftInsert => 3,
+            PasteMethod::CtrlShiftV => 4,
+        };
+        self.gio_settings.set_enum("paste-method", value).ok();
+    }
+
     pub fn clipboard_handling(&self) -> ClipboardHandling {
         let value = self.gio_settings.enum_("clipboard-handling");
         match value {
@@ -364,6 +381,14 @@ impl Settings {
             1 => ClipboardHandling::CopyToClipboard,
             _ => ClipboardHandling::default(),
         }
+    }
+
+    pub fn set_clipboard_handling(&self, handling: ClipboardHandling) {
+        let value = match handling {
+            ClipboardHandling::DontModify => 0,
+            ClipboardHandling::CopyToClipboard => 1,
+        };
+        self.gio_settings.set_enum("clipboard-handling", value).ok();
     }
 
     pub fn auto_submit(&self) -> bool {
@@ -379,9 +404,18 @@ impl Settings {
         match value {
             0 => AutoSubmitKey::Enter,
             1 => AutoSubmitKey::CtrlEnter,
-            2 => AutoSubmitKey::CmdEnter,
+            2 => AutoSubmitKey::SuperEnter,
             _ => AutoSubmitKey::default(),
         }
+    }
+
+    pub fn set_auto_submit_key(&self, key: AutoSubmitKey) {
+        let value = match key {
+            AutoSubmitKey::Enter => 0,
+            AutoSubmitKey::CtrlEnter => 1,
+            AutoSubmitKey::SuperEnter => 2,
+        };
+        self.gio_settings.set_enum("auto-submit-key", value).ok();
     }
 
     pub fn paste_delay_ms(&self) -> u64 {
@@ -404,9 +438,19 @@ impl Settings {
             2 => TypingTool::Kwtype,
             3 => TypingTool::Dotool,
             4 => TypingTool::Ydotool,
-            5 => TypingTool::Xdotool,
             _ => TypingTool::default(),
         }
+    }
+
+    pub fn set_typing_tool(&self, tool: TypingTool) {
+        let value = match tool {
+            TypingTool::Auto => 0,
+            TypingTool::Wtype => 1,
+            TypingTool::Kwtype => 2,
+            TypingTool::Dotool => 3,
+            TypingTool::Ydotool => 4,
+        };
+        self.gio_settings.set_enum("typing-tool", value).ok();
     }
 
     pub fn custom_words(&self) -> Vec<String> {
@@ -416,27 +460,6 @@ impl Settings {
     pub fn set_custom_words(&self, words: &[String]) {
         let strv: Vec<&str> = words.iter().map(|s| s.as_str()).collect();
         self.gio_settings.set_strv("custom-words", &strv).ok();
-    }
-
-    // History Settings
-    pub fn history_limit(&self) -> usize {
-        self.gio_settings.uint("history-limit") as usize
-    }
-
-    pub fn set_history_limit(&self, value: usize) {
-        self.gio_settings.set_uint("history-limit", value as u32).ok();
-    }
-
-    pub fn recording_retention_period(&self) -> RecordingRetentionPeriod {
-        let value = self.gio_settings.enum_("recording-retention-period");
-        match value {
-            0 => RecordingRetentionPeriod::Never,
-            1 => RecordingRetentionPeriod::PreserveLimit,
-            2 => RecordingRetentionPeriod::Days3,
-            3 => RecordingRetentionPeriod::Weeks2,
-            4 => RecordingRetentionPeriod::Months3,
-            _ => RecordingRetentionPeriod::default(),
-        }
     }
 
     // Debug Settings
@@ -522,6 +545,16 @@ impl Settings {
     pub fn set_post_process_models(&self, models: HashMap<String, String>) {
         let json = serde_json::to_string(&models).unwrap_or_default();
         self.gio_settings.set_string("post-process-models", &json).ok();
+    }
+
+    pub fn post_process_base_urls(&self) -> HashMap<String, String> {
+        let json = self.gio_settings.string("post-process-base-urls");
+        serde_json::from_str(json.as_str()).unwrap_or_default()
+    }
+
+    pub fn set_post_process_base_urls(&self, urls: HashMap<String, String>) {
+        let json = serde_json::to_string(&urls).unwrap_or_default();
+        self.gio_settings.set_string("post-process-base-urls", &json).ok();
     }
 
     pub fn post_process_prompts(&self) -> Vec<LLMPrompt> {

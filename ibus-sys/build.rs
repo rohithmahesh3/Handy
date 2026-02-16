@@ -1,6 +1,3 @@
-use std::env;
-use std::path::PathBuf;
-
 fn main() {
     let library = pkg_config::Config::new()
         .atleast_version("1.5.0")

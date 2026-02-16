@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use crate::dbus::{self, HandyState};
 use crate::managers::audio::AudioRecordingManager;
-use crate::managers::history::HistoryManager;
 use crate::managers::model::ModelManager;
 use crate::managers::transcription::TranscriptionManager;
 use crate::settings::Settings;
@@ -18,7 +17,6 @@ pub struct AppState {
     pub recording_manager: Arc<AudioRecordingManager>,
     pub model_manager: Arc<ModelManager>,
     pub transcription_manager: Arc<TranscriptionManager>,
-    pub history_manager: Arc<HistoryManager>,
 }
 
 pub fn run_app() {
@@ -37,23 +35,18 @@ pub fn run_app() {
         TranscriptionManager::new(model_manager.clone())
             .expect("Failed to initialize transcription manager"),
     );
-    let history_manager = Arc::new(
-        HistoryManager::new().expect("Failed to initialize history manager"),
-    );
 
     let state = Arc::new(AppState {
         settings: settings.clone(),
         recording_manager: recording_manager.clone(),
         model_manager: model_manager.clone(),
         transcription_manager: transcription_manager.clone(),
-        history_manager: history_manager.clone(),
     });
 
     let handy_state = Arc::new(HandyState::new(
         settings,
         recording_manager,
         transcription_manager,
-        history_manager,
     ));
 
     let dbus_state = handy_state.clone();

@@ -1,10 +1,9 @@
 use crate::audio_feedback::{play_feedback_sound_blocking, SoundType};
 use crate::managers::audio::AudioRecordingManager;
-use crate::managers::history::HistoryManager;
 use crate::managers::transcription::TranscriptionManager;
 use crate::settings::Settings;
-use ferrous_opencc::{config::BuiltinConfig, OpenCC};
-use log::{debug, error, info};
+use crate::text_utils::convert_chinese_variant;
+use log::{debug, info};
 use std::sync::Arc;
 
 pub struct TranscriptionResult {
@@ -15,7 +14,6 @@ pub struct TranscriptionResult {
 pub async fn perform_transcription(
     recording_manager: &AudioRecordingManager,
     transcription_manager: &TranscriptionManager,
-    history_manager: &HistoryManager,
     settings: &Settings,
     post_process: bool,
 ) -> Result<TranscriptionResult, String> {
@@ -33,43 +31,14 @@ pub async fn perform_transcription(
         .transcribe(samples.clone())
         .map_err(|e| format!("Transcription failed: {}", e))?;
 
-    let mut final_text = transcription.clone();
-
     let lang = settings.selected_language();
-    let is_simplified = lang == "zh-Hans";
-    let is_traditional = lang == "zh-Hant";
-
-    if is_simplified || is_traditional {
-        let config = if is_simplified {
-            BuiltinConfig::Tw2sp
-        } else {
-            BuiltinConfig::S2twp
-        };
-
-        if let Ok(converter) = OpenCC::from_config(config) {
-            final_text = converter.convert(&transcription);
-        }
-    }
+    let final_text = convert_chinese_variant(&transcription, &lang);
 
     let post_processed = if post_process && settings.post_process_enabled() {
         post_process_transcription(settings, &final_text).await
     } else {
         None
     };
-
-    let text_to_save = post_processed.as_ref().unwrap_or(&final_text).clone();
-
-    if let Err(e) = history_manager
-        .save_transcription(
-            samples,
-            transcription,
-            post_processed.clone(),
-            None,
-        )
-        .await
-    {
-        error!("Failed to save transcription to history: {}", e);
-    }
 
     transcription_manager.maybe_unload_immediately("transcription");
 

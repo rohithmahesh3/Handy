@@ -262,12 +262,12 @@ impl TranscriptionManager {
         let mut text = result?;
 
         let custom_words = settings.custom_words();
+        let threshold = settings.word_correction_threshold();
         if !custom_words.is_empty() {
-            text = apply_custom_words(&text, &custom_words);
+            text = apply_custom_words(&text, &custom_words, threshold);
         }
 
-        let threshold = settings.word_correction_threshold();
-        text = filter_transcription_output(&text, threshold);
+        text = filter_transcription_output(&text);
 
         self.maybe_unload_immediately("transcription");
 

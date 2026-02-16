@@ -50,7 +50,7 @@ cargo test <test_name>
 cargo run --release
 
 # Run IBus engine (for testing)
-cargo run --release --bin ibus-handy-engine -- --ibus
+cargo run --release --bin ibus-handy-engine --features cli -- --ibus
 ```
 
 **Model Setup (Required for Development):**
@@ -77,10 +77,10 @@ Handy is a speech-to-text application for Fedora Workstation/GNOME/Wayland with 
 - `main.rs` - Entry point for main GTK application
 - `app.rs` - GTK application setup and initialization
 - `lib.rs` - Module exports
-- `managers/` - Core business logic (audio.rs, model.rs, transcription.rs, history.rs)
+- `managers/` - Core business logic (audio.rs, model.rs, transcription.rs)
 - `audio_toolkit/` - Low-level audio processing (device, recorder, resampler, VAD)
 - `settings.rs` - Application settings with GSettings (dconf)
-- `shortcut/` - Stub (IBus handles shortcuts)
+- `text_utils.rs` - Text processing utilities (Chinese variant conversion)
 - `dbus/` - D-Bus server for IBus communication
 - `ibus_engine/` - Rust IBus engine implementation
   - `context.rs` - Engine state and D-Bus client
@@ -88,8 +88,8 @@ Handy is a speech-to-text application for Fedora Workstation/GNOME/Wayland with 
 - `ui/` - GTK4/Libadwaita UI components
   - `window.rs` - Main preferences window
   - `sidebar.rs` - Navigation sidebar
-  - `pages/` - Settings pages (general, models, advanced, history, etc.)
-  - `widgets/` - Reusable UI widgets
+  - `pages/` - Settings pages (general, models, advanced, about)
+- `clipboard.rs` - Clipboard and text output using wtype/wl-copy
 
 **IBus Engine Binary (Rust - src/bin/):**
 
@@ -123,11 +123,12 @@ Handy is a speech-to-text application for Fedora Workstation/GNOME/Wayland with 
 
 ### Key Patterns
 
-- **Manager Pattern:** Core functionality in managers (Audio, Model, Transcription, History)
+- **Manager Pattern:** Core functionality in managers (Audio, Model, Transcription)
 - **GSettings:** Persistent settings via dconf/GSettings
 - **D-Bus Server:** Always-on D-Bus server (`com.handy.Transcription`) for IBus communication
 - **Hybrid IBus Engine:** C wrapper for GObject + Rust callbacks
 - **Pipeline Processing:** Audio → VAD → Whisper → Text output
+- **Wayland Native:** Uses wtype for text input, wl-copy for clipboard
 
 ### IBus Engine Architecture
 
@@ -226,13 +227,17 @@ use crate::settings::{get_settings, AppSettings};
 **Backend:**
 
 - Tokio for async runtime
-- rusqlite for local database (history)
 
 **IBus:**
 
 - `ibus-sys` - Rust FFI bindings to libibus-1.0
 - C wrapper for GObject subclassing
 - Direct D-Bus calls to Handy
+
+**Wayland:**
+
+- `wtype` - Native Wayland text input
+- `wl-copy` - Wayland clipboard
 
 ## Platform Support
 
@@ -241,6 +246,7 @@ This fork supports **Fedora Workstation on GNOME/Wayland only**.
 - Requires IBus >= 1.5.0
 - Requires PipeWire for audio
 - Uses GSettings for configuration
+- Requires `wtype` and `wl-clipboard` for text output
 
 ## Important Files
 
@@ -250,6 +256,8 @@ This fork supports **Fedora Workstation on GNOME/Wayland only**.
 - `src/ibus_engine/context.rs` - IBus engine implementation
 - `src/settings.rs` - Settings schema and GSettings integration
 - `src/ui/window.rs` - Main preferences window
+- `src/ui/pages/models.rs` - Model management page
+- `src/ui/pages/advanced.rs` - Advanced settings page
 - `ibus-sys/wrapper.c` - C wrapper for IBus GObject
 - `data/com.handy.Transcription.gschema.xml` - GSettings schema
 - `packaging/fedora/ibus-handy.spec` - Fedora RPM specification

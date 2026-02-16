@@ -4,9 +4,9 @@
 //! to control Handy's transcription functionality.
 
 use crate::managers::audio::AudioRecordingManager;
-use crate::managers::history::HistoryManager;
 use crate::managers::transcription::TranscriptionManager;
 use crate::settings::Settings;
+use crate::text_utils::convert_chinese_variant;
 use log::{debug, error, info, warn};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,7 +20,6 @@ pub struct HandyState {
     pub settings: Settings,
     pub recording_manager: Arc<AudioRecordingManager>,
     pub transcription_manager: Arc<TranscriptionManager>,
-    pub history_manager: Arc<HistoryManager>,
     pub is_recording: AtomicBool,
 }
 
@@ -29,13 +28,11 @@ impl HandyState {
         settings: Settings,
         recording_manager: Arc<AudioRecordingManager>,
         transcription_manager: Arc<TranscriptionManager>,
-        history_manager: Arc<HistoryManager>,
     ) -> Self {
         Self {
             settings,
             recording_manager,
             transcription_manager,
-            history_manager,
             is_recording: AtomicBool::new(false),
         }
     }
@@ -99,6 +96,7 @@ impl HandyTranscription {
             info!("D-Bus: Recording started in {:?}", start_time.elapsed());
             Ok(())
         } else {
+            self.emit_error("Failed to start recording").await?;
             Err(fdo::Error::Failed("Failed to start recording".to_string()))
         }
     }
@@ -118,7 +116,7 @@ impl HandyTranscription {
             );
 
             let transcription_time = Instant::now();
-            match self.state.transcription_manager.transcribe(samples.clone()) {
+            match self.state.transcription_manager.transcribe(samples) {
                 Ok(transcription) => {
                     debug!(
                         "D-Bus: Transcription completed in {:?}: '{}'",
@@ -126,42 +124,8 @@ impl HandyTranscription {
                         transcription
                     );
 
-                    let mut final_text = transcription.clone();
-
-                    // Handle Chinese variant conversion
                     let lang = self.state.settings.selected_language();
-                    let is_simplified = lang == "zh-Hans";
-                    let is_traditional = lang == "zh-Hant";
-
-                    if is_simplified || is_traditional {
-                        let config = if is_simplified {
-                            ferrous_opencc::config::BuiltinConfig::Tw2sp
-                        } else {
-                            ferrous_opencc::config::BuiltinConfig::S2twp
-                        };
-
-                        if let Ok(converter) = ferrous_opencc::OpenCC::from_config(config) {
-                            final_text = converter.convert(&transcription);
-                        }
-                    }
-
-                    // Save to history
-                    let hm = self.state.history_manager.clone();
-                    let transcription_for_history = transcription.clone();
-                    let samples_for_history = samples;
-                    tokio::spawn(async move {
-                        if let Err(e) = hm
-                            .save_transcription(
-                                samples_for_history,
-                                transcription_for_history,
-                                None,
-                                None,
-                            )
-                            .await
-                        {
-                            error!("Failed to save transcription to history: {}", e);
-                        }
-                    });
+                    let final_text = convert_chinese_variant(&transcription, &lang);
 
                     self.state.is_recording.store(false, Ordering::SeqCst);
                     self.emit_recording_state_changed(false).await?;
@@ -173,6 +137,7 @@ impl HandyTranscription {
                     error!("D-Bus: Transcription error: {}", err);
                     self.state.is_recording.store(false, Ordering::SeqCst);
                     self.emit_recording_state_changed(false).await?;
+                    self.emit_error(&format!("Transcription failed: {}", err)).await?;
                     Err(fdo::Error::Failed(format!("Transcription failed: {}", err)))
                 }
             }
@@ -252,6 +217,15 @@ impl HandyTranscription {
             if let Err(e) = Self::recording_state_changed(&conn.object_server(), is_recording).await
             {
                 error!("Failed to emit RecordingStateChanged signal: {}", e);
+            }
+        }
+        Ok(())
+    }
+
+    async fn emit_error(&self, message: &str) -> fdo::Result<()> {
+        if let Some(conn) = self.dbus_state.connection.lock().ok().and_then(|c| c.clone()) {
+            if let Err(e) = Self::error(&conn.object_server(), message).await {
+                error!("Failed to emit Error signal: {}", e);
             }
         }
         Ok(())

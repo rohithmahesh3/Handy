@@ -5,13 +5,11 @@ pub mod audio_toolkit;
 pub mod clipboard;
 pub mod dbus;
 pub mod ibus_engine;
-pub mod input;
 pub mod llm_client;
 pub mod managers;
 pub mod settings;
-pub mod shortcut;
+pub mod text_utils;
 pub mod ui;
-pub mod utils;
 
 use std::sync::atomic::{AtomicU8, Ordering};
 

@@ -11,4 +11,3 @@ Categories=Settings;Accessibility;GNOME;GTK;
 Keywords=speech;voice;dictation;ibus;input;accessibility;
 StartupWMClass=handy
 DBusActivatable=true
-X-DBusActivatable=true

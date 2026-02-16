@@ -10,8 +10,6 @@ Source0:        ibus-handy-%{version}.tar.gz
 BuildRequires:  rustc, cargo
 BuildRequires:  pkgconfig(gtk4)
 BuildRequires:  pkgconfig(libadwaita-1)
-BuildRequires:  pkgconfig(gstreamer-1.0)
-BuildRequires:  pkgconfig(gstreamer-plugins-base-1.0)
 BuildRequires:  pkgconfig(graphene-gobject-1.0)
 BuildRequires:  pkgconfig(alsa)
 BuildRequires:  pkgconfig(libpipewire-0.3)
@@ -23,11 +21,11 @@ BuildRequires:  openssl-devel
 BuildRequires:  cmake
 BuildRequires:  clang-devel
 BuildRequires:  glslc
-BuildRequires:  graphene-devel
 
 Requires:       ibus >= 1.5.0
-Requires:       pipewire-pulseaudio
-Requires:       gstreamer1-plugins-base
+Requires:       pipewire-pulse
+Requires:       wtype
+Requires:       wl-clipboard
 Supplements:    (gnome-shell and fedora-release-workstation)
 
 %description

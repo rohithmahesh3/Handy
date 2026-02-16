@@ -1,6 +1,5 @@
 use gtk::prelude::*;
 use gtk::{ListBox, ListBoxRow, Box, Orientation, Image, Label};
-use libadwaita::NavigationPage;
 use std::sync::Arc;
 
 use crate::app::AppState;
@@ -18,14 +17,9 @@ impl Sidebar {
         add_item(&list, "general", "General", "preferences-system-symbolic");
         add_item(&list, "models", "Models", "folder-download-symbolic");
         add_item(&list, "advanced", "Advanced", "applications-engineering-symbolic");
-        add_item(&list, "history", "History", "document-open-recent-symbolic");
 
         if state.settings.post_process_enabled() || state.settings.debug_mode() {
             add_item(&list, "post-process", "Post-Processing", "text-editor-symbolic");
-        }
-
-        if state.settings.debug_mode() {
-            add_item(&list, "debug", "Debug", "applications-development-symbolic");
         }
 
         add_item(&list, "about", "About", "help-about-symbolic");
