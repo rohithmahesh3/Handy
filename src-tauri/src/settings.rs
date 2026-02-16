@@ -6,9 +6,6 @@ use std::collections::HashMap;
 use tauri::AppHandle;
 use tauri_plugin_store::StoreExt;
 
-pub const APPLE_INTELLIGENCE_PROVIDER_ID: &str = "apple_intelligence";
-pub const APPLE_INTELLIGENCE_DEFAULT_MODEL_ID: &str = "Apple Intelligence";
-
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
@@ -168,12 +165,7 @@ pub enum KeyboardImplementation {
 
 impl Default for KeyboardImplementation {
     fn default() -> Self {
-        // Default to HandyKeys only on macOS where it's well-tested.
-        // Windows and Linux use Tauri by default (handy-keys not sufficiently tested yet).
-        #[cfg(target_os = "macos")]
-        return KeyboardImplementation::HandyKeys;
-        #[cfg(not(target_os = "macos"))]
-        return KeyboardImplementation::Tauri;
+        KeyboardImplementation::HandyKeys
     }
 }
 
@@ -185,11 +177,7 @@ impl Default for ModelUnloadTimeout {
 
 impl Default for PasteMethod {
     fn default() -> Self {
-        // Default to CtrlV for macOS and Windows, Direct for Linux
-        #[cfg(target_os = "linux")]
-        return PasteMethod::Direct;
-        #[cfg(not(target_os = "linux"))]
-        return PasteMethod::CtrlV;
+        PasteMethod::Direct
     }
 }
 
@@ -295,8 +283,6 @@ pub struct AppSettings {
     #[serde(default)]
     pub selected_microphone: Option<String>,
     #[serde(default)]
-    pub clamshell_microphone: Option<String>,
-    #[serde(default)]
     pub selected_output_device: Option<String>,
     #[serde(default = "default_translate_to_english")]
     pub translate_to_english: bool,
@@ -356,9 +342,6 @@ pub struct AppSettings {
     pub paste_delay_ms: u64,
     #[serde(default = "default_typing_tool")]
     pub typing_tool: TypingTool,
-    #[cfg(target_os = "linux")]
-    #[serde(default)]
-    pub ibus_mode_enabled: bool,
 }
 
 fn default_model() -> String {
@@ -390,10 +373,7 @@ fn default_selected_language() -> String {
 }
 
 fn default_overlay_position() -> OverlayPosition {
-    #[cfg(target_os = "linux")]
-    return OverlayPosition::None;
-    #[cfg(not(target_os = "linux"))]
-    return OverlayPosition::Bottom;
+    OverlayPosition::None
 }
 
 fn default_debug_mode() -> bool {
@@ -489,21 +469,6 @@ fn default_post_process_providers() -> Vec<PostProcessProvider> {
         },
     ];
 
-    // Note: We always include Apple Intelligence on macOS ARM64 without checking availability
-    // at startup. The availability check is deferred to when the user actually tries to use it
-    // (in actions.rs). This prevents crashes on macOS 26.x beta where accessing
-    // SystemLanguageModel.default during early app initialization causes SIGABRT.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    {
-        providers.push(PostProcessProvider {
-            id: APPLE_INTELLIGENCE_PROVIDER_ID.to_string(),
-            label: "Apple Intelligence".to_string(),
-            base_url: "apple-intelligence://local".to_string(),
-            allow_base_url_edit: false,
-            models_endpoint: None,
-        });
-    }
-
     // Custom provider always comes last
     providers.push(PostProcessProvider {
         id: "custom".to_string(),
@@ -524,10 +489,7 @@ fn default_post_process_api_keys() -> HashMap<String, String> {
     map
 }
 
-fn default_model_for_provider(provider_id: &str) -> String {
-    if provider_id == APPLE_INTELLIGENCE_PROVIDER_ID {
-        return APPLE_INTELLIGENCE_DEFAULT_MODEL_ID.to_string();
-    }
+fn default_model_for_provider(_provider_id: &str) -> String {
     String::new()
 }
 
@@ -596,14 +558,7 @@ fn ensure_post_process_defaults(settings: &mut AppSettings) -> bool {
 pub const SETTINGS_STORE_PATH: &str = "settings_store.json";
 
 pub fn get_default_settings() -> AppSettings {
-    #[cfg(target_os = "windows")]
     let default_shortcut = "ctrl+space";
-    #[cfg(target_os = "macos")]
-    let default_shortcut = "option+space";
-    #[cfg(target_os = "linux")]
-    let default_shortcut = "ctrl+space";
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    let default_shortcut = "alt+space";
 
     let mut bindings = HashMap::new();
     bindings.insert(
@@ -616,14 +571,7 @@ pub fn get_default_settings() -> AppSettings {
             current_binding: default_shortcut.to_string(),
         },
     );
-    #[cfg(target_os = "windows")]
     let default_post_process_shortcut = "ctrl+shift+space";
-    #[cfg(target_os = "macos")]
-    let default_post_process_shortcut = "option+shift+space";
-    #[cfg(target_os = "linux")]
-    let default_post_process_shortcut = "ctrl+shift+space";
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    let default_post_process_shortcut = "alt+shift+space";
 
     bindings.insert(
         "transcribe_with_post_process".to_string(),
@@ -659,7 +607,6 @@ pub fn get_default_settings() -> AppSettings {
         selected_model: "".to_string(),
         always_on_microphone: false,
         selected_microphone: None,
-        clamshell_microphone: None,
         selected_output_device: None,
         translate_to_english: false,
         selected_language: "auto".to_string(),

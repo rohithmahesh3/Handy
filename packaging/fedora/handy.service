@@ -1,0 +1,14 @@
+[Unit]
+Description=Handy Speech-to-Text Service
+After=graphical-session.target
+Requires=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=com.handy.Transcription
+ExecStart=/usr/bin/handy
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

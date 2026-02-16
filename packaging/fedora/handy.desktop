@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Name=Handy
+GenericName=Speech to Text
+Comment=Configure Handy speech-to-text settings
+Exec=handy
+Icon=handy
+Terminal=false
+Type=Application
+Categories=Settings;Accessibility;GNOME;GTK;
+Keywords=speech;voice;dictation;ibus;input;accessibility;
+StartupWMClass=handy
+DBusActivatable=true
+X-DBusActivatable=true

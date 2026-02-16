@@ -1,11 +1,8 @@
 mod actions;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-mod apple_intelligence;
 mod audio_feedback;
 pub mod audio_toolkit;
 mod clipboard;
 mod commands;
-#[cfg(target_os = "linux")]
 mod dbus;
 mod helpers;
 mod input;
@@ -90,20 +87,11 @@ type ManagedToggleState = Mutex<ShortcutToggleStates>;
 
 fn show_main_window(app: &AppHandle) {
     if let Some(main_window) = app.get_webview_window("main") {
-        // First, ensure the window is visible
         if let Err(e) = main_window.show() {
             log::error!("Failed to show window: {}", e);
         }
-        // Then, bring it to the front and give it focus
         if let Err(e) = main_window.set_focus() {
             log::error!("Failed to focus window: {}", e);
-        }
-        // Optional: On macOS, ensure the app becomes active if it was an accessory
-        #[cfg(target_os = "macos")]
-        {
-            if let Err(e) = app.set_activation_policy(tauri::ActivationPolicy::Regular) {
-                log::error!("Failed to set activation policy to Regular: {}", e);
-            }
         }
     } else {
         log::error!("Main window not found.");
@@ -142,19 +130,9 @@ fn initialize_core_logic(app_handle: &AppHandle) {
 
     #[cfg(unix)]
     let signals = Signals::new(&[SIGUSR2]).unwrap();
-    // Set up SIGUSR2 signal handler for toggling transcription
     #[cfg(unix)]
     signal_handle::setup_signal_handler(app_handle.clone(), signals);
 
-    // Apply macOS Accessory policy if starting hidden
-    #[cfg(target_os = "macos")]
-    {
-        let settings = settings::get_settings(app_handle);
-        if settings.start_hidden {
-            let _ = app_handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
-        }
-    }
-    // Get the current theme to set the appropriate initial icon
     let initial_theme = tray::get_current_theme(app_handle);
 
     // Choose the appropriate initial icon based on theme
@@ -221,22 +199,16 @@ fn initialize_core_logic(app_handle: &AppHandle) {
         tray::set_tray_visibility(app_handle, false);
     }
 
-    // Initialize D-Bus state for IBus integration (Linux only)
-    #[cfg(target_os = "linux")]
-    {
-        let dbus_state = dbus::HandyDbusState::new();
-        let ibus_enabled = settings.ibus_mode_enabled;
-        app_handle.manage(dbus_state);
-
-        if ibus_enabled {
-            let app_handle_clone = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = dbus::start_dbus_server(&app_handle_clone).await {
-                    log::error!("Failed to start D-Bus server: {}", e);
-                }
-            });
+    // Initialize D-Bus server for IBus integration (always on for Linux)
+    let dbus_state = dbus::HandyDbusState::new();
+    app_handle.manage(dbus_state);
+    
+    let app_handle_clone = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = dbus::start_dbus_server(&app_handle_clone).await {
+            log::error!("Failed to start D-Bus server: {}", e);
         }
-    }
+    });
 
     // Refresh tray menu when model state changes
     let app_handle_for_listener = app_handle.clone();
@@ -331,7 +303,6 @@ pub fn run() {
         commands::open_recordings_folder,
         commands::open_log_dir,
         commands::open_app_data_dir,
-        commands::check_apple_intelligence_available,
         commands::initialize_enigo,
         commands::initialize_shortcuts,
         commands::models::get_available_models,
@@ -355,8 +326,6 @@ pub fn run() {
         commands::audio::get_selected_output_device,
         commands::audio::play_test_sound,
         commands::audio::check_custom_sounds,
-        commands::audio::set_clamshell_microphone,
-        commands::audio::get_clamshell_microphone,
         commands::audio::is_recording,
         commands::transcription::set_model_unload_timeout,
         commands::transcription::get_model_load_status,
@@ -367,13 +336,6 @@ pub fn run() {
         commands::history::delete_history_entry,
         commands::history::update_history_limit,
         commands::history::update_recording_retention_period,
-        helpers::clamshell::is_laptop,
-    ]);
-
-    #[cfg(target_os = "linux")]
-    let specta_builder = specta_builder.commands(collect_commands![
-        shortcut::change_ibus_mode_setting,
-        shortcut::get_ibus_mode,
     ]);
 
     #[cfg(debug_assertions)] // <- Only export on non-release builds
@@ -410,11 +372,6 @@ pub fn run() {
                 .build(),
         );
 
-    #[cfg(target_os = "macos")]
-    {
-        builder = builder.plugin(tauri_nspanel::init());
-    }
-
     builder
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);
@@ -424,7 +381,6 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_macos_permissions::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -463,15 +419,6 @@ pub fn run() {
                 }
                 api.prevent_close();
                 let _res = window.hide();
-                #[cfg(target_os = "macos")]
-                {
-                    let res = window
-                        .app_handle()
-                        .set_activation_policy(tauri::ActivationPolicy::Accessory);
-                    if let Err(e) = res {
-                        log::error!("Failed to set activation policy: {}", e);
-                    }
-                }
             }
             tauri::WindowEvent::ThemeChanged(theme) => {
                 log::info!("Theme changed to: {:?}", theme);

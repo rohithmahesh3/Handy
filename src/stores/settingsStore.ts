@@ -89,10 +89,6 @@ const settingUpdaters: {
         ? "default"
         : (value as string),
     ),
-  clamshell_microphone: (value) =>
-    commands.setClamshellMicrophone(
-      (value as string) === "Default" ? "default" : (value as string),
-    ),
   selected_output_device: (value) =>
     commands.setSelectedOutputDevice(
       (value as string) === "Default" || value === null

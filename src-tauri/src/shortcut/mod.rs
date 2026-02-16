@@ -1052,36 +1052,3 @@ pub fn change_show_tray_icon_setting(app: AppHandle, enabled: bool) -> Result<()
 
     Ok(())
 }
-
-#[cfg(target_os = "linux")]
-#[tauri::command]
-#[specta::specta]
-pub fn change_ibus_mode_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
-    let mut settings = settings::get_settings(&app);
-    settings.ibus_mode_enabled = enabled;
-    settings::write_settings(&app, settings);
-
-    // Start or stop the D-Bus server
-    let app_clone = app.clone();
-    tauri::async_runtime::spawn(async move {
-        if enabled {
-            if let Err(e) = crate::dbus::start_dbus_server(&app_clone).await {
-                log::error!("Failed to start D-Bus server: {}", e);
-            }
-        } else {
-            if let Err(e) = crate::dbus::stop_dbus_server(&app_clone).await {
-                log::error!("Failed to stop D-Bus server: {}", e);
-            }
-        }
-    });
-
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-#[tauri::command]
-#[specta::specta]
-pub fn get_ibus_mode(app: AppHandle) -> bool {
-    let settings = settings::get_settings(&app);
-    settings.ibus_mode_enabled
-}

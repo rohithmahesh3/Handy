@@ -174,28 +174,6 @@ pub async fn play_test_sound(app: AppHandle, sound_type: String) {
 
 #[tauri::command]
 #[specta::specta]
-pub fn set_clamshell_microphone(app: AppHandle, device_name: String) -> Result<(), String> {
-    let mut settings = get_settings(&app);
-    settings.clamshell_microphone = if device_name == "default" {
-        None
-    } else {
-        Some(device_name)
-    };
-    write_settings(&app, settings);
-    Ok(())
-}
-
-#[tauri::command]
-#[specta::specta]
-pub fn get_clamshell_microphone(app: AppHandle) -> Result<String, String> {
-    let settings = get_settings(&app);
-    Ok(settings
-        .clamshell_microphone
-        .unwrap_or_else(|| "default".to_string()))
-}
-
-#[tauri::command]
-#[specta::specta]
 pub fn is_recording(app: AppHandle) -> bool {
     let audio_manager = app.state::<Arc<AudioRecordingManager>>();
     audio_manager.is_recording()
