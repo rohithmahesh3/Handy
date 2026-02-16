@@ -46,6 +46,12 @@ pub struct HandyDbusState {
     connection: Mutex<Option<Connection>>,
 }
 
+impl Default for HandyDbusState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HandyDbusState {
     pub fn new() -> Self {
         Self {
@@ -77,17 +83,15 @@ impl HandyTranscription {
         let is_always_on = self.state.always_on_microphone.load(Ordering::SeqCst);
         let recording_started = if is_always_on {
             self.state.recording_manager.try_start_recording("ibus")
+        } else if self.state.recording_manager.try_start_recording("ibus") {
+            let rm = self.state.recording_manager.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                rm.apply_mute();
+                glib::ControlFlow::Break
+            });
+            true
         } else {
-            if self.state.recording_manager.try_start_recording("ibus") {
-                let rm = self.state.recording_manager.clone();
-                glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                    rm.apply_mute();
-                    glib::ControlFlow::Break
-                });
-                true
-            } else {
-                false
-            }
+            false
         };
 
         if recording_started {

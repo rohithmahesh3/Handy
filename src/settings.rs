@@ -5,34 +5,24 @@ use std::collections::HashMap;
 
 const SETTINGS_SCHEMA: &str = "com.handy.Transcription";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
     Trace,
+    #[default]
     Debug,
     Info,
     Warn,
     Error,
 }
 
-impl Default for LogLevel {
-    fn default() -> Self {
-        LogLevel::Debug
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SoundTheme {
+    #[default]
     Marimba,
     Pop,
     Custom,
-}
-
-impl Default for SoundTheme {
-    fn default() -> Self {
-        SoundTheme::Marimba
-    }
 }
 
 impl SoundTheme {
@@ -53,9 +43,10 @@ impl SoundTheme {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelUnloadTimeout {
+    #[default]
     Never,
     Immediately,
     Min2,
@@ -64,12 +55,6 @@ pub enum ModelUnloadTimeout {
     Min15,
     Hour1,
     Sec5,
-}
-
-impl Default for ModelUnloadTimeout {
-    fn default() -> Self {
-        ModelUnloadTimeout::Never
-    }
 }
 
 impl ModelUnloadTimeout {

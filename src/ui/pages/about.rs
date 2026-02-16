@@ -9,6 +9,12 @@ pub struct AboutPage {
     container: Clamp,
 }
 
+impl Default for AboutPage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AboutPage {
     pub fn new() -> Self {
         let container = Clamp::builder().maximum_size(600).build();

@@ -32,6 +32,7 @@ pub fn run_app() {
             .expect("Failed to initialize transcription manager"),
     );
 
+    #[allow(clippy::arc_with_non_send_sync)]
     let state = Arc::new(AppState {
         settings: settings.clone(),
         recording_manager: recording_manager.clone(),
