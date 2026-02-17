@@ -650,7 +650,9 @@ impl ModelManager {
 
         if model_info.is_directory {
             // For directory-based models, rename to .tar.gz for extraction
-            let tar_path = self.models_dir.join(format!("{}.tar.gz", &model_info.filename));
+            let tar_path = self
+                .models_dir
+                .join(format!("{}.tar.gz", &model_info.filename));
             fs::rename(&partial_path, &tar_path)?;
 
             // Notify extraction state

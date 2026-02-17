@@ -194,7 +194,10 @@ or resources/models/silero_vad_v4.onnx"
         *did_mute_guard = false;
 
         if let Some(rec) = self.recorder.lock().unwrap().as_mut() {
-            if matches!(*self.state.lock().unwrap(), RecordingState::Recording { .. }) {
+            if matches!(
+                *self.state.lock().unwrap(),
+                RecordingState::Recording { .. }
+            ) {
                 let _ = rec.stop();
                 *self.state.lock().unwrap() = RecordingState::Idle;
             }

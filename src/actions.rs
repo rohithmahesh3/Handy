@@ -43,7 +43,6 @@ pub async fn perform_transcription(
         None
     };
 
-
     Ok(TranscriptionResult {
         text: final_text,
         post_processed,

@@ -1,7 +1,9 @@
 use clap::Parser;
 use log::{error, info};
 
-use handy_app_lib::ibus_engine::{cleanup, create_context, init, run_main_loop};
+use handy_app_lib::ibus_engine::{
+    cleanup, create_context, init, run_main_loop, start_global_shortcuts_listener,
+};
 
 #[derive(Debug, clap::Parser)]
 #[command(author, version, about, long_about = None)]
@@ -23,6 +25,7 @@ fn main() -> anyhow::Result<()> {
     info!("Starting Handy IBus Engine");
 
     let context = create_context();
+    start_global_shortcuts_listener();
 
     if let Err(code) = init(&context, args.ibus) {
         error!("Failed to initialize IBus engine: error code {}", code);

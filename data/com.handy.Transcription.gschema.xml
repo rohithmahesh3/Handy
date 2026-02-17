@@ -25,6 +25,11 @@
     <value nick="sec5" value="7"/>
   </enum>
 
+  <enum id="com.handy.Transcription.RecordingMode">
+    <value nick="auto" value="0"/>
+    <value nick="push_to_talk" value="1"/>
+  </enum>
+
   <schema id="com.handy.Transcription" path="/com/handy/Transcription/">
     <!-- Audio Feedback -->
     <key name="audio-feedback" type="b">
@@ -66,9 +71,35 @@
     </key>
     
     <!-- Recording -->
+    <key name="recording-mode" enum="com.handy.Transcription.RecordingMode">
+      <default>'auto'</default>
+      <summary>Recording trigger mode</summary>
+    </key>
+
     <key name="mute-while-recording" type="b">
       <default>false</default>
       <summary>Mute system audio while recording</summary>
+    </key>
+
+    <key name="push-to-talk-keyval" type="u">
+      <default>32</default>
+      <summary>Push-to-talk key symbol (IBus/X11 keyval)</summary>
+    </key>
+
+    <key name="push-to-talk-modifiers" type="u">
+      <default>4</default>
+      <summary>Push-to-talk modifier bitmask (IBus modifiers)</summary>
+    </key>
+
+    <key name="realtime-partial-enabled" type="b">
+      <default>true</default>
+      <summary>Enable partial real-time transcription while recording</summary>
+    </key>
+
+    <key name="realtime-partial-interval-ms" type="u">
+      <default>1500</default>
+      <range min="500" max="5000"/>
+      <summary>Interval between partial transcription updates in milliseconds</summary>
     </key>
     
     <!-- Model Settings -->

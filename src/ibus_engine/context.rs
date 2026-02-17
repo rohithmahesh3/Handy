@@ -1,4 +1,5 @@
 use std::ffi::{c_void, CString};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use log::{debug, error, info, warn};
@@ -9,27 +10,38 @@ use ibus_sys::keys::IBUS_KEY_Escape;
 use ibus_sys::modifiers::IBUS_RELEASE_MASK;
 use ibus_sys::{g_object_unref, gboolean, gpointer, guint, IBusEngine, TRUE};
 
+use crate::settings::{RecordingMode, Settings};
+
 const HANDY_BUS_NAME: &str = "com.handy.Transcription";
 const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
 const HANDY_INTERFACE: &str = "com.handy.Transcription";
+const HANDY_ENGINE_NAME: &str = "handy";
 
 pub struct HandyContext {
     connection: Option<Connection>,
+    settings: Settings,
     is_recording: bool,
     is_focused: bool,
     is_enabled: bool,
     notification_shown: bool,
+    ptt_pressed: bool,
+    last_non_handy_engine: Option<String>,
 }
 
 impl HandyContext {
     pub fn new() -> Self {
-        Self {
+        let mut context = Self {
             connection: None,
+            settings: Settings::new(),
             is_recording: false,
             is_focused: false,
             is_enabled: false,
             notification_shown: false,
-        }
+            ptt_pressed: false,
+            last_non_handy_engine: None,
+        };
+        context.refresh_last_non_handy_engine();
+        context
     }
 
     fn try_connect(&mut self) -> bool {
@@ -58,7 +70,10 @@ impl HandyContext {
             return;
         }
 
-        if self.is_enabled && !self.is_recording {
+        if self.is_enabled
+            && self.settings.recording_mode() == RecordingMode::Auto
+            && !self.is_recording
+        {
             self.start_recording(engine);
         }
     }
@@ -67,16 +82,13 @@ impl HandyContext {
         debug!("Focus out");
         self.is_focused = false;
 
-        if self.is_recording {
-            self.stop_and_commit(engine);
+        if self.is_recording && !self.is_enabled {
+            self.stop_and_commit(engine, None, false);
         }
     }
 
     pub fn reset(&mut self, _engine: *mut IBusEngine) {
         debug!("Reset");
-        if self.is_recording {
-            self.cancel_recording();
-        }
     }
 
     pub fn enable(&mut self, engine: *mut IBusEngine) {
@@ -115,7 +127,7 @@ impl HandyContext {
             }
         }
 
-        if !self.is_recording {
+        if self.settings.recording_mode() == RecordingMode::Auto && !self.is_recording {
             self.start_recording(engine);
         }
     }
@@ -180,22 +192,28 @@ impl HandyContext {
 
     pub fn disable(&mut self, engine: *mut IBusEngine) {
         debug!("Engine disabled");
-        if self.is_recording {
-            self.stop_and_commit(engine);
-        }
+        self.stop_and_commit(engine, None, true);
         self.is_enabled = false;
         self.is_focused = false;
+        self.ptt_pressed = false;
         self.notification_shown = false; // Reset so notification shows again on next enable
+        self.refresh_last_non_handy_engine();
     }
 
     pub fn process_key_event(
         &mut self,
-        _engine: *mut IBusEngine,
+        engine: *mut IBusEngine,
         keyval: guint,
         _keycode: guint,
         modifiers: guint,
     ) -> gboolean {
-        if modifiers & IBUS_RELEASE_MASK != 0 {
+        let is_release = modifiers & IBUS_RELEASE_MASK != 0;
+
+        if self.settings.recording_mode() == RecordingMode::PushToTalk {
+            return self.process_push_to_talk_key_event(engine, keyval, modifiers, is_release);
+        }
+
+        if is_release {
             return 0;
         }
 
@@ -206,6 +224,57 @@ impl HandyContext {
         }
 
         0
+    }
+
+    fn process_push_to_talk_key_event(
+        &mut self,
+        engine: *mut IBusEngine,
+        keyval: guint,
+        modifiers: guint,
+        is_release: bool,
+    ) -> gboolean {
+        let ptt_keyval = self.settings.push_to_talk_keyval();
+        let ptt_modifiers = self.settings.push_to_talk_modifiers();
+
+        if !is_release && keyval == IBUS_KEY_Escape && self.is_recording {
+            debug!("Escape pressed in push-to-talk mode, cancelling recording");
+            self.ptt_pressed = false;
+            self.cancel_recording();
+            return TRUE;
+        }
+
+        if keyval != ptt_keyval {
+            return 0;
+        }
+
+        if is_release {
+            if self.ptt_pressed {
+                self.ptt_pressed = false;
+                let restore_engine = self.last_non_handy_engine.clone();
+                self.stop_and_commit(engine, restore_engine, false);
+                return TRUE;
+            }
+            return 0;
+        }
+
+        if !self.matches_required_modifiers(modifiers, ptt_modifiers) {
+            return 0;
+        }
+
+        self.ptt_pressed = true;
+        if !self.is_recording {
+            self.start_recording(engine);
+        }
+        TRUE
+    }
+
+    fn matches_required_modifiers(&self, modifiers: guint, required_modifiers: guint) -> bool {
+        let effective_modifiers = modifiers & !IBUS_RELEASE_MASK;
+        if required_modifiers == 0 {
+            effective_modifiers == 0
+        } else {
+            (effective_modifiers & required_modifiers) == required_modifiers
+        }
     }
 
     fn start_recording(&mut self, _engine: *mut IBusEngine) {
@@ -235,12 +304,21 @@ impl HandyContext {
         }
     }
 
-    fn stop_and_commit(&mut self, engine: *mut IBusEngine) {
-        if !self.is_recording {
+    fn stop_and_commit(
+        &mut self,
+        engine: *mut IBusEngine,
+        restore_engine: Option<String>,
+        force: bool,
+    ) {
+        if !self.is_recording && !force {
             return;
         }
 
-        info!("Stopping recording");
+        if self.is_recording {
+            info!("Stopping recording");
+        } else {
+            debug!("Checking for active recording before commit");
+        }
         self.is_recording = false;
 
         let Some(conn) = self.connection.as_ref().cloned() else {
@@ -277,6 +355,9 @@ impl HandyContext {
             };
 
             if text.is_empty() {
+                if let Some(target_engine) = restore_engine.clone() {
+                    switch_engine_async(target_engine);
+                }
                 unsafe {
                     g_object_unref(engine_addr as gpointer);
                 }
@@ -289,6 +370,9 @@ impl HandyContext {
                 commit_text_to_engine(engine_ptr, &text);
                 unsafe {
                     g_object_unref(engine_ptr as gpointer);
+                }
+                if let Some(target_engine) = restore_engine {
+                    switch_engine_async(target_engine);
                 }
             });
         });
@@ -316,6 +400,14 @@ impl HandyContext {
             error!("Failed to cancel recording: {}", e);
         }
     }
+
+    fn refresh_last_non_handy_engine(&mut self) {
+        if let Some(engine_name) = current_ibus_engine() {
+            if !is_handy_engine(&engine_name) {
+                self.last_non_handy_engine = Some(engine_name);
+            }
+        }
+    }
 }
 
 fn commit_text_to_engine(engine: *mut IBusEngine, text: &str) {
@@ -339,8 +431,49 @@ fn commit_text_to_engine(engine: *mut IBusEngine, text: &str) {
     }
 }
 
+fn current_ibus_engine() -> Option<String> {
+    let output = Command::new("ibus").arg("engine").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let engine = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if engine.is_empty() {
+        None
+    } else {
+        Some(engine)
+    }
+}
+
+fn is_handy_engine(engine_name: &str) -> bool {
+    engine_name == HANDY_ENGINE_NAME || engine_name.ends_with(":handy")
+}
+
+fn switch_engine_async(engine_name: String) {
+    if engine_name.is_empty() || is_handy_engine(&engine_name) {
+        return;
+    }
+
+    std::thread::spawn(move || {
+        match Command::new("ibus").args(["engine", &engine_name]).status() {
+            Ok(status) if status.success() => {
+                info!("Switched input source to {}", engine_name);
+            }
+            Ok(status) => {
+                warn!(
+                    "Failed to switch input source to {}: exit status {}",
+                    engine_name, status
+                );
+            }
+            Err(e) => {
+                warn!("Failed to execute ibus engine {}: {}", engine_name, e);
+            }
+        }
+    });
+}
+
 pub type SharedContext = Arc<Mutex<HandyContext>>;
 
+#[allow(clippy::arc_with_non_send_sync)]
 pub fn create_context() -> SharedContext {
     Arc::new(Mutex::new(HandyContext::new()))
 }

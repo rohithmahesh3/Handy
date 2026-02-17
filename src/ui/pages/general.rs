@@ -9,6 +9,13 @@ use std::sync::Arc;
 
 use super::Page;
 use crate::app::AppState;
+use crate::settings::RecordingMode;
+
+const PTT_PRESETS: [(&str, &str, u32, u32); 3] = [
+    ("ctrl_space", "Ctrl+Space", 32, 4),
+    ("alt_space", "Alt+Space", 32, 8),
+    ("ctrl_shift_space", "Ctrl+Shift+Space", 32, 5),
+];
 
 pub struct GeneralPage {
     container: ScrolledWindow,
@@ -33,8 +40,52 @@ impl GeneralPage {
 
         let recording_group = PreferencesGroup::builder()
             .title("Recording")
-            .description("Use Super+Space to switch to Handy IM and start recording")
+            .description(
+                "Auto starts on Handy source switch. Push-to-talk records while key is held.",
+            )
             .build();
+
+        let mode_row = ActionRow::builder()
+            .title("Recording Mode")
+            .subtitle("Choose automatic or push-to-talk triggering")
+            .build();
+        let mode_combo = ComboBoxText::new();
+        mode_combo.append(Some("auto"), "Auto");
+        mode_combo.append(Some("push_to_talk"), "Push-to-talk");
+        match state.settings.recording_mode() {
+            RecordingMode::Auto => {
+                mode_combo.set_active_id(Some("auto"));
+            }
+            RecordingMode::PushToTalk => {
+                mode_combo.set_active_id(Some("push_to_talk"));
+            }
+        }
+        mode_row.add_suffix(&mode_combo);
+        recording_group.add(&mode_row);
+
+        let ptt_row = ActionRow::builder()
+            .title("Push-to-Talk Shortcut")
+            .subtitle("Shortcut used to start and stop recording in push-to-talk mode")
+            .build();
+        let ptt_combo = ComboBoxText::new();
+        for (id, label, _, _) in PTT_PRESETS {
+            ptt_combo.append(Some(id), label);
+        }
+        let current_keyval = state.settings.push_to_talk_keyval();
+        let current_modifiers = state.settings.push_to_talk_modifiers();
+        if let Some(id) = ptt_preset_id(current_keyval, current_modifiers) {
+            ptt_combo.set_active_id(Some(id));
+        } else {
+            let custom_label = format!(
+                "Custom ({})",
+                format_shortcut_label(current_keyval, current_modifiers)
+            );
+            ptt_combo.append(Some("custom"), &custom_label);
+            ptt_combo.set_active_id(Some("custom"));
+        }
+        ptt_row.set_sensitive(state.settings.recording_mode() == RecordingMode::PushToTalk);
+        ptt_row.add_suffix(&ptt_combo);
+        recording_group.add(&ptt_row);
 
         let mute_row = ActionRow::builder()
             .title("Mute While Recording")
@@ -55,6 +106,34 @@ impl GeneralPage {
             }
         });
         recording_group.add(&mute_row);
+
+        mode_combo.connect_changed({
+            let settings = state.settings.clone();
+            let ptt_row = ptt_row.clone();
+            move |combo| {
+                let mode = match combo.active_id().as_deref() {
+                    Some("push_to_talk") => RecordingMode::PushToTalk,
+                    _ => RecordingMode::Auto,
+                };
+                settings.set_recording_mode(mode);
+                ptt_row.set_sensitive(mode == RecordingMode::PushToTalk);
+            }
+        });
+
+        ptt_combo.connect_changed({
+            let settings = state.settings.clone();
+            move |combo| {
+                let Some(active_id) = combo.active_id() else {
+                    return;
+                };
+                if let Some((_, _, keyval, modifiers)) =
+                    PTT_PRESETS.iter().find(|(id, _, _, _)| *id == active_id)
+                {
+                    settings.set_push_to_talk_keyval(*keyval);
+                    settings.set_push_to_talk_modifiers(*modifiers);
+                }
+            }
+        });
 
         vbox.append(&recording_group);
 
@@ -184,4 +263,17 @@ impl Page for GeneralPage {
     fn widget(&self) -> &Widget {
         self.container.upcast_ref()
     }
+}
+
+fn ptt_preset_id(keyval: u32, modifiers: u32) -> Option<&'static str> {
+    PTT_PRESETS
+        .iter()
+        .find(|(_, _, preset_keyval, preset_modifiers)| {
+            *preset_keyval == keyval && *preset_modifiers == modifiers
+        })
+        .map(|(id, _, _, _)| *id)
+}
+
+fn format_shortcut_label(keyval: u32, modifiers: u32) -> String {
+    format!("key {} + mods {}", keyval, modifiers)
 }

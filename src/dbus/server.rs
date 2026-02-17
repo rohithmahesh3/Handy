@@ -77,7 +77,10 @@ impl HandyTranscription {
 
         // Check if a model is selected and downloaded before starting
         if !self.state.transcription_manager.has_model_selected() {
-            self.emit_error("No model selected. Open Handy preferences to download and select a model.").await?;
+            self.emit_error(
+                "No model selected. Open Handy preferences to download and select a model.",
+            )
+            .await?;
             return Err(fdo::Error::Failed("No model selected".to_string()));
         }
 
@@ -86,9 +89,9 @@ impl HandyTranscription {
         let recording_started = self.state.recording_manager.try_start_recording("ibus");
         if recording_started {
             let rm = self.state.recording_manager.clone();
-            glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(100));
                 rm.apply_mute();
-                glib::ControlFlow::Break
             });
         }
 
