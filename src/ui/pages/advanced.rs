@@ -1,5 +1,5 @@
 use gtk4::prelude::*;
-use gtk4::{Box, ComboBoxText, Orientation, PolicyType, ScrolledWindow, Switch, Widget};
+use gtk4::{Align, Box, ComboBoxText, Orientation, PolicyType, ScrolledWindow, Switch, Widget};
 use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt};
 use libadwaita::{ActionRow, Clamp, PreferencesGroup};
 use std::sync::Arc;
@@ -81,6 +81,8 @@ impl AdvancedPage {
         let debug_switch = Switch::builder()
             .active(state.settings.debug_mode())
             .build();
+        debug_switch.set_valign(Align::Center);
+        debug_switch.set_vexpand(false);
 
         let state_clone = state.clone();
         debug_switch.connect_active_notify(move |switch| {
@@ -97,6 +99,8 @@ impl AdvancedPage {
         let experimental_switch = Switch::builder()
             .active(state.settings.experimental_enabled())
             .build();
+        experimental_switch.set_valign(Align::Center);
+        experimental_switch.set_vexpand(false);
 
         let state_clone = state.clone();
         experimental_switch.connect_active_notify(move |switch| {

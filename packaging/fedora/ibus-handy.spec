@@ -1,6 +1,6 @@
 Name:           ibus-handy
 Version:        0.7.5
-Release:        9%{?dist}
+Release:        10%{?dist}
 Summary:        Speech-to-text for GNOME/Wayland via IBus
 
 License:        MIT
@@ -82,6 +82,10 @@ glib-compile-schemas %{_datadir}/glib-2.0/schemas 2>/dev/null || :
 %{_userunitdir}/handy.service
 
 %changelog
+* Tue Feb 17 2026 Handy Team <handy@example.com> - 0.7.5-10
+- Fix model download crash by running async HTTP download inside a dedicated Tokio runtime thread
+- Fix stretched switch rendering in General/Advanced pages by forcing centered non-expanding suffix switches
+
 * Tue Feb 17 2026 Handy Team <handy@example.com> - 0.7.5-9
 - Decouple UI startup from daemon runtime initialization so preferences window opens reliably
 - Add safe fallback from always-on microphone mode to on-demand mode on init failures

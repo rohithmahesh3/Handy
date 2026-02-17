@@ -1,6 +1,7 @@
 use gtk4::prelude::*;
 use gtk4::{
-    Adjustment, Box, ComboBoxText, Orientation, PolicyType, Scale, ScrolledWindow, Switch, Widget,
+    Adjustment, Align, Box, ComboBoxText, Orientation, PolicyType, Scale, ScrolledWindow, Switch,
+    Widget,
 };
 use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt};
 use libadwaita::{ActionRow, Clamp, PreferencesGroup};
@@ -42,6 +43,8 @@ impl GeneralPage {
         let mute_switch = Switch::builder()
             .active(state.settings.mute_while_recording())
             .build();
+        mute_switch.set_valign(Align::Center);
+        mute_switch.set_vexpand(false);
         mute_row.add_suffix(&mute_switch);
         mute_switch.connect_active_notify({
             let settings = state.settings.clone();
@@ -62,6 +65,8 @@ impl GeneralPage {
         let feedback_switch = Switch::builder()
             .active(state.settings.audio_feedback())
             .build();
+        feedback_switch.set_valign(Align::Center);
+        feedback_switch.set_vexpand(false);
         feedback_row.add_suffix(&feedback_switch);
         feedback_switch.connect_active_notify({
             let settings = state.settings.clone();
@@ -144,6 +149,8 @@ impl GeneralPage {
         let translate_switch = Switch::builder()
             .active(state.settings.translate_to_english())
             .build();
+        translate_switch.set_valign(Align::Center);
+        translate_switch.set_vexpand(false);
         translate_row.add_suffix(&translate_switch);
         translate_switch.connect_active_notify({
             let settings = state.settings.clone();

@@ -1491,6 +1491,7 @@ dependencies = [
  "serde_json",
  "strsim",
  "tar",
+ "tokio",
  "transcribe-rs",
  "vad-rs",
  "zbus",

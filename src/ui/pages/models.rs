@@ -178,12 +178,20 @@ fn create_model_row(model: &ModelInfo, selected_model: &str, state: &Arc<AppStat
             .build();
 
         let model_id = model.id.clone();
-        let state_clone = state.clone();
+        let model_manager = state.model_manager.clone();
         download_btn.connect_clicked(move |_| {
             let model_id = model_id.clone();
-            let state = state_clone.clone();
-            glib::spawn_future_local(async move {
-                if let Err(e) = state.model_manager.download_model(&model_id).await {
+            let model_manager = model_manager.clone();
+            std::thread::spawn(move || {
+                let runtime = match tokio::runtime::Runtime::new() {
+                    Ok(runtime) => runtime,
+                    Err(e) => {
+                        log::error!("Failed to create Tokio runtime for model download: {}", e);
+                        return;
+                    }
+                };
+
+                if let Err(e) = runtime.block_on(model_manager.download_model(&model_id)) {
                     log::error!("Failed to download model: {}", e);
                 }
             });
