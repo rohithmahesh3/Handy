@@ -1,6 +1,6 @@
 Name:           ibus-handy
 Version:        0.7.5
-Release:        5%{?dist}
+Release:        6%{?dist}
 Summary:        Speech-to-text for GNOME/Wayland via IBus
 
 License:        MIT
@@ -82,6 +82,10 @@ glib-compile-schemas %{_datadir}/glib-2.0/schemas 2>/dev/null || :
 %{_userunitdir}/handy.service
 
 %changelog
+* Tue Feb 17 2026 Handy Team <handy@example.com> - 0.7.5-6
+- Fix switch row focus/activation visual regression in settings UI
+- Restore native PreferencesGroup model row rendering and button spacing
+
 * Mon Feb 16 2026 Handy Team <handy@example.com> - 0.7.5-5
 - Classify Handy as a special-purpose IBus source (language=other, layout=default)
 - Improve IBus engine lifecycle handling when enabling/disabling the input source

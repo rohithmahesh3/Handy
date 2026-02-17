@@ -43,7 +43,6 @@ impl GeneralPage {
             .active(state.settings.mute_while_recording())
             .build();
         mute_row.add_suffix(&mute_switch);
-        mute_row.set_activatable_widget(Some(&mute_switch));
         mute_switch.connect_active_notify({
             let settings = state.settings.clone();
             move |switch| {
@@ -64,7 +63,6 @@ impl GeneralPage {
             .active(state.settings.audio_feedback())
             .build();
         feedback_row.add_suffix(&feedback_switch);
-        feedback_row.set_activatable_widget(Some(&feedback_switch));
         feedback_switch.connect_active_notify({
             let settings = state.settings.clone();
             move |switch| {
@@ -136,7 +134,6 @@ impl GeneralPage {
                 state_clone.settings.set_selected_language(&active);
             }
         });
-        lang_row.set_activatable_widget(Some(&language_combo));
         lang_row.add_suffix(&language_combo);
         language_group.add(&lang_row);
 
@@ -148,7 +145,6 @@ impl GeneralPage {
             .active(state.settings.translate_to_english())
             .build();
         translate_row.add_suffix(&translate_switch);
-        translate_row.set_activatable_widget(Some(&translate_switch));
         translate_switch.connect_active_notify({
             let settings = state.settings.clone();
             move |switch| {

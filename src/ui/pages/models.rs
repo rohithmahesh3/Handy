@@ -33,12 +33,7 @@ impl ModelsPage {
             .title("Available Models")
             .description("Download and select transcription models")
             .build();
-        let models_rows = Box::builder()
-            .orientation(Orientation::Vertical)
-            .spacing(0)
-            .build();
-        models_group.add(&models_rows);
-        populate_models_rows(&models_rows, state);
+        populate_models_group(&models_group, state);
         main_box.append(&models_group);
 
         let custom_group = PreferencesGroup::builder()
@@ -58,10 +53,10 @@ impl ModelsPage {
         toast_overlay.set_child(Some(&main_box));
 
         {
-            let models_rows = models_rows.clone();
+            let models_group = models_group.clone();
             let state = state.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(700), move || {
-                populate_models_rows(&models_rows, &state);
+                populate_models_group(&models_group, &state);
                 glib::ControlFlow::Continue
             });
         }
@@ -81,9 +76,9 @@ impl ModelsPage {
     }
 }
 
-fn clear_rows(rows_box: &Box) {
-    while let Some(child) = rows_box.first_child() {
-        rows_box.remove(&child);
+fn clear_group(group: &PreferencesGroup) {
+    while let Some(child) = group.first_child() {
+        group.remove(&child);
     }
 }
 
@@ -98,15 +93,15 @@ fn sorted_models(state: &Arc<AppState>) -> Vec<ModelInfo> {
     models
 }
 
-fn populate_models_rows(rows_box: &Box, state: &Arc<AppState>) {
-    clear_rows(rows_box);
+fn populate_models_group(group: &PreferencesGroup, state: &Arc<AppState>) {
+    clear_group(group);
 
     let models = sorted_models(state);
     let selected_model = state.model_manager.get_current_model();
 
     for model in models {
         let row = create_model_row(&model, &selected_model, state);
-        rows_box.append(&row);
+        group.add(&row);
     }
 }
 

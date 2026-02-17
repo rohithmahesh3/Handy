@@ -67,7 +67,6 @@ impl AdvancedPage {
             }
         });
         timeout_row.add_suffix(&timeout_combo);
-        timeout_row.set_activatable_widget(Some(&timeout_combo));
         model_group.add(&timeout_row);
 
         main_box.append(&model_group);
@@ -88,7 +87,6 @@ impl AdvancedPage {
             state_clone.settings.set_debug_mode(switch.is_active());
         });
         debug_row.add_suffix(&debug_switch);
-        debug_row.set_activatable_widget(Some(&debug_switch));
         debug_group.add(&debug_row);
 
         let experimental_row = ActionRow::builder()
@@ -107,7 +105,6 @@ impl AdvancedPage {
                 .set_experimental_enabled(switch.is_active());
         });
         experimental_row.add_suffix(&experimental_switch);
-        experimental_row.set_activatable_widget(Some(&experimental_switch));
         debug_group.add(&experimental_row);
 
         main_box.append(&debug_group);
