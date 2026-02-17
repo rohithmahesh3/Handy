@@ -29,7 +29,6 @@ pub struct HandyContext {
     is_focused: bool,
     is_enabled: bool,
     notification_shown: bool,
-    ptt_pressed: bool,
     last_non_handy_engine: Option<String>,
     active_session_id: Option<u64>,
     live_partial_cancel: Option<Arc<AtomicBool>>,
@@ -44,7 +43,6 @@ impl HandyContext {
             is_focused: false,
             is_enabled: false,
             notification_shown: false,
-            ptt_pressed: false,
             last_non_handy_engine: None,
             active_session_id: None,
             live_partial_cancel: None,
@@ -296,7 +294,6 @@ impl HandyContext {
         self.stop_and_commit(engine, None, true);
         self.is_enabled = false;
         self.is_focused = false;
-        self.ptt_pressed = false;
         self.active_session_id = None;
         self.notification_shown = false;
         self.refresh_last_non_handy_engine();
@@ -304,120 +301,19 @@ impl HandyContext {
 
     pub fn process_key_event(
         &mut self,
-        engine: *mut IBusEngine,
+        _engine: *mut IBusEngine,
         keyval: guint,
         _keycode: guint,
         modifiers: guint,
     ) -> gboolean {
         let is_release = modifiers & IBUS_RELEASE_MASK != 0;
-        self.process_push_to_talk_key_event(engine, keyval, modifiers, is_release)
-    }
-
-    fn process_push_to_talk_key_event(
-        &mut self,
-        engine: *mut IBusEngine,
-        keyval: guint,
-        modifiers: guint,
-        is_release: bool,
-    ) -> gboolean {
-        let ptt_keyval = self.settings.push_to_talk_keyval();
-        let ptt_modifiers = self.settings.push_to_talk_modifiers();
-
         if !is_release && keyval == IBUS_KEY_Escape && self.is_recording {
-            debug!("Escape pressed in push-to-talk mode, cancelling recording");
-            self.ptt_pressed = false;
+            debug!("Escape pressed while recording, cancelling recording");
             self.cancel_recording();
             return TRUE;
         }
 
-        if normalize_keyval(keyval) != normalize_keyval(ptt_keyval) {
-            return 0;
-        }
-
-        if is_release {
-            if self.ptt_pressed {
-                self.ptt_pressed = false;
-                // Daemon handles engine restore; just stop and commit.
-                self.stop_and_commit(engine, None, false);
-                // Return FALSE (0) to let the client receive the release event.
-                // This prevents "stuck key" / infinite auto-repeat issues if the
-                // engine switch happened mid-press (leaving previous engine state stuck).
-                return 0;
-            }
-            return 0;
-        }
-
-        if !self.matches_required_modifiers(modifiers, ptt_modifiers) {
-            return 0;
-        }
-
-        self.ptt_pressed = true;
-        if !self.is_recording {
-            self.start_recording(engine);
-        }
-        TRUE
-    }
-
-    fn matches_required_modifiers(&self, modifiers: guint, required_modifiers: guint) -> bool {
-        let effective_modifiers = modifiers & !IBUS_RELEASE_MASK;
-        if required_modifiers == 0 {
-            effective_modifiers == 0
-        } else {
-            (effective_modifiers & required_modifiers) == required_modifiers
-        }
-    }
-
-    fn start_recording(&mut self, engine: *mut IBusEngine) {
-        if self.is_recording {
-            return;
-        }
-
-        let Some(conn) = &self.connection else {
-            warn!("Cannot start recording: not connected to D-Bus");
-            return;
-        };
-
-        info!("Starting recording");
-        match conn.call_method(
-            Some(HANDY_BUS_NAME),
-            HANDY_OBJECT_PATH,
-            Some(HANDY_INTERFACE),
-            "StartRecordingSession",
-            &(),
-        ) {
-            Ok(reply) => match reply.body().deserialize::<u64>() {
-                Ok(session_id) => {
-                    self.active_session_id = Some(session_id);
-                    self.is_recording = true;
-                    self.ensure_live_partial_listener(engine);
-                }
-                Err(e) => {
-                    error!("Failed to decode StartRecordingSession response: {}", e);
-                }
-            },
-            Err(e) => {
-                warn!(
-                    "StartRecordingSession failed ({}), falling back to StartRecording",
-                    e
-                );
-                match conn.call_method(
-                    Some(HANDY_BUS_NAME),
-                    HANDY_OBJECT_PATH,
-                    Some(HANDY_INTERFACE),
-                    "StartRecording",
-                    &(),
-                ) {
-                    Ok(_) => {
-                        self.active_session_id = None;
-                        self.is_recording = true;
-                        self.ensure_live_partial_listener(engine);
-                    }
-                    Err(fallback_err) => {
-                        error!("Failed to start recording: {}", fallback_err);
-                    }
-                }
-            }
-        }
+        0
     }
 
     fn stop_and_commit(
@@ -658,14 +554,6 @@ fn commit_text_to_engine(engine: *mut IBusEngine, text: &str) {
             ibus_sys::ibus_engine_commit_text(engine, ibus_text);
             g_object_unref(ibus_text as gpointer);
         }
-    }
-}
-
-fn normalize_keyval(keyval: u32) -> u32 {
-    if (b'A' as u32..=b'Z' as u32).contains(&keyval) {
-        keyval + (b'a' - b'A') as u32
-    } else {
-        keyval
     }
 }
 

@@ -353,7 +353,8 @@ fn refresh_debug_view(
 ) {
     let ui_logs = read_recent_logs(ui_log_buffer, MAX_LOG_LINES);
     let daemon_logs = fetch_daemon_logs(MAX_LOG_LINES);
-    let rendered = render_debug_text(&ui_logs, daemon_logs.as_ref());
+    let ptt_diagnostics = fetch_ptt_diagnostics_summary();
+    let rendered = render_debug_text(&ui_logs, daemon_logs.as_ref(), ptt_diagnostics.as_ref());
     text_buffer.set_text(&rendered);
 }
 
@@ -379,9 +380,119 @@ fn fetch_daemon_logs(limit: usize) -> Result<Vec<String>, String> {
     Ok(logs.into_iter().skip(start).collect())
 }
 
-fn render_debug_text(ui_logs: &[String], daemon_logs: Result<&Vec<String>, &String>) -> String {
+fn fetch_ptt_diagnostics_summary() -> Result<String, String> {
+    let conn =
+        Connection::session().map_err(|e| format!("Cannot connect to session bus: {}", e))?;
+    let reply = conn
+        .call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "GetPttDiagnosticsVerbose",
+            &(),
+        )
+        .map_err(|e| format!("PTT diagnostics query failed: {}", e))?;
+
+    let payload = reply
+        .body()
+        .deserialize::<String>()
+        .map_err(|e| format!("Invalid PTT diagnostics payload: {}", e))?;
+    let diagnostics: serde_json::Value = serde_json::from_str(&payload)
+        .map_err(|e| format!("Invalid PTT diagnostics JSON: {}", e))?;
+
+    let healthy = diagnostics
+        .get("healthy")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let code = diagnostics
+        .get("code")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let message = diagnostics
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let listener_session_ok = diagnostics
+        .get("listener_session_ok")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let shortcut_bound = diagnostics
+        .get("shortcut_bound")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let bind_fail_count = diagnostics
+        .get("bind_fail_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let press_while_handy_count = diagnostics
+        .get("press_while_handy_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let release_timeout_fallback_count = diagnostics
+        .get("release_timeout_fallback_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let current_state = diagnostics
+        .get("current_state")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let shortcut_description = diagnostics
+        .get("shortcut_description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let last_start_failure_code = diagnostics
+        .get("last_start_failure_code")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let last_start_failure_message = diagnostics
+        .get("last_start_failure_message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let last_dbus_error = diagnostics
+        .get("last_dbus_error")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    Ok(format!(
+        "healthy={} code={} message={} state={} shortcut='{}' listener_ok={} shortcut_bound={} bind_failures={} press_while_handy={} stop_fallbacks={} start_failure_code={} start_failure_message={} last_dbus_error={}",
+        healthy,
+        code,
+        message,
+        current_state,
+        shortcut_description,
+        listener_session_ok,
+        shortcut_bound,
+        bind_fail_count,
+        press_while_handy_count,
+        release_timeout_fallback_count,
+        last_start_failure_code,
+        last_start_failure_message,
+        last_dbus_error
+    ))
+}
+
+fn render_debug_text(
+    ui_logs: &[String],
+    daemon_logs: Result<&Vec<String>, &String>,
+    ptt_diagnostics: Result<&String, &String>,
+) -> String {
     let mut out = String::new();
 
+    out.push_str("=== Push-to-Talk Diagnostics ===\n");
+    match ptt_diagnostics {
+        Ok(summary) => {
+            out.push_str("[ptt] ");
+            out.push_str(summary);
+            out.push('\n');
+        }
+        Err(err) => {
+            out.push_str("[ptt] unavailable: ");
+            out.push_str(err);
+            out.push('\n');
+        }
+    }
+
+    out.push('\n');
     out.push_str("=== UI Process Logs ===\n");
     if ui_logs.is_empty() {
         out.push_str("[ui] <no logs yet>\n");

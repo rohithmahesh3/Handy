@@ -231,6 +231,149 @@ fn load_ptt_diagnostics_subtitle() -> String {
         Err(e) => return format!("Unavailable: cannot connect to session bus ({})", e),
     };
 
+    let verbose_reply = conn.call_method(
+        Some(HANDY_BUS_NAME),
+        HANDY_OBJECT_PATH,
+        Some(HANDY_INTERFACE),
+        "GetPttDiagnosticsVerbose",
+        &(),
+    );
+    if let Ok(reply) = verbose_reply {
+        let payload = match reply.body().deserialize::<String>() {
+            Ok(payload) => payload,
+            Err(e) => return format!("Unavailable: invalid diagnostics payload ({})", e),
+        };
+        let diagnostics: serde_json::Value = match serde_json::from_str(&payload) {
+            Ok(value) => value,
+            Err(e) => return format!("Unavailable: invalid diagnostics JSON ({})", e),
+        };
+
+        let healthy = diagnostics
+            .get("healthy")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let code = diagnostics
+            .get("code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let message = diagnostics
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let last_success_ms = diagnostics
+            .get("last_success_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let listener_session_ok = diagnostics
+            .get("listener_session_ok")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let shortcut_bound = diagnostics
+            .get("shortcut_bound")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let bind_fail_count = diagnostics
+            .get("bind_fail_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let press_while_handy_count = diagnostics
+            .get("press_while_handy_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let release_timeout_fallback_count = diagnostics
+            .get("release_timeout_fallback_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let current_state = diagnostics
+            .get("current_state")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let shortcut_description = diagnostics
+            .get("shortcut_description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let last_start_failure_code = diagnostics
+            .get("last_start_failure_code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let last_start_failure_message = diagnostics
+            .get("last_start_failure_message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let last_start_failure_ms = diagnostics
+            .get("last_start_failure_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let last_dbus_error = diagnostics
+            .get("last_dbus_error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let last_dbus_error_ms = diagnostics
+            .get("last_dbus_error_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let age_seconds = if last_success_ms == 0 {
+            None
+        } else {
+            Some(now_ms.saturating_sub(last_success_ms) / 1000)
+        };
+
+        let start_failure_suffix = if last_start_failure_code.is_empty() {
+            "none".to_string()
+        } else {
+            let age = if last_start_failure_ms == 0 {
+                "unknown".to_string()
+            } else {
+                format!(
+                    "{}s ago",
+                    now_ms.saturating_sub(last_start_failure_ms) / 1000
+                )
+            };
+            format!(
+                "{} ({}, {})",
+                last_start_failure_code, last_start_failure_message, age
+            )
+        };
+        let dbus_suffix = if last_dbus_error.is_empty() {
+            "none".to_string()
+        } else if last_dbus_error_ms == 0 {
+            last_dbus_error.to_string()
+        } else {
+            format!(
+                "{} ({}s ago)",
+                last_dbus_error,
+                now_ms.saturating_sub(last_dbus_error_ms) / 1000
+            )
+        };
+
+        if healthy {
+            let age_text = age_seconds
+                .map(|s| format!("{}s ago", s))
+                .unwrap_or_else(|| "unknown".to_string());
+            return format!(
+                "Healthy | state={} shortcut='{}' | listener={} bound={} | last ok {}",
+                current_state, shortcut_description, listener_session_ok, shortcut_bound, age_text
+            );
+        }
+
+        return format!(
+            "Unhealthy ({}) | {} | state={} | start_fail={} | dbus={} | bind_failures={} press_while_handy={} watchdog_fallbacks={}",
+            code,
+            message,
+            current_state,
+            start_failure_suffix,
+            dbus_suffix,
+            bind_fail_count,
+            press_while_handy_count,
+            release_timeout_fallback_count
+        );
+    }
+
     let reply = match conn.call_method(
         Some(HANDY_BUS_NAME),
         HANDY_OBJECT_PATH,

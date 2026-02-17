@@ -18,6 +18,43 @@ pub enum MicrophoneMode {
     OnDemand,
 }
 
+#[derive(Clone, Debug)]
+pub enum RecordingStartError {
+    Busy { active_binding_id: Option<String> },
+    NoInputDevice,
+    VadModelMissing,
+    MicrophoneOpenFailed(String),
+    RecorderUnavailable,
+    RecorderStartFailed(String),
+}
+
+impl RecordingStartError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Busy { .. } => "busy",
+            Self::NoInputDevice => "no_input_device",
+            Self::VadModelMissing => "vad_model_missing",
+            Self::MicrophoneOpenFailed(_) => "mic_open_failed",
+            Self::RecorderUnavailable => "recorder_unavailable",
+            Self::RecorderStartFailed(_) => "recorder_start_failed",
+        }
+    }
+
+    pub fn detail(&self) -> String {
+        match self {
+            Self::Busy { active_binding_id } => match active_binding_id {
+                Some(binding) => format!("Recording already active for binding {}", binding),
+                None => "Recording already active".to_string(),
+            },
+            Self::NoInputDevice => "No input device found".to_string(),
+            Self::VadModelMissing => "Silero VAD model is missing".to_string(),
+            Self::MicrophoneOpenFailed(msg) => msg.clone(),
+            Self::RecorderUnavailable => "Recorder is not available".to_string(),
+            Self::RecorderStartFailed(msg) => msg.clone(),
+        }
+    }
+}
+
 pub struct AudioRecordingManager {
     state: Arc<Mutex<RecordingState>>,
     mode: Arc<Mutex<MicrophoneMode>>,
@@ -245,30 +282,52 @@ or resources/models/silero_vad_v4.onnx"
         self.update_selected_device()
     }
 
-    pub fn try_start_recording(&self, binding_id: &str) -> bool {
+    fn map_open_failure_to_start_error(err: &anyhow::Error) -> RecordingStartError {
+        let message = err.to_string();
+        if message.contains("No input device found") {
+            RecordingStartError::NoInputDevice
+        } else if message.contains("Silero VAD model not found") {
+            RecordingStartError::VadModelMissing
+        } else {
+            RecordingStartError::MicrophoneOpenFailed(message)
+        }
+    }
+
+    pub fn try_start_recording(&self, binding_id: &str) -> Result<(), RecordingStartError> {
         let mut state = self.state.lock().unwrap();
 
         if let RecordingState::Idle = *state {
             if matches!(*self.mode.lock().unwrap(), MicrophoneMode::OnDemand) {
                 if let Err(e) = self.start_microphone_stream() {
                     error!("Failed to open microphone stream: {e}");
-                    return false;
+                    return Err(Self::map_open_failure_to_start_error(&e));
                 }
             }
 
             if let Some(rec) = self.recorder.lock().unwrap().as_ref() {
-                if rec.start().is_ok() {
-                    *state = RecordingState::Recording {
-                        binding_id: binding_id.to_string(),
-                    };
-                    debug!("Recording started for binding {binding_id}");
-                    return true;
+                match rec.start() {
+                    Ok(()) => {
+                        *state = RecordingState::Recording {
+                            binding_id: binding_id.to_string(),
+                        };
+                        debug!("Recording started for binding {binding_id}");
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        let detail = e.to_string();
+                        error!("Failed to start recorder stream for {binding_id}: {detail}");
+                        return Err(RecordingStartError::RecorderStartFailed(detail));
+                    }
                 }
             }
             error!("Recorder not available");
-            false
+            Err(RecordingStartError::RecorderUnavailable)
         } else {
-            false
+            let active_binding_id = match &*state {
+                RecordingState::Recording { binding_id } => Some(binding_id.clone()),
+                RecordingState::Idle => None,
+            };
+            Err(RecordingStartError::Busy { active_binding_id })
         }
     }
 

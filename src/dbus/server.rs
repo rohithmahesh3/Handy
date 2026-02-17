@@ -3,7 +3,7 @@
 //! This module provides a D-Bus interface that allows the handy-ibus engine
 //! to control Handy's transcription functionality.
 
-use crate::global_shortcuts::ptt_diagnostics_tuple;
+use crate::global_shortcuts::{ptt_diagnostics_tuple, ptt_diagnostics_verbose_json};
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::transcription::TranscriptionManager;
 use crate::settings::{PostProcessProvider, Settings};
@@ -221,6 +221,11 @@ impl HandyTranscription {
         Ok(ptt_diagnostics_tuple())
     }
 
+    /// Get global push-to-talk diagnostics with verbose runtime fields.
+    async fn get_ptt_diagnostics_verbose(&self) -> fdo::Result<String> {
+        Ok(ptt_diagnostics_verbose_json())
+    }
+
     /// Get recent daemon log lines
     async fn get_recent_logs(&self) -> fdo::Result<Vec<String>> {
         Ok(self.state.recent_logs(400))
@@ -367,27 +372,33 @@ impl HandyTranscription {
 
         self.state.transcription_manager.initiate_model_load();
 
-        let recording_started = self.state.recording_manager.try_start_recording(binding_id);
-        if recording_started {
-            let rm = self.state.recording_manager.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(100));
-                rm.apply_mute();
-            });
-        }
+        match self.state.recording_manager.try_start_recording(binding_id) {
+            Ok(()) => {
+                let rm = self.state.recording_manager.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(100));
+                    rm.apply_mute();
+                });
 
-        if recording_started {
-            self.state.is_recording.store(true, Ordering::SeqCst);
-            self.state.reset_partial_state(session_id);
-            self.state
-                .start_partial_worker(binding_id.to_string(), session_id);
-            self.emit_recording_state_changed(true).await?;
-            play_feedback_sound(&Settings::new(), SoundType::Start);
-            info!("D-Bus: Recording started in {:?}", start_time.elapsed());
-            Ok(())
-        } else {
-            self.emit_error("Failed to start recording").await?;
-            Err(fdo::Error::Failed("Failed to start recording".to_string()))
+                self.state.is_recording.store(true, Ordering::SeqCst);
+                self.state.reset_partial_state(session_id);
+                self.state
+                    .start_partial_worker(binding_id.to_string(), session_id);
+                self.emit_recording_state_changed(true).await?;
+                play_feedback_sound(&Settings::new(), SoundType::Start);
+                info!("D-Bus: Recording started in {:?}", start_time.elapsed());
+                Ok(())
+            }
+            Err(err) => {
+                let detail = err.detail();
+                let message = format!("Failed to start recording ({}): {}", err.code(), detail);
+                error!(
+                    "D-Bus: StartRecording failed (binding='{}', session={}): {}",
+                    binding_id, session_id, message
+                );
+                self.emit_error(&message).await?;
+                Err(fdo::Error::Failed(message))
+            }
         }
     }
 
