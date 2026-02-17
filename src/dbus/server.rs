@@ -9,7 +9,7 @@ use crate::managers::transcription::TranscriptionManager;
 use crate::settings::{PostProcessProvider, Settings};
 use crate::text_utils::convert_chinese_variant;
 use crate::{audio_feedback::play_feedback_sound, audio_feedback::SoundType};
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
