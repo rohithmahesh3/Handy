@@ -1,6 +1,6 @@
 use gtk4::prelude::*;
 use libadwaita::Application as AdwApplication;
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Mutex};
 
 use crate::dbus::{self, HandyState};
 use crate::global_shortcuts::start_global_shortcuts_listener;
@@ -11,11 +11,14 @@ use crate::settings::{LogLevel, Settings};
 use crate::ui::window::MainWindow;
 
 const UI_APP_ID: &str = "com.handy.Handy";
-static LOGGER_INIT: Once = Once::new();
+
+use crate::utils::logging::RingBufferLogger;
+use std::collections::VecDeque;
 
 pub struct AppState {
     pub settings: Settings,
     pub model_manager: Arc<ModelManager>,
+    pub log_buffer: Arc<Mutex<VecDeque<String>>>,
 }
 
 struct RuntimeState {
@@ -23,6 +26,8 @@ struct RuntimeState {
     recording_manager: Arc<AudioRecordingManager>,
     model_manager: Arc<ModelManager>,
     transcription_manager: Arc<TranscriptionManager>,
+    #[allow(dead_code)]
+    log_buffer: Arc<Mutex<VecDeque<String>>>,
 }
 
 fn level_filter_from_settings(settings: &Settings) -> log::LevelFilter {
@@ -39,33 +44,48 @@ fn apply_runtime_log_level(settings: &Settings) {
     log::set_max_level(level_filter_from_settings(settings));
 }
 
-fn init_logging(settings: &Settings) {
-    let initial_level = level_filter_from_settings(settings);
-    LOGGER_INIT.call_once(|| {
-        let mut builder = env_logger::Builder::new();
-        builder
-            .filter_level(initial_level)
-            .format_timestamp_millis();
-        let _ = builder.try_init();
-    });
+fn init_logging(settings: &Settings) -> Arc<Mutex<VecDeque<String>>> {
+    let logger = RingBufferLogger::new(200);
+    let buffer = logger.get_buffer_handle();
+
+    // Only initialize once. If called multiple times (e.g. tests), reuse buffer?
+    // But LOGGER_INIT handles synchronization.
+    // However, set_boxed_logger fails if called twice.
+    // We'll wrap in check.
+
+    // We can't easily retrieve the buffer if already initialized.
+    // But init_logging is called once per process usually.
+    // We'll assume fresh start.
+
+    // We use a static check before setting logger
+    if let Err(e) = logger.init_globally() {
+        // If already initialized, we can't get the buffer handle of the EXISTING logger easily without unsafe or global static.
+        // For now, returning a new disconnected buffer is safe-ish for avoiding crashes,
+        // though UI won't show startup logs if re-initialized.
+        eprintln!("Logger already initialized: {}", e);
+    }
+
     apply_runtime_log_level(settings);
+
+    buffer
 }
 
 fn init_ui_state() -> Arc<AppState> {
     let settings = Settings::new();
-    init_logging(&settings);
+    let log_buffer = init_logging(&settings);
     let model_manager = Arc::new(ModelManager::new().expect("Failed to initialize model manager"));
 
     #[allow(clippy::arc_with_non_send_sync)]
     Arc::new(AppState {
         settings,
         model_manager,
+        log_buffer,
     })
 }
 
 fn init_runtime() -> (Arc<RuntimeState>, Arc<HandyState>) {
     let settings = Settings::new();
-    init_logging(&settings);
+    let log_buffer = init_logging(&settings);
 
     let recording_manager =
         Arc::new(AudioRecordingManager::new().expect("Failed to initialize recording manager"));
@@ -81,12 +101,14 @@ fn init_runtime() -> (Arc<RuntimeState>, Arc<HandyState>) {
         recording_manager: recording_manager.clone(),
         model_manager: model_manager.clone(),
         transcription_manager: transcription_manager.clone(),
+        log_buffer: log_buffer.clone(),
     });
 
     let handy_state = Arc::new(HandyState::new(
         recording_manager,
         transcription_manager,
         settings.selected_language(),
+        log_buffer,
     ));
 
     wire_settings_sync(&state, &handy_state);

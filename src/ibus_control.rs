@@ -6,6 +6,7 @@ use ibus_sys::{
 };
 
 pub const HANDY_ENGINE_NAME: &str = "handy";
+const HANDY_ENGINE_FALLBACK_NAME: &str = "other:handy";
 
 pub fn get_current_engine() -> Result<String> {
     let engine_ptr = unsafe { ibus_handy_daemon_get_global_engine_name() };
@@ -50,4 +51,25 @@ pub fn set_global_engine(engine_name: &str) -> Result<()> {
 
 pub fn is_handy_engine(engine_name: &str) -> bool {
     engine_name == HANDY_ENGINE_NAME || engine_name.ends_with(":handy")
+}
+
+pub fn switch_to_handy_engine() -> Result<String> {
+    if let Ok(engine) = get_current_engine() {
+        if is_handy_engine(&engine) {
+            return Ok(engine);
+        }
+    }
+
+    let mut attempts = Vec::new();
+    for candidate in [HANDY_ENGINE_NAME, HANDY_ENGINE_FALLBACK_NAME] {
+        match set_global_engine(candidate) {
+            Ok(()) => return Ok(candidate.to_string()),
+            Err(e) => attempts.push(format!("{} ({})", candidate, e)),
+        }
+    }
+
+    Err(anyhow!(
+        "Failed to switch to Handy input source. Tried: {}",
+        attempts.join(", ")
+    ))
 }

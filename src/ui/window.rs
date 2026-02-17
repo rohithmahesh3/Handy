@@ -45,6 +45,9 @@ impl MainWindow {
         let advanced_page = super::pages::advanced::AdvancedPage::new(&state);
         stack.add_titled(advanced_page.widget(), Some("advanced"), "Advanced");
 
+        let debug_page = super::pages::debug::DebugPage::new(&state);
+        stack.add_titled(debug_page.widget(), Some("debug"), "Debug");
+
         let about_page = super::pages::about::AboutPage::new();
         stack.add_titled(about_page.widget(), Some("about"), "About");
 
@@ -87,6 +90,7 @@ fn page_subtitle(page_name: Option<&str>) -> &'static str {
     match page_name {
         Some("models") => "Models",
         Some("advanced") => "Advanced",
+        Some("debug") => "Debug",
         Some("about") => "About",
         _ => "General",
     }

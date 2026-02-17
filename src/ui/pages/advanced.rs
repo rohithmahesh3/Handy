@@ -169,10 +169,7 @@ impl AdvancedPage {
                 Ok(result) => {
                     match result {
                         Ok(result_msg) => {
-                            status_row.set_subtitle(&format!(
-                                "✓ {}",
-                                result_msg
-                            ));
+                            status_row.set_subtitle(&format!("✓ {}", result_msg));
                             request_shortcut_listener_rebind();
                         }
                         Err(e) => {

@@ -14,6 +14,7 @@ use ibus_sys::{g_object_unref, gboolean, gpointer, guint, IBusEngine, TRUE};
 
 use super::ibus_api::{current_ibus_engine, is_handy_engine, switch_engine_async};
 use crate::settings::Settings;
+use crate::utils::launch::open_handy_ui;
 
 const HANDY_BUS_NAME: &str = "com.handy.Transcription";
 const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
@@ -247,7 +248,7 @@ impl HandyContext {
                     handle.wait_for_action(|action| {
                         if action == "default" || action == "clicked" {
                             info!("Notification clicked, opening Handy GUI");
-                            if let Err(e) = std::process::Command::new("/usr/bin/handy").spawn() {
+                            if let Err(e) = open_handy_ui(None) {
                                 error!("Failed to spawn handy: {}", e);
                             }
                         }
@@ -276,7 +277,7 @@ impl HandyContext {
                     handle.wait_for_action(|action| {
                         if action == "default" || action == "clicked" {
                             info!("Service notification clicked, opening Handy GUI");
-                            if let Err(e) = std::process::Command::new("/usr/bin/handy").spawn() {
+                            if let Err(e) = open_handy_ui(None) {
                                 error!("Failed to spawn handy: {}", e);
                             }
                         }
@@ -336,9 +337,12 @@ impl HandyContext {
         if is_release {
             if self.ptt_pressed {
                 self.ptt_pressed = false;
-                let restore_engine = self.last_non_handy_engine.clone();
-                self.stop_and_commit(engine, restore_engine, false);
-                return TRUE;
+                // Daemon handles engine restore; just stop and commit.
+                self.stop_and_commit(engine, None, false);
+                // Return FALSE (0) to let the client receive the release event.
+                // This prevents "stuck key" / infinite auto-repeat issues if the
+                // engine switch happened mid-press (leaving previous engine state stuck).
+                return 0;
             }
             return 0;
         }

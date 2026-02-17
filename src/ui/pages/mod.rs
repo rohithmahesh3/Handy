@@ -1,5 +1,6 @@
 pub mod about;
 pub mod advanced;
+pub mod debug;
 pub mod general;
 pub mod models;
 

@@ -26,6 +26,7 @@ impl Sidebar {
             "Advanced",
             "applications-engineering-symbolic",
         );
+        add_item(&list, "debug", "Debug", "utilities-terminal-symbolic");
         add_item(&list, "about", "About", "help-about-symbolic");
         if let Some(first_row) = list.row_at_index(0) {
             list.select_row(Some(&first_row));

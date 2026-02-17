@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -11,19 +12,21 @@ use notify_rust::Notification;
 use tokio::sync::mpsc;
 
 use crate::ibus_control::{
-    get_current_engine, is_handy_engine, set_global_engine, HANDY_ENGINE_NAME,
+    get_current_engine, is_handy_engine, set_global_engine, switch_to_handy_engine,
 };
 use crate::key_mapping::{
     gdk_keyval_to_evdev, is_modifier_key, modifier_flag_for_key, modifiers_from_held_keys,
     EvdevKeybinding, MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER,
 };
 use crate::settings::Settings;
+use crate::utils::launch::open_handy_ui;
 
 const HANDY_BUS_NAME: &str = "com.handy.Transcription";
 const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
 const HANDY_INTERFACE: &str = "com.handy.Transcription";
 
 const START_RECORDING_ARM_DELAY_MS: u64 = 120;
+const STOP_RECORDING_TIMEOUT_MS: u64 = 20_000;
 const SETTINGS_POLL_INTERVAL_MS: u64 = 350;
 const FAILURE_NOTIFICATION_COOLDOWN_MS: u64 = 8_000;
 
@@ -46,10 +49,18 @@ enum PttState {
         session_id: u64,
         restore_engine: Option<String>,
     },
+    Stopping {
+        session_id: u64,
+        restore_engine: Option<String>,
+    },
 }
 
 enum InternalEvent {
     StartRecordingResult {
+        session_id: u64,
+        result: std::result::Result<(), String>,
+    },
+    StopRecordingResult {
         session_id: u64,
         result: std::result::Result<(), String>,
     },
@@ -139,7 +150,12 @@ fn bump_press_while_handy() {
     }
 }
 
-
+fn bump_release_timeout_fallback() {
+    if let Ok(mut health) = health_state().lock() {
+        health.release_timeout_fallback_count =
+            health.release_timeout_fallback_count.saturating_add(1);
+    }
+}
 
 pub fn ptt_diagnostics_tuple() -> (bool, String, String, String, u64, bool, bool, u64, u64, u64) {
     if let Ok(health) = health_state().lock() {
@@ -365,11 +381,11 @@ async fn run_evdev_session(
                             // If a required modifier was released while PTT is active, treat as release
                             if let Some(flag) = modifier_flag_for_key(code) {
                                 if keybinding.modifiers & flag != 0 && !matches!(ptt_state, PttState::Idle) {
-                                    on_global_released(&mut ptt_state);
+                                    on_global_released(&mut ptt_state, &internal_tx);
                                 }
                             }
                         } else if code == keybinding.key_code {
-                            on_global_released(&mut ptt_state);
+                            on_global_released(&mut ptt_state, &internal_tx);
                         }
                     }
                 }
@@ -452,8 +468,7 @@ fn find_keyboard_devices() -> Result<Vec<PathBuf>> {
 }
 
 async fn read_device_events(path: PathBuf, tx: mpsc::UnboundedSender<KeyEvent>) -> Result<()> {
-    let device = Device::open(&path)
-        .map_err(|e| anyhow!("Failed to open {:?}: {}", path, e))?;
+    let device = Device::open(&path).map_err(|e| anyhow!("Failed to open {:?}: {}", path, e))?;
     let mut stream = device
         .into_event_stream()
         .map_err(|e| anyhow!("Failed to create event stream for {:?}: {}", path, e))?;
@@ -492,10 +507,7 @@ async fn read_device_events(path: PathBuf, tx: mpsc::UnboundedSender<KeyEvent>) 
 
 // ── PTT press/release handlers (preserved from original) ───────────────
 
-fn on_global_pressed(
-    ptt_state: &mut PttState,
-    internal_tx: &mpsc::UnboundedSender<InternalEvent>,
-) {
+fn on_global_pressed(ptt_state: &mut PttState, internal_tx: &mpsc::UnboundedSender<InternalEvent>) {
     if !matches!(ptt_state, PttState::Idle) {
         debug!("Ignoring duplicate global PTT press while not idle");
         return;
@@ -549,21 +561,24 @@ fn on_global_pressed(
         if let Ok(mut state) = last_non_handy_engine_state().lock() {
             *state = Some(current_engine.clone());
         }
-        if let Err(e) = set_global_engine(HANDY_ENGINE_NAME) {
-            warn!(
-                "[ptt:{}] Failed to switch input source to Handy on press: {}",
-                session_id, e
-            );
-            mark_health_error("ibus_switch_to_handy_failed", &e.to_string());
-            notify_ptt_failure(
-                "Cannot start push-to-talk",
-                "Failed to switch input source to Handy.",
-            );
-            return;
-        }
+        let switched_engine = match switch_to_handy_engine() {
+            Ok(engine) => engine,
+            Err(e) => {
+                warn!(
+                    "[ptt:{}] Failed to switch input source to Handy on press: {}",
+                    session_id, e
+                );
+                mark_health_error("ibus_switch_to_handy_failed", &e.to_string());
+                notify_ptt_failure(
+                    "Cannot start push-to-talk",
+                    "Failed to switch input source to Handy.",
+                );
+                return;
+            }
+        };
         info!(
-            "[ptt:{}] Pressed; switched to Handy source from '{}'",
-            session_id, current_engine
+            "[ptt:{}] Pressed; switched to Handy source '{}' from '{}'",
+            session_id, switched_engine, current_engine
         );
         Some(current_engine)
     };
@@ -576,7 +591,10 @@ fn on_global_pressed(
     };
 }
 
-fn on_global_released(ptt_state: &mut PttState) {
+fn on_global_released(
+    ptt_state: &mut PttState,
+    internal_tx: &mpsc::UnboundedSender<InternalEvent>,
+) {
     match ptt_state {
         PttState::Idle => {}
         PttState::Pending {
@@ -597,26 +615,33 @@ fn on_global_released(ptt_state: &mut PttState) {
             restore_engine,
         } => {
             let current_session = *session_id;
-            info!("[ptt:{}] Released", current_session);
-            // Restore the previous engine immediately. With the cached daemon
-            // IBusBus this is fast. The engine switch triggers
-            // context.rs:disable() which calls stop_and_commit() to handle
-            // transcription and text commit.
-            if let Some(ref engine_name) = restore_engine {
-                if let Err(e) = set_global_engine(engine_name) {
-                    warn!(
-                        "[ptt:{}] Failed to restore engine '{}': {}",
-                        current_session, engine_name, e
-                    );
-                    mark_health_error("ibus_restore_engine_failed", &e.to_string());
-                } else {
-                    info!(
-                        "[ptt:{}] Restored engine '{}'",
-                        current_session, engine_name
-                    );
-                }
-            }
-            *ptt_state = PttState::Idle;
+            info!(
+                "[ptt:{}] Released; waiting for StopRecording before restoring input source",
+                current_session
+            );
+            spawn_stop_recording(current_session, internal_tx.clone());
+            let restore_engine = restore_engine.clone();
+            *ptt_state = PttState::Stopping {
+                session_id: current_session,
+                restore_engine,
+            };
+        }
+        PttState::Stopping { .. } => {
+            debug!("Ignoring duplicate global PTT release while stop is already in progress");
+        }
+    }
+}
+
+fn restore_engine_for_session(session_id: u64, restore_engine: &Option<String>) {
+    if let Some(engine_name) = restore_engine {
+        if let Err(e) = set_global_engine(engine_name) {
+            warn!(
+                "[ptt:{}] Failed to restore engine '{}': {}",
+                session_id, engine_name, e
+            );
+            mark_health_error("ibus_restore_engine_failed", &e.to_string());
+        } else {
+            info!("[ptt:{}] Restored engine '{}'", session_id, engine_name);
         }
     }
 }
@@ -625,6 +650,9 @@ fn handle_internal_event(ptt_state: &mut PttState, internal: InternalEvent) {
     match internal {
         InternalEvent::StartRecordingResult { session_id, result } => {
             on_start_recording_result(ptt_state, session_id, result);
+        }
+        InternalEvent::StopRecordingResult { session_id, result } => {
+            on_stop_recording_result(ptt_state, session_id, result);
         }
     }
 }
@@ -650,7 +678,10 @@ fn on_start_recording_result(
                     spawn_cancel_recording(session_id, "released early");
                     if let Some(ref engine_name) = restore_engine {
                         if let Err(e) = set_global_engine(engine_name) {
-                            warn!("[ptt:{}] Failed to restore engine after early release: {}", session_id, e);
+                            warn!(
+                                "[ptt:{}] Failed to restore engine after early release: {}",
+                                session_id, e
+                            );
                         }
                     }
                     *ptt_state = PttState::Idle;
@@ -673,7 +704,10 @@ fn on_start_recording_result(
                 spawn_cancel_recording(session_id, "start failed");
                 if let Some(ref engine_name) = restore_engine {
                     if let Err(e) = set_global_engine(engine_name) {
-                        warn!("[ptt:{}] Failed to restore engine after start failure: {}", session_id, e);
+                        warn!(
+                            "[ptt:{}] Failed to restore engine after start failure: {}",
+                            session_id, e
+                        );
                     }
                 }
                 *ptt_state = PttState::Idle;
@@ -696,6 +730,41 @@ fn on_start_recording_result(
     }
 }
 
+fn on_stop_recording_result(
+    ptt_state: &mut PttState,
+    session_id: u64,
+    result: std::result::Result<(), String>,
+) {
+    match ptt_state {
+        PttState::Stopping {
+            session_id: active_session,
+            restore_engine,
+        } if *active_session == session_id => {
+            match result {
+                Ok(()) => {
+                    info!("[ptt:{}] StopRecording completed", session_id);
+                }
+                Err(err) => {
+                    warn!("[ptt:{}] StopRecording failed: {}", session_id, err);
+                    if err.contains("timed out") {
+                        bump_release_timeout_fallback();
+                    }
+                    mark_health_error("stop_recording_failed", &err);
+                }
+            }
+
+            restore_engine_for_session(session_id, restore_engine);
+            *ptt_state = PttState::Idle;
+        }
+        _ => {
+            debug!(
+                "[ptt:{}] Ignoring stale stop result for inactive session",
+                session_id
+            );
+        }
+    }
+}
+
 fn cleanup_state(ptt_state: &mut PttState) {
     match ptt_state {
         PttState::Idle => {}
@@ -708,7 +777,10 @@ fn cleanup_state(ptt_state: &mut PttState) {
             spawn_cancel_recording(sid, "cleanup");
             if let Some(ref engine_name) = restore_engine {
                 if let Err(e) = set_global_engine(engine_name) {
-                    warn!("[ptt:{}] Failed to restore engine during cleanup: {}", sid, e);
+                    warn!(
+                        "[ptt:{}] Failed to restore engine during cleanup: {}",
+                        sid, e
+                    );
                 }
             }
         }
@@ -717,11 +789,16 @@ fn cleanup_state(ptt_state: &mut PttState) {
             restore_engine,
         } => {
             let sid = *session_id;
-            if let Some(ref engine_name) = restore_engine {
-                if let Err(e) = set_global_engine(engine_name) {
-                    warn!("[ptt:{}] Failed to restore engine during cleanup: {}", sid, e);
-                }
-            }
+            spawn_cancel_recording(sid, "cleanup");
+            restore_engine_for_session(sid, restore_engine);
+        }
+        PttState::Stopping {
+            session_id,
+            restore_engine,
+        } => {
+            let sid = *session_id;
+            spawn_cancel_recording(sid, "cleanup after stop pending");
+            restore_engine_for_session(sid, restore_engine);
         }
     }
 
@@ -735,6 +812,30 @@ fn spawn_start_recording(session_id: u64, tx: mpsc::UnboundedSender<InternalEven
         std::thread::sleep(Duration::from_millis(START_RECORDING_ARM_DELAY_MS));
         let result = call_handy_method_no_args("StartRecording").map(|_| ());
         let _ = tx.send(InternalEvent::StartRecordingResult { session_id, result });
+    });
+}
+
+fn spawn_stop_recording(session_id: u64, tx: mpsc::UnboundedSender<InternalEvent>) {
+    std::thread::spawn(move || {
+        let result = match call_handy_method_no_args_with_timeout(
+            "StopRecording",
+            Duration::from_millis(STOP_RECORDING_TIMEOUT_MS),
+        ) {
+            Ok(()) => Ok(()),
+            Err(stop_err) => {
+                let cancel_result = call_handy_method_no_args("CancelRecording");
+                Err(match cancel_result {
+                    Ok(()) => format!("{}; fallback CancelRecording succeeded", stop_err),
+                    Err(cancel_err) => {
+                        format!(
+                            "{}; fallback CancelRecording failed: {}",
+                            stop_err, cancel_err
+                        )
+                    }
+                })
+            }
+        };
+        let _ = tx.send(InternalEvent::StopRecordingResult { session_id, result });
     });
 }
 
@@ -752,9 +853,6 @@ fn spawn_cancel_recording(session_id: u64, reason: &'static str) {
     });
 }
 
-
-
-
 fn call_handy_method_no_args(method: &str) -> std::result::Result<(), String> {
     let conn = zbus::blocking::Connection::session()
         .map_err(|e| format!("Failed to open session bus: {}", e))?;
@@ -769,7 +867,29 @@ fn call_handy_method_no_args(method: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+fn call_handy_method_no_args_with_timeout(
+    method: &str,
+    timeout: Duration,
+) -> std::result::Result<(), String> {
+    let method_owned = method.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(call_handy_method_no_args(&method_owned));
+    });
 
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(RecvTimeoutError::Timeout) => Err(format!(
+            "{} call timed out after {} ms",
+            method,
+            timeout.as_millis()
+        )),
+        Err(RecvTimeoutError::Disconnected) => Err(format!(
+            "{} call worker disconnected before returning",
+            method
+        )),
+    }
+}
 
 fn notify_ptt_failure(summary: &str, body: &str) {
     let now = now_millis();
@@ -791,7 +911,7 @@ fn notify_ptt_failure(summary: &str, body: &str) {
         if let Ok(handle) = notification {
             handle.wait_for_action(|action| {
                 if action == "default" || action == "clicked" {
-                    if let Err(e) = std::process::Command::new("/usr/bin/handy").spawn() {
+                    if let Err(e) = open_handy_ui(None) {
                         error!("Failed to open Handy diagnostics UI: {}", e);
                     }
                 }

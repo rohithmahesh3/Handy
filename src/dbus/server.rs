@@ -8,8 +8,10 @@ use crate::managers::audio::AudioRecordingManager;
 use crate::managers::transcription::TranscriptionManager;
 use crate::settings::{PostProcessProvider, Settings};
 use crate::text_utils::convert_chinese_variant;
+use crate::utils::logging::read_recent_logs;
 use crate::{audio_feedback::play_feedback_sound, audio_feedback::SoundType};
 use log::{debug, error, info};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -39,6 +41,7 @@ pub struct HandyState {
     /// StopRecording (deferred stop-and-restore pattern), the engine process's
     /// subsequent StopRecording retrieves this cached text for commit.
     last_transcription_cache: Mutex<Option<String>>,
+    log_buffer: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl HandyState {
@@ -46,6 +49,7 @@ impl HandyState {
         recording_manager: Arc<AudioRecordingManager>,
         transcription_manager: Arc<TranscriptionManager>,
         selected_language: String,
+        log_buffer: Arc<Mutex<VecDeque<String>>>,
     ) -> Self {
         Self {
             selected_language: Mutex::new(selected_language),
@@ -58,6 +62,7 @@ impl HandyState {
             partial_cancel: Mutex::new(None),
             session_counter: AtomicU64::new(1),
             last_transcription_cache: Mutex::new(None),
+            log_buffer,
         }
     }
 
@@ -82,6 +87,10 @@ impl HandyState {
             self.partial_sequence.load(Ordering::SeqCst),
             self.partial_text.lock().unwrap().clone(),
         )
+    }
+
+    fn recent_logs(&self, limit: usize) -> Vec<String> {
+        read_recent_logs(&self.log_buffer, limit)
     }
 
     fn stop_partial_worker(&self) {
@@ -210,6 +219,11 @@ impl HandyTranscription {
         &self,
     ) -> fdo::Result<(bool, String, String, String, u64, bool, bool, u64, u64, u64)> {
         Ok(ptt_diagnostics_tuple())
+    }
+
+    /// Get recent daemon log lines
+    async fn get_recent_logs(&self) -> fdo::Result<Vec<String>> {
+        Ok(self.state.recent_logs(400))
     }
 
     /// Get the currently selected language

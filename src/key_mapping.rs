@@ -133,36 +133,36 @@ pub fn gdk_keyval_to_evdev(keyval: u32) -> Option<u16> {
         0xffc9 => evdev::Key::KEY_F12,
 
         // Special keys
-        0xff0d => evdev::Key::KEY_ENTER,      // GDK_KEY_Return
-        0xff1b => evdev::Key::KEY_ESC,        // GDK_KEY_Escape
-        0xff09 => evdev::Key::KEY_TAB,        // GDK_KEY_Tab
-        0xff08 => evdev::Key::KEY_BACKSPACE,  // GDK_KEY_BackSpace
-        0xffff => evdev::Key::KEY_DELETE,     // GDK_KEY_Delete
-        0xff63 => evdev::Key::KEY_INSERT,     // GDK_KEY_Insert
-        0xff50 => evdev::Key::KEY_HOME,       // GDK_KEY_Home
-        0xff57 => evdev::Key::KEY_END,        // GDK_KEY_End
-        0xff55 => evdev::Key::KEY_PAGEUP,     // GDK_KEY_Page_Up
-        0xff56 => evdev::Key::KEY_PAGEDOWN,   // GDK_KEY_Page_Down
-        0x0020 => evdev::Key::KEY_SPACE,      // GDK_KEY_space
+        0xff0d => evdev::Key::KEY_ENTER,     // GDK_KEY_Return
+        0xff1b => evdev::Key::KEY_ESC,       // GDK_KEY_Escape
+        0xff09 => evdev::Key::KEY_TAB,       // GDK_KEY_Tab
+        0xff08 => evdev::Key::KEY_BACKSPACE, // GDK_KEY_BackSpace
+        0xffff => evdev::Key::KEY_DELETE,    // GDK_KEY_Delete
+        0xff63 => evdev::Key::KEY_INSERT,    // GDK_KEY_Insert
+        0xff50 => evdev::Key::KEY_HOME,      // GDK_KEY_Home
+        0xff57 => evdev::Key::KEY_END,       // GDK_KEY_End
+        0xff55 => evdev::Key::KEY_PAGEUP,    // GDK_KEY_Page_Up
+        0xff56 => evdev::Key::KEY_PAGEDOWN,  // GDK_KEY_Page_Down
+        0x0020 => evdev::Key::KEY_SPACE,     // GDK_KEY_space
 
         // Arrow keys
-        0xff51 => evdev::Key::KEY_LEFT,       // GDK_KEY_Left
-        0xff52 => evdev::Key::KEY_UP,         // GDK_KEY_Up
-        0xff53 => evdev::Key::KEY_RIGHT,      // GDK_KEY_Right
-        0xff54 => evdev::Key::KEY_DOWN,       // GDK_KEY_Down
+        0xff51 => evdev::Key::KEY_LEFT,  // GDK_KEY_Left
+        0xff52 => evdev::Key::KEY_UP,    // GDK_KEY_Up
+        0xff53 => evdev::Key::KEY_RIGHT, // GDK_KEY_Right
+        0xff54 => evdev::Key::KEY_DOWN,  // GDK_KEY_Down
 
         // Punctuation/symbols (ASCII code = GDK keyval)
-        0x2d => evdev::Key::KEY_MINUS,        // '-'
-        0x3d => evdev::Key::KEY_EQUAL,        // '='
-        0x5b => evdev::Key::KEY_LEFTBRACE,    // '['
-        0x5d => evdev::Key::KEY_RIGHTBRACE,   // ']'
-        0x5c => evdev::Key::KEY_BACKSLASH,    // '\'
-        0x3b => evdev::Key::KEY_SEMICOLON,    // ';'
-        0x27 => evdev::Key::KEY_APOSTROPHE,   // '\''
-        0x60 => evdev::Key::KEY_GRAVE,        // '`'
-        0x2c => evdev::Key::KEY_COMMA,        // ','
-        0x2e => evdev::Key::KEY_DOT,          // '.'
-        0x2f => evdev::Key::KEY_SLASH,        // '/'
+        0x2d => evdev::Key::KEY_MINUS,      // '-'
+        0x3d => evdev::Key::KEY_EQUAL,      // '='
+        0x5b => evdev::Key::KEY_LEFTBRACE,  // '['
+        0x5d => evdev::Key::KEY_RIGHTBRACE, // ']'
+        0x5c => evdev::Key::KEY_BACKSLASH,  // '\'
+        0x3b => evdev::Key::KEY_SEMICOLON,  // ';'
+        0x27 => evdev::Key::KEY_APOSTROPHE, // '\''
+        0x60 => evdev::Key::KEY_GRAVE,      // '`'
+        0x2c => evdev::Key::KEY_COMMA,      // ','
+        0x2e => evdev::Key::KEY_DOT,        // '.'
+        0x2f => evdev::Key::KEY_SLASH,      // '/'
 
         // Print screen, scroll lock, pause
         0xff61 => evdev::Key::KEY_PRINT,      // GDK_KEY_Print
@@ -170,11 +170,11 @@ pub fn gdk_keyval_to_evdev(keyval: u32) -> Option<u16> {
         0xff13 => evdev::Key::KEY_PAUSE,      // GDK_KEY_Pause
 
         // Caps lock, Num Lock
-        0xffe5 => evdev::Key::KEY_CAPSLOCK,   // GDK_KEY_Caps_Lock
-        0xff7f => evdev::Key::KEY_NUMLOCK,    // GDK_KEY_Num_Lock
+        0xffe5 => evdev::Key::KEY_CAPSLOCK, // GDK_KEY_Caps_Lock
+        0xff7f => evdev::Key::KEY_NUMLOCK,  // GDK_KEY_Num_Lock
 
         // Menu key
-        0xff67 => evdev::Key::KEY_COMPOSE,    // GDK_KEY_Menu
+        0xff67 => evdev::Key::KEY_COMPOSE, // GDK_KEY_Menu
 
         _ => return None,
     };
@@ -206,12 +206,18 @@ mod tests {
     #[test]
     fn test_function_key_mapping() {
         assert_eq!(gdk_keyval_to_evdev(0xffbe), Some(evdev::Key::KEY_F1.code()));
-        assert_eq!(gdk_keyval_to_evdev(0xffc9), Some(evdev::Key::KEY_F12.code()));
+        assert_eq!(
+            gdk_keyval_to_evdev(0xffc9),
+            Some(evdev::Key::KEY_F12.code())
+        );
     }
 
     #[test]
     fn test_space_mapping() {
-        assert_eq!(gdk_keyval_to_evdev(0x0020), Some(evdev::Key::KEY_SPACE.code()));
+        assert_eq!(
+            gdk_keyval_to_evdev(0x0020),
+            Some(evdev::Key::KEY_SPACE.code())
+        );
     }
 
     #[test]

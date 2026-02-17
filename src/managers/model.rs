@@ -359,6 +359,130 @@ impl ModelManager {
             .map(|m| self.models_dir.join(&m.filename))
     }
 
+    fn is_valid_directory_model_layout(model_info: &ModelInfo, model_path: &Path) -> bool {
+        if !model_path.is_dir() {
+            return false;
+        }
+
+        let entries = match fs::read_dir(model_path) {
+            Ok(entries) => entries,
+            Err(_) => return false,
+        };
+
+        let mut names = HashSet::new();
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                names.insert(name.to_string());
+            }
+        }
+
+        match model_info.engine_type {
+            EngineType::Parakeet => {
+                let has_encoder = names
+                    .iter()
+                    .any(|n| n.starts_with("encoder-model") && n.ends_with(".onnx"));
+                let has_decoder = names
+                    .iter()
+                    .any(|n| n.starts_with("decoder_joint-model") && n.ends_with(".onnx"));
+                has_encoder
+                    && has_decoder
+                    && names.contains("nemo128.onnx")
+                    && names.contains("vocab.txt")
+            }
+            EngineType::SenseVoice => {
+                names.contains("tokens.txt")
+                    && (names.contains("model.int8.onnx") || names.contains("model.onnx"))
+            }
+            EngineType::Moonshine => names.iter().any(|n| n.ends_with(".onnx")),
+            EngineType::Whisper => false,
+        }
+    }
+
+    fn repair_and_validate_directory_model(
+        &self,
+        model_info: &ModelInfo,
+        model_path: &Path,
+    ) -> Result<bool> {
+        if !model_path.exists() {
+            return Ok(false);
+        }
+
+        if model_path.is_file() {
+            warn!(
+                "Directory model {} expected a directory, found file at {}. Removing stale file.",
+                model_info.id,
+                model_path.display()
+            );
+            fs::remove_file(model_path)?;
+            return Ok(false);
+        }
+
+        if Self::is_valid_directory_model_layout(model_info, model_path) {
+            return Ok(true);
+        }
+
+        // Auto-repair common extraction issue:
+        // model_dir/<model>/<model>/<files> (single nested root directory).
+        let mut valid_children = Vec::new();
+        for entry in fs::read_dir(model_path)? {
+            let path = entry?.path();
+            if path.is_dir() && Self::is_valid_directory_model_layout(model_info, &path) {
+                valid_children.push(path);
+            }
+        }
+
+        if valid_children.len() == 1 {
+            let nested = valid_children.remove(0);
+            warn!(
+                "Repairing nested model directory layout for {} at {}",
+                model_info.id,
+                model_path.display()
+            );
+
+            for entry in fs::read_dir(&nested)? {
+                let entry = entry?;
+                let src = entry.path();
+                let dst = model_path.join(entry.file_name());
+                if dst.exists() {
+                    warn!(
+                        "Cannot repair {} due to path collision: {}",
+                        model_info.id,
+                        dst.display()
+                    );
+                    return Ok(false);
+                }
+                fs::rename(src, dst)?;
+            }
+
+            fs::remove_dir(&nested)?;
+            return Ok(Self::is_valid_directory_model_layout(
+                model_info, model_path,
+            ));
+        }
+
+        Ok(false)
+    }
+
+    fn extract_root_dir(extracting_dir: &Path) -> Result<PathBuf> {
+        let mut child_dirs = Vec::new();
+        let mut non_dirs = 0usize;
+
+        for entry in fs::read_dir(extracting_dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                child_dirs.push(path);
+            } else {
+                non_dirs += 1;
+            }
+        }
+
+        if non_dirs == 0 && child_dirs.len() == 1 {
+            Ok(child_dirs.remove(0))
+        } else {
+            Ok(extracting_dir.to_path_buf())
+        }
+    }
+
     fn update_download_status(&self) -> Result<()> {
         let mut models = self.available_models.lock().unwrap();
 
@@ -367,7 +491,19 @@ impl ModelManager {
                 let model_path = self.models_dir.join(&model.filename);
                 let partial_path = self.models_dir.join(format!("{}.partial", &model.filename));
 
-                model.is_downloaded = model_path.exists() && model_path.is_dir();
+                model.is_downloaded =
+                    match self.repair_and_validate_directory_model(model, &model_path) {
+                        Ok(valid) => valid,
+                        Err(e) => {
+                            warn!(
+                                "Failed to validate model {} at {}: {}",
+                                model.id,
+                                model_path.display(),
+                                e
+                            );
+                            false
+                        }
+                    };
                 model.is_downloading = false;
 
                 if partial_path.exists() {
@@ -518,18 +654,56 @@ impl ModelManager {
 
         let url = model_info
             .url
-            .ok_or_else(|| anyhow::anyhow!("No download URL for model"))?;
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No download URL for model"))?
+            .clone();
         let model_path = self.models_dir.join(&model_info.filename);
         let partial_path = self
             .models_dir
             .join(format!("{}.partial", &model_info.filename));
 
         if model_path.exists() {
-            if partial_path.exists() {
-                let _ = fs::remove_file(&partial_path);
+            if model_info.is_directory {
+                match self.repair_and_validate_directory_model(&model_info, &model_path) {
+                    Ok(true) => {
+                        if partial_path.exists() {
+                            let _ = fs::remove_file(&partial_path);
+                        }
+                        self.update_download_status()?;
+                        return Ok(());
+                    }
+                    Ok(false) => {
+                        warn!(
+                            "Model {} exists but has an invalid directory layout. Re-downloading.",
+                            model_id
+                        );
+                        if model_path.is_dir() {
+                            fs::remove_dir_all(&model_path)?;
+                        } else {
+                            fs::remove_file(&model_path)?;
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to validate model {} at {}: {}. Re-downloading.",
+                            model_id,
+                            model_path.display(),
+                            e
+                        );
+                        if model_path.is_dir() {
+                            fs::remove_dir_all(&model_path)?;
+                        } else if model_path.exists() {
+                            fs::remove_file(&model_path)?;
+                        }
+                    }
+                }
+            } else {
+                if partial_path.exists() {
+                    let _ = fs::remove_file(&partial_path);
+                }
+                self.update_download_status()?;
+                return Ok(());
             }
-            self.update_download_status()?;
-            return Ok(());
         }
 
         let mut resume_from = if partial_path.exists() {
@@ -832,9 +1006,22 @@ impl ModelManager {
         archive.unpack(&extracting_dir)?;
 
         if final_dir.exists() {
-            fs::remove_dir_all(final_dir)?;
+            if final_dir.is_dir() {
+                fs::remove_dir_all(final_dir)?;
+            } else {
+                fs::remove_file(final_dir)?;
+            }
         }
-        fs::rename(&extracting_dir, final_dir)?;
+
+        let extracted_root = Self::extract_root_dir(&extracting_dir)?;
+        if extracted_root == extracting_dir {
+            fs::rename(&extracting_dir, final_dir)?;
+        } else {
+            fs::rename(&extracted_root, final_dir)?;
+            if extracting_dir.exists() {
+                fs::remove_dir_all(&extracting_dir)?;
+            }
+        }
         fs::remove_file(tar_path)?;
 
         Ok(())
@@ -1020,7 +1207,52 @@ impl ModelManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::{self, File};
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn create_test_dir(prefix: &str) -> PathBuf {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("handy-{}-{}", prefix, ts));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn directory_model_info(id: &str, filename: &str, engine_type: EngineType) -> ModelInfo {
+        ModelInfo {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: "test".to_string(),
+            filename: filename.to_string(),
+            url: None,
+            size_mb: 0,
+            is_downloaded: false,
+            is_downloading: false,
+            partial_size: 0,
+            is_directory: true,
+            engine_type,
+            accuracy_score: 0.0,
+            speed_score: 0.0,
+            supports_translation: false,
+            is_recommended: false,
+            supported_languages: vec![],
+            is_custom: false,
+        }
+    }
+
+    fn test_manager(models_dir: PathBuf) -> ModelManager {
+        ModelManager {
+            selected_model: Mutex::new(String::new()),
+            models_dir,
+            available_models: Mutex::new(HashMap::new()),
+            cancel_flags: Arc::new(Mutex::new(HashMap::new())),
+            extracting_models: Arc::new(Mutex::new(HashSet::new())),
+            state_observers: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
 
     #[test]
     fn test_is_model_downloading() {
@@ -1110,5 +1342,75 @@ mod tests {
             can_start_after,
             "Download should be allowed after previous one completes"
         );
+    }
+
+    #[test]
+    fn test_repair_nested_parakeet_directory_layout() {
+        let models_dir = create_test_dir("model-repair");
+        let model_info = directory_model_info(
+            "parakeet-tdt-0.6b-v3",
+            "parakeet-tdt-0.6b-v3-int8",
+            EngineType::Parakeet,
+        );
+        let manager = test_manager(models_dir.clone());
+        let model_path = models_dir.join(&model_info.filename);
+        let nested_path = model_path.join("parakeet-tdt-0.6b-v3-int8");
+        fs::create_dir_all(&nested_path).unwrap();
+
+        File::create(nested_path.join("encoder-model.int8.onnx")).unwrap();
+        File::create(nested_path.join("decoder_joint-model.int8.onnx")).unwrap();
+        File::create(nested_path.join("nemo128.onnx")).unwrap();
+        File::create(nested_path.join("vocab.txt")).unwrap();
+
+        assert!(!ModelManager::is_valid_directory_model_layout(
+            &model_info,
+            &model_path
+        ));
+
+        let repaired = manager
+            .repair_and_validate_directory_model(&model_info, &model_path)
+            .unwrap();
+        assert!(repaired);
+        assert!(ModelManager::is_valid_directory_model_layout(
+            &model_info,
+            &model_path
+        ));
+        assert!(!nested_path.exists());
+
+        let _ = fs::remove_dir_all(models_dir);
+    }
+
+    #[test]
+    fn test_repair_directory_model_removes_stale_file_path() {
+        let models_dir = create_test_dir("model-stale-file");
+        let model_info = directory_model_info(
+            "sense-voice-int8",
+            "sense-voice-int8",
+            EngineType::SenseVoice,
+        );
+        let manager = test_manager(models_dir.clone());
+        let model_path = models_dir.join(&model_info.filename);
+        File::create(&model_path).unwrap();
+
+        let is_valid = manager
+            .repair_and_validate_directory_model(&model_info, &model_path)
+            .unwrap();
+        assert!(!is_valid);
+        assert!(!model_path.exists());
+
+        let _ = fs::remove_dir_all(models_dir);
+    }
+
+    #[test]
+    fn test_extract_root_dir_flattens_single_top_level_directory() {
+        let root = create_test_dir("extract-root");
+        let nested = root.join("nested-root");
+        fs::create_dir_all(&nested).unwrap();
+        File::create(nested.join("file.txt")).unwrap();
+
+        let extracted_root = ModelManager::extract_root_dir(&root).unwrap();
+        assert_eq!(extracted_root, nested);
+
+        let _ = fs::remove_dir_all(root);
     }
 }

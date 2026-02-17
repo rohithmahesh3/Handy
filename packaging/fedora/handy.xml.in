@@ -17,7 +17,7 @@
             <icon>handy</icon>
             <layout>default</layout>
             <symbol>H</symbol>
-            <setup>/usr/bin/handy</setup>
+            <setup>gtk-launch com.handy.Handy</setup>
             <longname>Handy</longname>
             <description>Handy speech-to-text dictation</description>
             <rank>80</rank>
