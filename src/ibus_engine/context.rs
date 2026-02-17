@@ -10,7 +10,7 @@ use ibus_sys::modifiers::IBUS_RELEASE_MASK;
 use ibus_sys::{g_object_unref, gboolean, gpointer, guint, IBusEngine, TRUE};
 
 use super::ibus_api::{current_ibus_engine, is_handy_engine, switch_engine_async};
-use crate::settings::{RecordingMode, Settings};
+use crate::settings::Settings;
 
 const HANDY_BUS_NAME: &str = "com.handy.Transcription";
 const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
@@ -60,19 +60,12 @@ impl HandyContext {
         }
     }
 
-    pub fn focus_in(&mut self, engine: *mut IBusEngine) {
+    pub fn focus_in(&mut self, _engine: *mut IBusEngine) {
         debug!("Focus in");
         self.is_focused = true;
 
-        if self.connection.is_none() && !self.try_connect() {
-            return;
-        }
-
-        if self.is_enabled
-            && self.settings.recording_mode() == RecordingMode::Auto
-            && !self.is_recording
-        {
-            self.start_recording(engine);
+        if self.connection.is_none() {
+            let _ = self.try_connect();
         }
     }
 
@@ -89,7 +82,7 @@ impl HandyContext {
         debug!("Reset");
     }
 
-    pub fn enable(&mut self, engine: *mut IBusEngine) {
+    pub fn enable(&mut self, _engine: *mut IBusEngine) {
         debug!("Engine enabled");
         self.is_enabled = true;
 
@@ -123,10 +116,6 @@ impl HandyContext {
                     }
                 }
             }
-        }
-
-        if self.settings.recording_mode() == RecordingMode::Auto && !self.is_recording {
-            self.start_recording(engine);
         }
     }
 
@@ -206,22 +195,7 @@ impl HandyContext {
         modifiers: guint,
     ) -> gboolean {
         let is_release = modifiers & IBUS_RELEASE_MASK != 0;
-
-        if self.settings.recording_mode() == RecordingMode::PushToTalk {
-            return self.process_push_to_talk_key_event(engine, keyval, modifiers, is_release);
-        }
-
-        if is_release {
-            return 0;
-        }
-
-        if keyval == IBUS_KEY_Escape && self.is_recording {
-            debug!("Escape pressed, cancelling recording");
-            self.cancel_recording();
-            return TRUE;
-        }
-
-        0
+        self.process_push_to_talk_key_event(engine, keyval, modifiers, is_release)
     }
 
     fn process_push_to_talk_key_event(

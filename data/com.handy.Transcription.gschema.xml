@@ -72,8 +72,8 @@
     
     <!-- Recording -->
     <key name="recording-mode" enum="com.handy.Transcription.RecordingMode">
-      <default>'auto'</default>
-      <summary>Recording trigger mode</summary>
+      <default>'push_to_talk'</default>
+      <summary>Recording trigger mode (push-to-talk)</summary>
     </key>
 
     <key name="mute-while-recording" type="b">

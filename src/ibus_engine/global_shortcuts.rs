@@ -16,7 +16,7 @@ use zbus::{Connection, Proxy};
 use super::ibus_api::{
     current_ibus_engine, is_handy_engine, switch_engine_async, HANDY_ENGINE_NAME,
 };
-use crate::settings::{RecordingMode, Settings};
+use crate::settings::Settings;
 
 const PORTAL_BUS: &str = "org.freedesktop.portal.Desktop";
 const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
@@ -35,11 +35,7 @@ const MOD_CTRL: u32 = 4;
 const MOD_ALT: u32 = 8;
 const MOD_SUPER: u32 = 64;
 
-const WATCHED_SETTINGS_KEYS: [&str; 3] = [
-    "recording-mode",
-    "push-to-talk-keyval",
-    "push-to-talk-modifiers",
-];
+const WATCHED_SETTINGS_KEYS: [&str; 2] = ["push-to-talk-keyval", "push-to-talk-modifiers"];
 
 static TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -79,13 +75,6 @@ pub fn start_global_shortcuts_listener() {
 async fn run_listener_loop(mut config_rx: watch::Receiver<ShortcutConfig>) {
     loop {
         let active_config = *config_rx.borrow_and_update();
-
-        if active_config.recording_mode != RecordingMode::PushToTalk {
-            if config_rx.changed().await.is_err() {
-                return;
-            }
-            continue;
-        }
 
         match run_shortcut_session(active_config, &mut config_rx).await {
             Ok(()) => {}
@@ -447,7 +436,6 @@ fn new_token(prefix: &str) -> String {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ShortcutConfig {
-    recording_mode: RecordingMode,
     keyval: u32,
     modifiers: u32,
 }
@@ -455,17 +443,12 @@ struct ShortcutConfig {
 impl ShortcutConfig {
     fn from_settings(settings: &Settings) -> Self {
         Self {
-            recording_mode: settings.recording_mode(),
             keyval: normalize_keyval(settings.push_to_talk_keyval()),
             modifiers: settings.push_to_talk_modifiers(),
         }
     }
 
     fn trigger(self) -> Option<String> {
-        if self.recording_mode != RecordingMode::PushToTalk {
-            return None;
-        }
-
         let key = keyval_to_shortcuts_key_name(self.keyval)?;
         let mut parts = Vec::with_capacity(5);
 

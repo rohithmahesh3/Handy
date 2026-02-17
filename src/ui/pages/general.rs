@@ -14,7 +14,6 @@ use std::sync::Arc;
 
 use super::Page;
 use crate::app::AppState;
-use crate::settings::RecordingMode;
 
 const MOD_SHIFT: u32 = 1;
 const MOD_CTRL: u32 = 4;
@@ -44,28 +43,8 @@ impl GeneralPage {
 
         let recording_group = PreferencesGroup::builder()
             .title("Recording")
-            .description(
-                "Auto starts on Handy source switch. Push-to-talk records while key is held.",
-            )
+            .description("Push-to-talk records while the configured key is held.")
             .build();
-
-        let mode_row = ActionRow::builder()
-            .title("Recording Mode")
-            .subtitle("Choose automatic or push-to-talk triggering")
-            .build();
-        let mode_combo = ComboBoxText::new();
-        mode_combo.append(Some("auto"), "Auto");
-        mode_combo.append(Some("push_to_talk"), "Push-to-talk");
-        match state.settings.recording_mode() {
-            RecordingMode::Auto => {
-                mode_combo.set_active_id(Some("auto"));
-            }
-            RecordingMode::PushToTalk => {
-                mode_combo.set_active_id(Some("push_to_talk"));
-            }
-        }
-        mode_row.add_suffix(&mode_combo);
-        recording_group.add(&mode_row);
 
         let ptt_row = ActionRow::builder()
             .title("Push-to-Talk Shortcut")
@@ -77,7 +56,6 @@ impl GeneralPage {
         ));
         ptt_button.add_css_class("flat");
         ptt_button.set_can_focus(true);
-        ptt_row.set_sensitive(state.settings.recording_mode() == RecordingMode::PushToTalk);
         ptt_row.add_suffix(&ptt_button);
         recording_group.add(&ptt_row);
 
@@ -100,19 +78,6 @@ impl GeneralPage {
             }
         });
         recording_group.add(&mute_row);
-
-        mode_combo.connect_changed({
-            let settings = state.settings.clone();
-            let ptt_row = ptt_row.clone();
-            move |combo| {
-                let mode = match combo.active_id().as_deref() {
-                    Some("push_to_talk") => RecordingMode::PushToTalk,
-                    _ => RecordingMode::Auto,
-                };
-                settings.set_recording_mode(mode);
-                ptt_row.set_sensitive(mode == RecordingMode::PushToTalk);
-            }
-        });
 
         let is_capturing = Rc::new(Cell::new(false));
         ptt_button.connect_clicked({
