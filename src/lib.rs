@@ -3,6 +3,7 @@ pub mod app;
 pub mod audio_feedback;
 pub mod audio_toolkit;
 pub mod dbus;
+pub mod global_shortcuts;
 pub mod ibus_engine;
 pub mod llm_client;
 pub mod managers;

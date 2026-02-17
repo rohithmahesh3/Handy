@@ -3,6 +3,7 @@ use libadwaita::Application as AdwApplication;
 use std::sync::Arc;
 
 use crate::dbus::{self, HandyState};
+use crate::global_shortcuts::start_global_shortcuts_listener;
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::model::ModelManager;
 use crate::managers::transcription::TranscriptionManager;
@@ -238,6 +239,7 @@ pub fn run_daemon() {
     let context = glib::MainContext::default();
     match context.block_on(dbus::start_dbus_server(handy_state)) {
         Ok(dbus_state) => {
+            start_global_shortcuts_listener();
             let main_loop = glib::MainLoop::new(None, false);
 
             // Setup shutdown signal handler

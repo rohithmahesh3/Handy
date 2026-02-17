@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::convert::TryFrom;
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -13,9 +14,6 @@ use zbus::proxy::SignalStream;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 use zbus::{Connection, Proxy};
 
-use super::ibus_api::{
-    current_ibus_engine, is_handy_engine, switch_engine_async, HANDY_ENGINE_NAME,
-};
 use crate::settings::Settings;
 
 const PORTAL_BUS: &str = "org.freedesktop.portal.Desktop";
@@ -27,6 +25,7 @@ const SESSION_IFACE: &str = "org.freedesktop.portal.Session";
 const HANDY_BUS_NAME: &str = "com.handy.Transcription";
 const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
 const HANDY_INTERFACE: &str = "com.handy.Transcription";
+const HANDY_ENGINE_NAME: &str = "handy";
 
 const SHORTCUT_ID: &str = "push_to_talk";
 
@@ -215,21 +214,36 @@ async fn on_global_pressed(handy_proxy: &Proxy<'_>, active_restore_engine: &mut 
         return;
     }
 
+    if !switch_engine(HANDY_ENGINE_NAME) {
+        warn!("Global PTT press ignored: failed to switch to Handy source");
+        return;
+    }
+
     let start_result: zbus::Result<()> = handy_proxy.call("StartRecording", &()).await;
     if let Err(e) = start_result {
         warn!("Global PTT failed to start recording: {}", e);
+        if !switch_engine(&current_engine) {
+            warn!(
+                "Failed to restore source '{}' after start failure",
+                current_engine
+            );
+        }
         return;
     }
 
     *active_restore_engine = Some(current_engine);
-    switch_engine_async(HANDY_ENGINE_NAME.to_string());
 }
 
 fn on_global_released(active_restore_engine: &mut Option<String>) {
     let Some(restore_engine) = active_restore_engine.take() else {
         return;
     };
-    switch_engine_async(restore_engine);
+    if !switch_engine(&restore_engine) {
+        warn!(
+            "Failed to restore input source on PTT release: {}",
+            restore_engine
+        );
+    }
 }
 
 async fn create_session(
@@ -411,6 +425,45 @@ fn ensure_success_response(operation: &str, response_code: u32) -> Result<()> {
         1 => Err(anyhow!("{} canceled by user", operation)),
         2 => Err(anyhow!("{} failed: interaction unavailable", operation)),
         code => Err(anyhow!("{} failed with code {}", operation, code)),
+    }
+}
+
+fn current_ibus_engine() -> Option<String> {
+    let output = Command::new("ibus").arg("engine").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let engine = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if engine.is_empty() {
+        None
+    } else {
+        Some(engine)
+    }
+}
+
+fn is_handy_engine(engine_name: &str) -> bool {
+    engine_name == HANDY_ENGINE_NAME || engine_name.ends_with(":handy")
+}
+
+fn switch_engine(engine_name: &str) -> bool {
+    if engine_name.is_empty() {
+        return false;
+    }
+
+    match Command::new("ibus").args(["engine", engine_name]).status() {
+        Ok(status) if status.success() => true,
+        Ok(status) => {
+            warn!(
+                "Failed to switch input source to {}: exit status {}",
+                engine_name, status
+            );
+            false
+        }
+        Err(e) => {
+            warn!("Failed to execute ibus engine {}: {}", engine_name, e);
+            false
+        }
     }
 }
 

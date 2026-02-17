@@ -1,11 +1,9 @@
 mod context;
-mod global_shortcuts;
 mod ibus_api;
 
 use ibus_sys::{ibus_handy_cleanup, ibus_handy_init, init_error};
 
 pub use context::{create_context, init as set_callbacks, SharedContext};
-pub use global_shortcuts::start_global_shortcuts_listener;
 
 pub fn init(context: &SharedContext, ibus_mode: bool) -> Result<(), i32> {
     set_callbacks(context);
