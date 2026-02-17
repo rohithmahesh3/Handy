@@ -1,6 +1,6 @@
 Name:           ibus-handy
-Version:        0.7.5
-Release:        10%{?dist}
+Version:        0.7.11
+Release:        1%{?dist}
 Summary:        Speech-to-text for GNOME/Wayland via IBus
 
 License:        MIT
