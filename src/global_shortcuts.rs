@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::convert::TryFrom;
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -8,12 +7,16 @@ use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
 use glib::translate::from_glib;
 use gtk4::gdk;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
+use notify_rust::Notification;
 use tokio::sync::watch;
 use zbus::proxy::SignalStream;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 use zbus::{Connection, Proxy};
 
+use crate::ibus_control::{
+    get_current_engine, is_handy_engine, set_global_engine, HANDY_ENGINE_NAME,
+};
 use crate::settings::Settings;
 
 const PORTAL_BUS: &str = "org.freedesktop.portal.Desktop";
@@ -25,7 +28,6 @@ const SESSION_IFACE: &str = "org.freedesktop.portal.Session";
 const HANDY_BUS_NAME: &str = "com.handy.Transcription";
 const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
 const HANDY_INTERFACE: &str = "com.handy.Transcription";
-const HANDY_ENGINE_NAME: &str = "handy";
 
 const SHORTCUT_ID: &str = "push_to_talk";
 
@@ -35,11 +37,34 @@ const MOD_ALT: u32 = 8;
 const MOD_SUPER: u32 = 64;
 
 const WATCHED_SETTINGS_KEYS: [&str; 2] = ["push-to-talk-keyval", "push-to-talk-modifiers"];
+const START_RECORDING_ARM_DELAY_MS: u64 = 120;
 
 static TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
+static PTT_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 type ShortcutOptions = HashMap<String, OwnedValue>;
 type PortalShortcutList = Vec<(String, ShortcutOptions)>;
+
+#[derive(Debug)]
+enum PttState {
+    Idle,
+    Pending {
+        session_id: u64,
+        restore_engine: String,
+        released_early: bool,
+    },
+    Recording {
+        session_id: u64,
+        restore_engine: String,
+    },
+}
+
+enum InternalEvent {
+    StartRecordingResult {
+        session_id: u64,
+        result: std::result::Result<(), String>,
+    },
+}
 
 pub fn start_global_shortcuts_listener() {
     let settings: &'static Settings = Box::leak(Box::new(Settings::new()));
@@ -94,13 +119,6 @@ async fn run_shortcut_session(
 
     let connection = Connection::session().await?;
     let portal_proxy = Proxy::new(&connection, PORTAL_BUS, PORTAL_PATH, SHORTCUTS_IFACE).await?;
-    let handy_proxy = Proxy::new(
-        &connection,
-        HANDY_BUS_NAME,
-        HANDY_OBJECT_PATH,
-        HANDY_INTERFACE,
-    )
-    .await?;
 
     let session_handle = create_session(&portal_proxy, &connection).await?;
     if let Err(e) = bind_shortcut(&portal_proxy, &connection, &session_handle, &trigger).await {
@@ -112,8 +130,9 @@ async fn run_shortcut_session(
     }
     info!("Global push-to-talk registered with trigger {}", trigger);
 
-    let mut active_restore_engine: Option<String> = None;
+    let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel::<InternalEvent>();
     let mut signal_stream = portal_proxy.receive_all_signals().await?;
+    let mut ptt_state = PttState::Idle;
 
     let loop_result = loop {
         tokio::select! {
@@ -145,7 +164,7 @@ async fn run_shortcut_session(
                             ShortcutOptions,
                         ) = signal_msg.body().deserialize()?;
                         if handle == session_handle && shortcut_id == SHORTCUT_ID {
-                            on_global_pressed(&handy_proxy, &mut active_restore_engine).await;
+                            on_global_pressed(&mut ptt_state, &internal_tx);
                         }
                     }
                     "Deactivated" => {
@@ -156,7 +175,7 @@ async fn run_shortcut_session(
                             ShortcutOptions,
                         ) = signal_msg.body().deserialize()?;
                         if handle == session_handle && shortcut_id == SHORTCUT_ID {
-                            on_global_released(&mut active_restore_engine);
+                            on_global_released(&mut ptt_state);
                         }
                     }
                     "ShortcutsChanged" => {
@@ -169,15 +188,285 @@ async fn run_shortcut_session(
                     _ => {}
                 }
             }
+            maybe_internal = internal_rx.recv() => {
+                let Some(internal) = maybe_internal else {
+                    break Err(anyhow!("Internal global shortcut channel closed"));
+                };
+                handle_internal_event(&mut ptt_state, internal);
+            }
         }
     };
 
-    if active_restore_engine.is_some() {
-        on_global_released(&mut active_restore_engine);
-    }
+    cleanup_state(&mut ptt_state);
     close_session(&connection, &session_handle).await;
 
     loop_result
+}
+
+fn on_global_pressed(
+    ptt_state: &mut PttState,
+    internal_tx: &tokio::sync::mpsc::UnboundedSender<InternalEvent>,
+) {
+    if !matches!(ptt_state, PttState::Idle) {
+        debug!("Ignoring duplicate global PTT press while not idle");
+        return;
+    }
+
+    let current_engine = match get_current_engine() {
+        Ok(engine) => engine,
+        Err(e) => {
+            warn!(
+                "Global PTT press ignored: failed to read IBus engine: {}",
+                e
+            );
+            notify_ptt_failure(
+                "Cannot start push-to-talk",
+                "Failed to read current input source from IBus.",
+            );
+            return;
+        }
+    };
+
+    if is_handy_engine(&current_engine) {
+        debug!("Ignoring global PTT press because Handy source is already active");
+        return;
+    }
+
+    let session_id = next_ptt_session_id();
+    if let Err(e) = set_global_engine(HANDY_ENGINE_NAME) {
+        warn!(
+            "[ptt:{}] Failed to switch input source to Handy on press: {}",
+            session_id, e
+        );
+        notify_ptt_failure(
+            "Cannot start push-to-talk",
+            "Failed to switch input source to Handy.",
+        );
+        return;
+    }
+
+    info!(
+        "[ptt:{}] Pressed; switched to Handy source from '{}'",
+        session_id, current_engine
+    );
+
+    spawn_start_recording(session_id, internal_tx.clone());
+    *ptt_state = PttState::Pending {
+        session_id,
+        restore_engine: current_engine,
+        released_early: false,
+    };
+}
+
+fn on_global_released(ptt_state: &mut PttState) {
+    match ptt_state {
+        PttState::Idle => {}
+        PttState::Pending {
+            session_id,
+            restore_engine,
+            released_early,
+        } => {
+            let current_session = *session_id;
+            info!(
+                "[ptt:{}] Released before recording confirmation, restoring source '{}'",
+                current_session, restore_engine
+            );
+            if restore_engine_for_session(current_session, restore_engine, "pending release")
+                .is_err()
+            {
+                spawn_cancel_recording(current_session, "failed restore after early release");
+            }
+            *released_early = true;
+        }
+        PttState::Recording {
+            session_id,
+            restore_engine,
+        } => {
+            let current_session = *session_id;
+            info!(
+                "[ptt:{}] Released, restoring source '{}'",
+                current_session, restore_engine
+            );
+            if restore_engine_for_session(current_session, restore_engine, "release").is_err() {
+                spawn_cancel_recording(current_session, "failed restore on release");
+            }
+            *ptt_state = PttState::Idle;
+        }
+    }
+}
+
+fn handle_internal_event(ptt_state: &mut PttState, internal: InternalEvent) {
+    match internal {
+        InternalEvent::StartRecordingResult { session_id, result } => {
+            on_start_recording_result(ptt_state, session_id, result);
+        }
+    }
+}
+
+fn on_start_recording_result(
+    ptt_state: &mut PttState,
+    session_id: u64,
+    result: std::result::Result<(), String>,
+) {
+    match ptt_state {
+        PttState::Pending {
+            session_id: active_session,
+            restore_engine,
+            released_early,
+        } if *active_session == session_id => match result {
+            Ok(()) => {
+                if *released_early {
+                    info!(
+                        "[ptt:{}] Start completed after key release; cancelling stale recording",
+                        session_id
+                    );
+                    if restore_engine_for_session(
+                        session_id,
+                        restore_engine,
+                        "late start after release",
+                    )
+                    .is_err()
+                    {
+                        warn!(
+                            "[ptt:{}] Source restore still failing after late start",
+                            session_id
+                        );
+                    }
+                    spawn_cancel_recording(session_id, "late start after release");
+                    *ptt_state = PttState::Idle;
+                } else {
+                    info!("[ptt:{}] Recording started", session_id);
+                    let restore_engine = restore_engine.clone();
+                    *ptt_state = PttState::Recording {
+                        session_id,
+                        restore_engine,
+                    };
+                }
+            }
+            Err(err) => {
+                warn!("[ptt:{}] Failed to start recording: {}", session_id, err);
+                notify_ptt_failure(
+                    "Cannot start recording",
+                    "Handy failed to start recording for push-to-talk.",
+                );
+                if restore_engine_for_session(session_id, restore_engine, "start failure").is_err()
+                {
+                    spawn_cancel_recording(session_id, "start failure + restore failure");
+                }
+                *ptt_state = PttState::Idle;
+            }
+        },
+        _ => {
+            if result.is_ok() {
+                warn!(
+                    "[ptt:{}] Received stale start success, cancelling recording to avoid orphan state",
+                    session_id
+                );
+                spawn_cancel_recording(session_id, "stale start success");
+            } else {
+                debug!(
+                    "[ptt:{}] Ignoring stale start failure for inactive session",
+                    session_id
+                );
+            }
+        }
+    }
+}
+
+fn cleanup_state(ptt_state: &mut PttState) {
+    match ptt_state {
+        PttState::Idle => {}
+        PttState::Pending {
+            session_id,
+            restore_engine,
+            ..
+        } => {
+            if restore_engine_for_session(*session_id, restore_engine, "session cleanup").is_err() {
+                spawn_cancel_recording(*session_id, "cleanup restore failure");
+            }
+        }
+        PttState::Recording {
+            session_id,
+            restore_engine,
+        } => {
+            if restore_engine_for_session(*session_id, restore_engine, "session cleanup").is_err() {
+                spawn_cancel_recording(*session_id, "cleanup restore failure");
+            }
+        }
+    }
+
+    *ptt_state = PttState::Idle;
+}
+
+fn restore_engine_for_session(session_id: u64, restore_engine: &str, reason: &str) -> Result<()> {
+    match set_global_engine(restore_engine) {
+        Ok(()) => {
+            info!(
+                "[ptt:{}] Restored source '{}' ({})",
+                session_id, restore_engine, reason
+            );
+            Ok(())
+        }
+        Err(e) => {
+            warn!(
+                "[ptt:{}] Failed to restore source '{}' ({}): {}",
+                session_id, restore_engine, reason, e
+            );
+            notify_ptt_failure(
+                "Input source restore failed",
+                "Handy could not restore your previous input source after push-to-talk.",
+            );
+            Err(e)
+        }
+    }
+}
+
+fn spawn_start_recording(session_id: u64, tx: tokio::sync::mpsc::UnboundedSender<InternalEvent>) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(START_RECORDING_ARM_DELAY_MS));
+        let result = call_handy_method_no_args("StartRecording").map(|_| ());
+        let _ = tx.send(InternalEvent::StartRecordingResult { session_id, result });
+    });
+}
+
+fn spawn_cancel_recording(session_id: u64, reason: &'static str) {
+    std::thread::spawn(move || match call_handy_method_no_args("CancelRecording") {
+        Ok(()) => {
+            info!("[ptt:{}] Cancelled recording ({})", session_id, reason);
+        }
+        Err(e) => {
+            warn!(
+                "[ptt:{}] Failed to cancel recording ({}): {}",
+                session_id, reason, e
+            );
+        }
+    });
+}
+
+fn call_handy_method_no_args(method: &str) -> std::result::Result<(), String> {
+    let conn = zbus::blocking::Connection::session()
+        .map_err(|e| format!("Failed to open session bus: {}", e))?;
+    conn.call_method(
+        Some(HANDY_BUS_NAME),
+        HANDY_OBJECT_PATH,
+        Some(HANDY_INTERFACE),
+        method,
+        &(),
+    )
+    .map_err(|e| format!("{} call failed: {}", method, e))?;
+    Ok(())
+}
+
+fn notify_ptt_failure(summary: &str, body: &str) {
+    let summary = summary.to_string();
+    let body = body.to_string();
+    std::thread::spawn(move || {
+        let _ = Notification::new().summary(&summary).body(&body).show();
+    });
+}
+
+fn next_ptt_session_id() -> u64 {
+    PTT_SESSION_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 fn log_shortcuts_changed(shortcuts: PortalShortcutList) {
@@ -197,52 +486,6 @@ fn log_shortcuts_changed(shortcuts: PortalShortcutList) {
 
         info!("Global shortcut updated by portal");
         return;
-    }
-}
-
-async fn on_global_pressed(handy_proxy: &Proxy<'_>, active_restore_engine: &mut Option<String>) {
-    if active_restore_engine.is_some() {
-        return;
-    }
-
-    let Some(current_engine) = current_ibus_engine() else {
-        warn!("Global PTT press ignored: failed to read current IBus engine");
-        return;
-    };
-
-    if is_handy_engine(&current_engine) {
-        return;
-    }
-
-    if !switch_engine(HANDY_ENGINE_NAME) {
-        warn!("Global PTT press ignored: failed to switch to Handy source");
-        return;
-    }
-
-    let start_result: zbus::Result<()> = handy_proxy.call("StartRecording", &()).await;
-    if let Err(e) = start_result {
-        warn!("Global PTT failed to start recording: {}", e);
-        if !switch_engine(&current_engine) {
-            warn!(
-                "Failed to restore source '{}' after start failure",
-                current_engine
-            );
-        }
-        return;
-    }
-
-    *active_restore_engine = Some(current_engine);
-}
-
-fn on_global_released(active_restore_engine: &mut Option<String>) {
-    let Some(restore_engine) = active_restore_engine.take() else {
-        return;
-    };
-    if !switch_engine(&restore_engine) {
-        warn!(
-            "Failed to restore input source on PTT release: {}",
-            restore_engine
-        );
     }
 }
 
@@ -425,45 +668,6 @@ fn ensure_success_response(operation: &str, response_code: u32) -> Result<()> {
         1 => Err(anyhow!("{} canceled by user", operation)),
         2 => Err(anyhow!("{} failed: interaction unavailable", operation)),
         code => Err(anyhow!("{} failed with code {}", operation, code)),
-    }
-}
-
-fn current_ibus_engine() -> Option<String> {
-    let output = Command::new("ibus").arg("engine").output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let engine = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if engine.is_empty() {
-        None
-    } else {
-        Some(engine)
-    }
-}
-
-fn is_handy_engine(engine_name: &str) -> bool {
-    engine_name == HANDY_ENGINE_NAME || engine_name.ends_with(":handy")
-}
-
-fn switch_engine(engine_name: &str) -> bool {
-    if engine_name.is_empty() {
-        return false;
-    }
-
-    match Command::new("ibus").args(["engine", engine_name]).status() {
-        Ok(status) if status.success() => true,
-        Ok(status) => {
-            warn!(
-                "Failed to switch input source to {}: exit status {}",
-                engine_name, status
-            );
-            false
-        }
-        Err(e) => {
-            warn!("Failed to execute ibus engine {}: {}", engine_name, e);
-            false
-        }
     }
 }
 

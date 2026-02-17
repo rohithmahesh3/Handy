@@ -247,3 +247,56 @@ gchar *ibus_handy_get_global_engine_name(void) {
     g_object_unref(desc);
     return result;
 }
+
+static gsize daemon_ibus_initialized = 0;
+
+static IBusBus *ibus_handy_daemon_new_bus(void) {
+    if (g_once_init_enter(&daemon_ibus_initialized)) {
+        ibus_init();
+        g_once_init_leave(&daemon_ibus_initialized, 1);
+    }
+
+    IBusBus *bus = ibus_bus_new();
+    if (!bus || !ibus_bus_is_connected(bus)) {
+        if (bus) {
+            g_object_unref(bus);
+        }
+        return NULL;
+    }
+
+    return bus;
+}
+
+gboolean ibus_handy_daemon_set_global_engine(const gchar *engine_name) {
+    if (!engine_name || strlen(engine_name) == 0) {
+        return FALSE;
+    }
+
+    IBusBus *bus = ibus_handy_daemon_new_bus();
+    if (!bus) {
+        return FALSE;
+    }
+
+    gboolean result = ibus_bus_set_global_engine(bus, engine_name);
+    g_object_unref(bus);
+    return result;
+}
+
+gchar *ibus_handy_daemon_get_global_engine_name(void) {
+    IBusBus *bus = ibus_handy_daemon_new_bus();
+    if (!bus) {
+        return NULL;
+    }
+
+    IBusEngineDesc *desc = ibus_bus_get_global_engine(bus);
+    if (!desc) {
+        g_object_unref(bus);
+        return NULL;
+    }
+
+    const gchar *name = ibus_engine_desc_get_name(desc);
+    gchar *result = name ? g_strdup(name) : NULL;
+    g_object_unref(desc);
+    g_object_unref(bus);
+    return result;
+}
