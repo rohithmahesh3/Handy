@@ -1,21 +1,25 @@
+use glib::translate::IntoGlib;
+use glib::Propagation;
 use gtk4::prelude::*;
+use gtk4::{gdk, EventControllerKey};
 use gtk4::{
-    Adjustment, Align, Box, ComboBoxText, Orientation, PolicyType, Scale, ScrolledWindow, Switch,
-    Widget,
+    Adjustment, Align, Box, Button, ComboBoxText, Orientation, PolicyType, Scale, ScrolledWindow,
+    Switch, Widget,
 };
 use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt};
 use libadwaita::{ActionRow, Clamp, PreferencesGroup};
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use super::Page;
 use crate::app::AppState;
 use crate::settings::RecordingMode;
 
-const PTT_PRESETS: [(&str, &str, u32, u32); 3] = [
-    ("ctrl_space", "Ctrl+Space", 32, 4),
-    ("alt_space", "Alt+Space", 32, 8),
-    ("ctrl_shift_space", "Ctrl+Shift+Space", 32, 5),
-];
+const MOD_SHIFT: u32 = 1;
+const MOD_CTRL: u32 = 4;
+const MOD_ALT: u32 = 8;
+const MOD_SUPER: u32 = 64;
 
 pub struct GeneralPage {
     container: ScrolledWindow,
@@ -65,26 +69,16 @@ impl GeneralPage {
 
         let ptt_row = ActionRow::builder()
             .title("Push-to-Talk Shortcut")
-            .subtitle("Shortcut used to start and stop recording in push-to-talk mode")
+            .subtitle("Click the button, then press a shortcut. Press Esc to cancel capture.")
             .build();
-        let ptt_combo = ComboBoxText::new();
-        for (id, label, _, _) in PTT_PRESETS {
-            ptt_combo.append(Some(id), label);
-        }
-        let current_keyval = state.settings.push_to_talk_keyval();
-        let current_modifiers = state.settings.push_to_talk_modifiers();
-        if let Some(id) = ptt_preset_id(current_keyval, current_modifiers) {
-            ptt_combo.set_active_id(Some(id));
-        } else {
-            let custom_label = format!(
-                "Custom ({})",
-                format_shortcut_label(current_keyval, current_modifiers)
-            );
-            ptt_combo.append(Some("custom"), &custom_label);
-            ptt_combo.set_active_id(Some("custom"));
-        }
+        let ptt_button = Button::with_label(&format_shortcut_label(
+            state.settings.push_to_talk_keyval(),
+            state.settings.push_to_talk_modifiers(),
+        ));
+        ptt_button.add_css_class("flat");
+        ptt_button.set_can_focus(true);
         ptt_row.set_sensitive(state.settings.recording_mode() == RecordingMode::PushToTalk);
-        ptt_row.add_suffix(&ptt_combo);
+        ptt_row.add_suffix(&ptt_button);
         recording_group.add(&ptt_row);
 
         let mute_row = ActionRow::builder()
@@ -120,20 +114,53 @@ impl GeneralPage {
             }
         });
 
-        ptt_combo.connect_changed({
-            let settings = state.settings.clone();
-            move |combo| {
-                let Some(active_id) = combo.active_id() else {
-                    return;
-                };
-                if let Some((_, _, keyval, modifiers)) =
-                    PTT_PRESETS.iter().find(|(id, _, _, _)| *id == active_id)
-                {
-                    settings.set_push_to_talk_keyval(*keyval);
-                    settings.set_push_to_talk_modifiers(*modifiers);
-                }
+        let is_capturing = Rc::new(Cell::new(false));
+        ptt_button.connect_clicked({
+            let button = ptt_button.clone();
+            let is_capturing = is_capturing.clone();
+            move |_| {
+                is_capturing.set(true);
+                button.set_label("Press shortcut...");
+                button.grab_focus();
             }
         });
+
+        let key_controller = EventControllerKey::new();
+        key_controller.connect_key_pressed({
+            let settings = state.settings.clone();
+            let button = ptt_button.clone();
+            let is_capturing = is_capturing.clone();
+            move |_, keyval, _, state| {
+                if !is_capturing.get() {
+                    return Propagation::Proceed;
+                }
+
+                if keyval == gdk::Key::Escape {
+                    is_capturing.set(false);
+                    button.set_label(&format_shortcut_label(
+                        settings.push_to_talk_keyval(),
+                        settings.push_to_talk_modifiers(),
+                    ));
+                    return Propagation::Stop;
+                }
+
+                let modifiers = gdk_to_ibus_modifiers(state);
+                if modifiers == 0
+                    || !gtk4::accelerator_valid(keyval, ibus_to_gdk_modifiers(modifiers))
+                {
+                    button.set_label("Invalid shortcut. Use Ctrl/Alt/Super + key");
+                    return Propagation::Stop;
+                }
+
+                let normalized_key = keyval.to_lower().into_glib();
+                settings.set_push_to_talk_keyval(normalized_key);
+                settings.set_push_to_talk_modifiers(modifiers);
+                button.set_label(&format_shortcut_label(normalized_key, modifiers));
+                is_capturing.set(false);
+                Propagation::Stop
+            }
+        });
+        ptt_button.add_controller(key_controller);
 
         vbox.append(&recording_group);
 
@@ -265,15 +292,52 @@ impl Page for GeneralPage {
     }
 }
 
-fn ptt_preset_id(keyval: u32, modifiers: u32) -> Option<&'static str> {
-    PTT_PRESETS
-        .iter()
-        .find(|(_, _, preset_keyval, preset_modifiers)| {
-            *preset_keyval == keyval && *preset_modifiers == modifiers
-        })
-        .map(|(id, _, _, _)| *id)
+fn format_shortcut_label(keyval: u32, modifiers: u32) -> String {
+    let key = unsafe { glib::translate::from_glib(keyval) };
+    let label = gtk4::accelerator_get_label(key, ibus_to_gdk_modifiers(modifiers));
+    if label.is_empty() {
+        "Unknown shortcut".to_string()
+    } else {
+        label.to_string()
+    }
 }
 
-fn format_shortcut_label(keyval: u32, modifiers: u32) -> String {
-    format!("key {} + mods {}", keyval, modifiers)
+fn gdk_to_ibus_modifiers(modifiers: gdk::ModifierType) -> u32 {
+    let normalized = modifiers
+        & (gdk::ModifierType::CONTROL_MASK
+            | gdk::ModifierType::ALT_MASK
+            | gdk::ModifierType::SHIFT_MASK
+            | gdk::ModifierType::SUPER_MASK);
+
+    let mut result = 0;
+    if normalized.contains(gdk::ModifierType::CONTROL_MASK) {
+        result |= MOD_CTRL;
+    }
+    if normalized.contains(gdk::ModifierType::ALT_MASK) {
+        result |= MOD_ALT;
+    }
+    if normalized.contains(gdk::ModifierType::SHIFT_MASK) {
+        result |= MOD_SHIFT;
+    }
+    if normalized.contains(gdk::ModifierType::SUPER_MASK) {
+        result |= MOD_SUPER;
+    }
+    result
+}
+
+fn ibus_to_gdk_modifiers(modifiers: u32) -> gdk::ModifierType {
+    let mut result = gdk::ModifierType::empty();
+    if modifiers & MOD_CTRL != 0 {
+        result |= gdk::ModifierType::CONTROL_MASK;
+    }
+    if modifiers & MOD_ALT != 0 {
+        result |= gdk::ModifierType::ALT_MASK;
+    }
+    if modifiers & MOD_SHIFT != 0 {
+        result |= gdk::ModifierType::SHIFT_MASK;
+    }
+    if modifiers & MOD_SUPER != 0 {
+        result |= gdk::ModifierType::SUPER_MASK;
+    }
+    result
 }

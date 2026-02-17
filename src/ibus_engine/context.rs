@@ -1,5 +1,4 @@
 use std::ffi::{c_void, CString};
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use log::{debug, error, info, warn};
@@ -10,13 +9,12 @@ use ibus_sys::keys::IBUS_KEY_Escape;
 use ibus_sys::modifiers::IBUS_RELEASE_MASK;
 use ibus_sys::{g_object_unref, gboolean, gpointer, guint, IBusEngine, TRUE};
 
+use super::ibus_api::{current_ibus_engine, is_handy_engine, switch_engine_async};
 use crate::settings::{RecordingMode, Settings};
 
 const HANDY_BUS_NAME: &str = "com.handy.Transcription";
 const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
 const HANDY_INTERFACE: &str = "com.handy.Transcription";
-const HANDY_ENGINE_NAME: &str = "handy";
-
 pub struct HandyContext {
     connection: Option<Connection>,
     settings: Settings,
@@ -243,7 +241,7 @@ impl HandyContext {
             return TRUE;
         }
 
-        if keyval != ptt_keyval {
+        if normalize_keyval(keyval) != normalize_keyval(ptt_keyval) {
             return 0;
         }
 
@@ -431,44 +429,12 @@ fn commit_text_to_engine(engine: *mut IBusEngine, text: &str) {
     }
 }
 
-fn current_ibus_engine() -> Option<String> {
-    let output = Command::new("ibus").arg("engine").output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let engine = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if engine.is_empty() {
-        None
+fn normalize_keyval(keyval: u32) -> u32 {
+    if (b'A' as u32..=b'Z' as u32).contains(&keyval) {
+        keyval + (b'a' - b'A') as u32
     } else {
-        Some(engine)
+        keyval
     }
-}
-
-fn is_handy_engine(engine_name: &str) -> bool {
-    engine_name == HANDY_ENGINE_NAME || engine_name.ends_with(":handy")
-}
-
-fn switch_engine_async(engine_name: String) {
-    if engine_name.is_empty() || is_handy_engine(&engine_name) {
-        return;
-    }
-
-    std::thread::spawn(move || {
-        match Command::new("ibus").args(["engine", &engine_name]).status() {
-            Ok(status) if status.success() => {
-                info!("Switched input source to {}", engine_name);
-            }
-            Ok(status) => {
-                warn!(
-                    "Failed to switch input source to {}: exit status {}",
-                    engine_name, status
-                );
-            }
-            Err(e) => {
-                warn!("Failed to execute ibus engine {}: {}", engine_name, e);
-            }
-        }
-    });
 }
 
 pub type SharedContext = Arc<Mutex<HandyContext>>;

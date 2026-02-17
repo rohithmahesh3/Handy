@@ -27,6 +27,8 @@ void ibus_handy_set_callback(
 
 int ibus_handy_init(bool ibus_mode);
 void ibus_handy_cleanup(void);
+gboolean ibus_handy_set_global_engine(const gchar* engine_name);
+gchar* ibus_handy_get_global_engine_name(void);
 
 typedef struct {
     IBusEngine parent;

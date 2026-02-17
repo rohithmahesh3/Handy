@@ -223,3 +223,27 @@ void ibus_handy_cleanup(void) {
         global_bus = NULL;
     }
 }
+
+gboolean ibus_handy_set_global_engine(const gchar *engine_name) {
+    if (!global_bus || !engine_name || !ibus_bus_is_connected(global_bus)) {
+        return FALSE;
+    }
+
+    return ibus_bus_set_global_engine(global_bus, engine_name);
+}
+
+gchar *ibus_handy_get_global_engine_name(void) {
+    if (!global_bus || !ibus_bus_is_connected(global_bus)) {
+        return NULL;
+    }
+
+    IBusEngineDesc *desc = ibus_bus_get_global_engine(global_bus);
+    if (!desc) {
+        return NULL;
+    }
+
+    const gchar *name = ibus_engine_desc_get_name(desc);
+    gchar *result = name ? g_strdup(name) : NULL;
+    g_object_unref(desc);
+    return result;
+}

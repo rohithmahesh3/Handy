@@ -169,6 +169,8 @@ extern "C" {
 
     pub fn ibus_handy_init(ibus_mode: bool) -> c_int;
     pub fn ibus_handy_cleanup();
+    pub fn ibus_handy_set_global_engine(engine_name: *const gchar) -> gboolean;
+    pub fn ibus_handy_get_global_engine_name() -> *mut gchar;
 }
 
 pub mod keys {

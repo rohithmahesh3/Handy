@@ -1,5 +1,6 @@
 mod context;
 mod global_shortcuts;
+mod ibus_api;
 
 use ibus_sys::{ibus_handy_cleanup, ibus_handy_init, init_error};
 
