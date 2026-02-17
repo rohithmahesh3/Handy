@@ -355,7 +355,11 @@ impl TranscriptionManager {
         });
     }
 
-    pub fn transcribe(&self, samples: Vec<f32>) -> Result<String> {
+    fn transcribe_internal(
+        &self,
+        samples: Vec<f32>,
+        allow_immediate_unload: bool,
+    ) -> Result<String> {
         self.update_activity();
 
         let model_id = {
@@ -419,9 +423,19 @@ impl TranscriptionManager {
 
         text = filter_transcription_output(&text);
 
-        self.maybe_unload_immediately("transcription");
+        if allow_immediate_unload {
+            self.maybe_unload_immediately("transcription");
+        }
 
         Ok(text)
+    }
+
+    pub fn transcribe(&self, samples: Vec<f32>) -> Result<String> {
+        self.transcribe_internal(samples, true)
+    }
+
+    pub fn transcribe_partial(&self, samples: Vec<f32>) -> Result<String> {
+        self.transcribe_internal(samples, false)
     }
 
     pub fn refresh_config_from_settings(&self, settings: &Settings) {

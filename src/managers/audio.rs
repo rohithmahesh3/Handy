@@ -327,6 +327,31 @@ or resources/models/silero_vad_v4.onnx"
         )
     }
 
+    pub fn snapshot_recording(&self, binding_id: &str) -> Option<Vec<f32>> {
+        let state = self.state.lock().unwrap();
+        let is_active_binding = matches!(
+            *state,
+            RecordingState::Recording {
+                binding_id: ref active,
+            } if active == binding_id
+        );
+        drop(state);
+
+        if !is_active_binding {
+            return None;
+        }
+
+        let recorder_guard = self.recorder.lock().unwrap();
+        let recorder = recorder_guard.as_ref()?;
+        match recorder.snapshot() {
+            Ok(samples) => Some(samples),
+            Err(e) => {
+                error!("snapshot() failed: {e}");
+                None
+            }
+        }
+    }
+
     pub fn cancel_recording(&self) {
         let mut state = self.state.lock().unwrap();
 

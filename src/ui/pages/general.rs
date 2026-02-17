@@ -79,6 +79,58 @@ impl GeneralPage {
         });
         recording_group.add(&mute_row);
 
+        let live_partial_row = ActionRow::builder()
+            .title("Live Preview While Holding Key")
+            .subtitle("Show partial transcription before release")
+            .build();
+        let live_partial_switch = Switch::builder()
+            .active(state.settings.live_partial_enabled())
+            .build();
+        live_partial_switch.set_valign(Align::Center);
+        live_partial_switch.set_vexpand(false);
+        live_partial_switch.set_hexpand(false);
+        live_partial_switch.set_halign(Align::End);
+        live_partial_row.add_suffix(&live_partial_switch);
+        live_partial_switch.connect_active_notify({
+            let settings = state.settings.clone();
+            move |switch| {
+                settings.set_live_partial_enabled(switch.is_active());
+            }
+        });
+        recording_group.add(&live_partial_row);
+
+        let partial_interval_row = ActionRow::builder()
+            .title("Live Preview Speed")
+            .subtitle("How often partial text updates while key is held")
+            .build();
+        let partial_interval_combo = ComboBoxText::new();
+        let interval_options = [
+            (700_u32, "Fast"),
+            (900_u32, "Balanced"),
+            (1300_u32, "Stable"),
+        ];
+        let current_interval = state.settings.live_partial_interval_ms();
+        let mut active_interval_index = 1_u32;
+        for (index, (interval_ms, label)) in interval_options.iter().enumerate() {
+            partial_interval_combo.append(Some(&interval_ms.to_string()), label);
+            if *interval_ms == current_interval {
+                active_interval_index = index as u32;
+            }
+        }
+        partial_interval_combo.set_active(Some(active_interval_index));
+        partial_interval_combo.connect_changed({
+            let settings = state.settings.clone();
+            move |combo| {
+                if let Some(active) = combo.active_id() {
+                    if let Ok(value) = active.parse::<u32>() {
+                        settings.set_live_partial_interval_ms(value);
+                    }
+                }
+            }
+        });
+        partial_interval_row.add_suffix(&partial_interval_combo);
+        recording_group.add(&partial_interval_row);
+
         let is_capturing = Rc::new(Cell::new(false));
         ptt_button.connect_clicked({
             let button = ptt_button.clone();

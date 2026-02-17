@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -38,9 +39,12 @@ const MOD_SUPER: u32 = 64;
 const START_RECORDING_ARM_DELAY_MS: u64 = 120;
 const SETTINGS_POLL_INTERVAL_MS: u64 = 350;
 const RELEASE_WATCHDOG_DELAY_MS: u64 = 700;
+const FAILURE_NOTIFICATION_COOLDOWN_MS: u64 = 8_000;
 
 static TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
 static PTT_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
+static HEALTH_STATE: OnceLock<Mutex<PttRuntimeHealth>> = OnceLock::new();
+static LAST_NON_HANDY_ENGINE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 type ShortcutOptions = HashMap<String, OwnedValue>;
 type PortalShortcutList = Vec<(String, ShortcutOptions)>;
@@ -50,12 +54,12 @@ enum PttState {
     Idle,
     Pending {
         session_id: u64,
-        restore_engine: String,
+        restore_engine: Option<String>,
         released_early: bool,
     },
     Recording {
         session_id: u64,
-        restore_engine: String,
+        restore_engine: Option<String>,
     },
 }
 
@@ -66,8 +70,128 @@ enum InternalEvent {
     },
 }
 
+#[derive(Debug, Clone)]
+struct PttRuntimeHealth {
+    healthy: bool,
+    component: String,
+    code: String,
+    message: String,
+    last_success_ms: u64,
+    portal_session_ok: bool,
+    shortcut_bound: bool,
+    portal_bind_fail_count: u64,
+    press_while_handy_count: u64,
+    release_timeout_fallback_count: u64,
+    last_notification_ms: u64,
+}
+
+impl Default for PttRuntimeHealth {
+    fn default() -> Self {
+        Self {
+            healthy: false,
+            component: "global_shortcuts".to_string(),
+            code: "not_initialized".to_string(),
+            message: "Global push-to-talk listener not initialized yet".to_string(),
+            last_success_ms: 0,
+            portal_session_ok: false,
+            shortcut_bound: false,
+            portal_bind_fail_count: 0,
+            press_while_handy_count: 0,
+            release_timeout_fallback_count: 0,
+            last_notification_ms: 0,
+        }
+    }
+}
+
+fn health_state() -> &'static Mutex<PttRuntimeHealth> {
+    HEALTH_STATE.get_or_init(|| Mutex::new(PttRuntimeHealth::default()))
+}
+
+fn last_non_handy_engine_state() -> &'static Mutex<Option<String>> {
+    LAST_NON_HANDY_ENGINE.get_or_init(|| Mutex::new(None))
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn mark_health_success(message: &str) {
+    if let Ok(mut health) = health_state().lock() {
+        health.healthy = true;
+        health.component = "global_shortcuts".to_string();
+        health.code = "ok".to_string();
+        health.message = message.to_string();
+        health.last_success_ms = now_millis();
+        health.portal_session_ok = true;
+        health.shortcut_bound = true;
+    }
+}
+
+fn mark_health_error(code: &str, message: &str) {
+    if let Ok(mut health) = health_state().lock() {
+        health.healthy = false;
+        health.component = "global_shortcuts".to_string();
+        health.code = code.to_string();
+        health.message = message.to_string();
+        if code.starts_with("portal_") {
+            health.portal_session_ok = false;
+            if code.contains("bind") {
+                health.shortcut_bound = false;
+                health.portal_bind_fail_count = health.portal_bind_fail_count.saturating_add(1);
+            }
+        }
+    }
+}
+
+fn bump_press_while_handy() {
+    if let Ok(mut health) = health_state().lock() {
+        health.press_while_handy_count = health.press_while_handy_count.saturating_add(1);
+    }
+}
+
+fn bump_release_timeout_fallback() {
+    if let Ok(mut health) = health_state().lock() {
+        health.release_timeout_fallback_count =
+            health.release_timeout_fallback_count.saturating_add(1);
+    }
+}
+
+pub fn ptt_diagnostics_tuple() -> (bool, String, String, String, u64, bool, bool, u64, u64, u64) {
+    if let Ok(health) = health_state().lock() {
+        (
+            health.healthy,
+            health.component.clone(),
+            health.code.clone(),
+            health.message.clone(),
+            health.last_success_ms,
+            health.portal_session_ok,
+            health.shortcut_bound,
+            health.portal_bind_fail_count,
+            health.press_while_handy_count,
+            health.release_timeout_fallback_count,
+        )
+    } else {
+        (
+            false,
+            "global_shortcuts".to_string(),
+            "lock_poisoned".to_string(),
+            "Failed to read PTT diagnostics".to_string(),
+            0,
+            false,
+            false,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
 pub fn start_global_shortcuts_listener() {
     let initial_config = ShortcutConfig::from_settings(&Settings::new());
+    mark_health_error("initializing", "Starting global push-to-talk listener");
 
     std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -77,6 +201,10 @@ pub fn start_global_shortcuts_listener() {
             Ok(rt) => rt,
             Err(e) => {
                 error!("Failed to create runtime for global shortcuts: {}", e);
+                mark_health_error(
+                    "runtime_init_failed",
+                    &format!("Failed to create runtime for global shortcuts: {}", e),
+                );
                 return;
             }
         };
@@ -91,7 +219,14 @@ async fn run_listener_loop(mut active_config: ShortcutConfig) {
     loop {
         match run_shortcut_session(active_config).await {
             Ok(()) => {}
-            Err(e) => warn!("Global shortcut session ended: {}", e),
+            Err(e) => {
+                warn!("Global shortcut session ended: {}", e);
+                mark_health_error("portal_session_ended", &e.to_string());
+                notify_ptt_failure(
+                    "Global push-to-talk is unavailable",
+                    &format!("Portal session failed: {}", e),
+                );
+            }
         }
 
         active_config = ShortcutConfig::from_settings(&Settings::new());
@@ -100,17 +235,82 @@ async fn run_listener_loop(mut active_config: ShortcutConfig) {
 }
 
 async fn run_shortcut_session(active_config: ShortcutConfig) -> Result<()> {
-    let trigger = active_config
-        .trigger()
-        .ok_or_else(|| anyhow!("Unsupported push-to-talk shortcut for portal registration"))?;
+    let trigger = match active_config.trigger() {
+        Ok(trigger) => trigger,
+        Err(reason) => {
+            let message = format!("Unsupported push-to-talk shortcut: {}", reason);
+            mark_health_error("invalid_shortcut", &message);
+            notify_ptt_failure(
+                "Invalid push-to-talk shortcut",
+                "Set a shortcut like Ctrl/Alt/Super + key in Handy preferences.",
+            );
+            return Err(anyhow!(message));
+        }
+    };
 
     let connection = Connection::session().await?;
     let portal_proxy = Proxy::new(&connection, PORTAL_BUS, PORTAL_PATH, SHORTCUTS_IFACE).await?;
 
-    let session_handle = create_session(&portal_proxy, &connection).await?;
+    let session_handle = create_session(&portal_proxy, &connection)
+        .await
+        .inspect_err(|e| {
+            mark_health_error("portal_create_session_failed", &e.to_string());
+        })?;
+    if let Ok(mut health) = health_state().lock() {
+        health.portal_session_ok = true;
+    }
+
     if let Err(e) = bind_shortcut(&portal_proxy, &connection, &session_handle, &trigger).await {
+        mark_health_error("portal_bind_failed", &e.to_string());
+        notify_ptt_failure(
+            "Global push-to-talk registration failed",
+            "Failed to bind configured shortcut. Open Handy diagnostics.",
+        );
         close_session(&connection, &session_handle).await;
         return Err(e);
+    }
+    if let Ok(mut health) = health_state().lock() {
+        health.shortcut_bound = true;
+    }
+    let effective_trigger = match list_shortcuts(&portal_proxy, &connection, &session_handle).await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            mark_health_error("portal_list_shortcuts_failed", &e.to_string());
+            close_session(&connection, &session_handle).await;
+            return Err(e);
+        }
+    };
+    if let Some(actual_trigger) = effective_trigger {
+        if !triggers_match(&actual_trigger, &trigger) {
+            mark_health_error(
+                "portal_trigger_mismatch",
+                &format!(
+                    "Requested '{}', portal active '{}'",
+                    trigger, actual_trigger
+                ),
+            );
+            notify_ptt_failure(
+                "Global shortcut mismatch",
+                &format!(
+                    "Configured '{}', but portal bound '{}'",
+                    trigger, actual_trigger
+                ),
+            );
+        } else {
+            mark_health_success(&format!("Global shortcut active: {}", trigger));
+        }
+    } else {
+        mark_health_error(
+            "portal_missing_shortcut",
+            "Portal did not return an active push-to-talk shortcut",
+        );
+        notify_ptt_failure(
+            "Global shortcut not active",
+            "Portal did not activate the configured push-to-talk shortcut.",
+        );
+        close_session(&connection, &session_handle).await;
+        return Err(anyhow!("Portal did not return active shortcut"));
     }
     if let Err(e) = list_shortcuts(&portal_proxy, &connection, &session_handle).await {
         warn!("Failed to query registered shortcuts: {}", e);
@@ -204,6 +404,7 @@ fn on_global_pressed(
                 "Global PTT press ignored: failed to read IBus engine: {}",
                 e
             );
+            mark_health_error("ibus_get_engine_failed", &e.to_string());
             notify_ptt_failure(
                 "Cannot start push-to-talk",
                 "Failed to read current input source from IBus.",
@@ -212,33 +413,61 @@ fn on_global_pressed(
         }
     };
 
-    if is_handy_engine(&current_engine) {
-        debug!("Ignoring global PTT press because Handy source is already active");
-        return;
-    }
-
     let session_id = next_ptt_session_id();
-    if let Err(e) = set_global_engine(HANDY_ENGINE_NAME) {
-        warn!(
-            "[ptt:{}] Failed to switch input source to Handy on press: {}",
-            session_id, e
-        );
-        notify_ptt_failure(
-            "Cannot start push-to-talk",
-            "Failed to switch input source to Handy.",
-        );
-        return;
-    }
+    let restore_engine = if is_handy_engine(&current_engine) {
+        bump_press_while_handy();
+        let restore_engine = last_non_handy_engine_state()
+            .lock()
+            .ok()
+            .and_then(|engine| engine.clone());
 
-    info!(
-        "[ptt:{}] Pressed; switched to Handy source from '{}'",
-        session_id, current_engine
-    );
+        let Some(restore_engine) = restore_engine else {
+            warn!(
+                "[ptt:{}] Pressed while Handy source active, but no previous source to restore",
+                session_id
+            );
+            mark_health_error(
+                "missing_restore_engine",
+                "Pressed while Handy active but no non-Handy source is known",
+            );
+            notify_ptt_failure(
+                "Cannot start push-to-talk",
+                "No previous input source to restore. Switch to a non-Handy source once.",
+            );
+            return;
+        };
+        info!(
+            "[ptt:{}] Pressed while Handy source already active; will restore source '{}'",
+            session_id, restore_engine
+        );
+        Some(restore_engine)
+    } else {
+        if let Ok(mut state) = last_non_handy_engine_state().lock() {
+            *state = Some(current_engine.clone());
+        }
+        if let Err(e) = set_global_engine(HANDY_ENGINE_NAME) {
+            warn!(
+                "[ptt:{}] Failed to switch input source to Handy on press: {}",
+                session_id, e
+            );
+            mark_health_error("ibus_switch_to_handy_failed", &e.to_string());
+            notify_ptt_failure(
+                "Cannot start push-to-talk",
+                "Failed to switch input source to Handy.",
+            );
+            return;
+        }
+        info!(
+            "[ptt:{}] Pressed; switched to Handy source from '{}'",
+            session_id, current_engine
+        );
+        Some(current_engine)
+    };
 
     spawn_start_recording(session_id, internal_tx.clone());
     *ptt_state = PttState::Pending {
         session_id,
-        restore_engine: current_engine,
+        restore_engine,
         released_early: false,
     };
 }
@@ -253,13 +482,15 @@ fn on_global_released(ptt_state: &mut PttState) {
         } => {
             let current_session = *session_id;
             info!(
-                "[ptt:{}] Released before recording confirmation, restoring source '{}'",
-                current_session, restore_engine
+                "[ptt:{}] Released before recording confirmation",
+                current_session
             );
-            if restore_engine_for_session(current_session, restore_engine, "pending release")
-                .is_err()
-            {
-                spawn_cancel_recording(current_session, "failed restore after early release");
+            if let Some(engine_name) = restore_engine.as_deref() {
+                if restore_engine_for_session(current_session, engine_name, "pending release")
+                    .is_err()
+                {
+                    spawn_cancel_recording(current_session, "failed restore after early release");
+                }
             }
             *released_early = true;
         }
@@ -268,12 +499,13 @@ fn on_global_released(ptt_state: &mut PttState) {
             restore_engine,
         } => {
             let current_session = *session_id;
-            info!(
-                "[ptt:{}] Released, restoring source '{}'",
-                current_session, restore_engine
-            );
-            if restore_engine_for_session(current_session, restore_engine, "release").is_err() {
-                spawn_cancel_recording(current_session, "failed restore on release");
+            info!("[ptt:{}] Released", current_session);
+            if let Some(engine_name) = restore_engine.as_deref() {
+                if restore_engine_for_session(current_session, engine_name, "release").is_err() {
+                    spawn_cancel_recording(current_session, "failed restore on release");
+                } else {
+                    spawn_release_watchdog(current_session);
+                }
             } else {
                 spawn_release_watchdog(current_session);
             }
@@ -307,17 +539,19 @@ fn on_start_recording_result(
                         "[ptt:{}] Start completed after key release; cancelling stale recording",
                         session_id
                     );
-                    if restore_engine_for_session(
-                        session_id,
-                        restore_engine,
-                        "late start after release",
-                    )
-                    .is_err()
-                    {
-                        warn!(
-                            "[ptt:{}] Source restore still failing after late start",
-                            session_id
-                        );
+                    if let Some(engine_name) = restore_engine.as_deref() {
+                        if restore_engine_for_session(
+                            session_id,
+                            engine_name,
+                            "late start after release",
+                        )
+                        .is_err()
+                        {
+                            warn!(
+                                "[ptt:{}] Source restore still failing after late start",
+                                session_id
+                            );
+                        }
                     }
                     spawn_cancel_recording(session_id, "late start after release");
                     *ptt_state = PttState::Idle;
@@ -332,13 +566,16 @@ fn on_start_recording_result(
             }
             Err(err) => {
                 warn!("[ptt:{}] Failed to start recording: {}", session_id, err);
+                mark_health_error("start_recording_failed", &err);
                 notify_ptt_failure(
                     "Cannot start recording",
                     "Handy failed to start recording for push-to-talk.",
                 );
-                if restore_engine_for_session(session_id, restore_engine, "start failure").is_err()
-                {
-                    spawn_cancel_recording(session_id, "start failure + restore failure");
+                if let Some(engine_name) = restore_engine.as_deref() {
+                    if restore_engine_for_session(session_id, engine_name, "start failure").is_err()
+                    {
+                        spawn_cancel_recording(session_id, "start failure + restore failure");
+                    }
                 }
                 *ptt_state = PttState::Idle;
             }
@@ -368,16 +605,22 @@ fn cleanup_state(ptt_state: &mut PttState) {
             restore_engine,
             ..
         } => {
-            if restore_engine_for_session(*session_id, restore_engine, "session cleanup").is_err() {
-                spawn_cancel_recording(*session_id, "cleanup restore failure");
+            if let Some(engine_name) = restore_engine.as_deref() {
+                if restore_engine_for_session(*session_id, engine_name, "session cleanup").is_err()
+                {
+                    spawn_cancel_recording(*session_id, "cleanup restore failure");
+                }
             }
         }
         PttState::Recording {
             session_id,
             restore_engine,
         } => {
-            if restore_engine_for_session(*session_id, restore_engine, "session cleanup").is_err() {
-                spawn_cancel_recording(*session_id, "cleanup restore failure");
+            if let Some(engine_name) = restore_engine.as_deref() {
+                if restore_engine_for_session(*session_id, engine_name, "session cleanup").is_err()
+                {
+                    spawn_cancel_recording(*session_id, "cleanup restore failure");
+                }
             }
         }
     }
@@ -399,6 +642,7 @@ fn restore_engine_for_session(session_id: u64, restore_engine: &str, reason: &st
                 "[ptt:{}] Failed to restore source '{}' ({}): {}",
                 session_id, restore_engine, reason, e
             );
+            mark_health_error("ibus_restore_engine_failed", &e.to_string());
             notify_ptt_failure(
                 "Input source restore failed",
                 "Handy could not restore your previous input source after push-to-talk.",
@@ -435,6 +679,7 @@ fn spawn_release_watchdog(session_id: u64) {
         std::thread::sleep(Duration::from_millis(RELEASE_WATCHDOG_DELAY_MS));
         match call_handy_get_state() {
             Ok((is_recording, _has_model)) if is_recording => {
+                bump_release_timeout_fallback();
                 warn!(
                     "[ptt:{}] Recording still active after release; forcing cancel",
                     session_id
@@ -490,10 +735,31 @@ fn call_handy_get_state() -> std::result::Result<(bool, bool), String> {
 }
 
 fn notify_ptt_failure(summary: &str, body: &str) {
+    let now = now_millis();
+    if let Ok(mut health) = health_state().lock() {
+        if now.saturating_sub(health.last_notification_ms) < FAILURE_NOTIFICATION_COOLDOWN_MS {
+            return;
+        }
+        health.last_notification_ms = now;
+    }
+
     let summary = summary.to_string();
     let body = body.to_string();
     std::thread::spawn(move || {
-        let _ = Notification::new().summary(&summary).body(&body).show();
+        let notification = Notification::new()
+            .summary(&summary)
+            .body(&body)
+            .action("default", "Show Diagnostics")
+            .show();
+        if let Ok(handle) = notification {
+            handle.wait_for_action(|action| {
+                if action == "default" || action == "clicked" {
+                    if let Err(e) = std::process::Command::new("/usr/bin/handy").spawn() {
+                        error!("Failed to open Handy diagnostics UI: {}", e);
+                    }
+                }
+            });
+        }
     });
 }
 
@@ -511,12 +777,14 @@ fn log_shortcuts_changed(shortcuts: PortalShortcutList) {
             if let Ok(cloned) = value.try_clone() {
                 if let Ok(description) = String::try_from(cloned) {
                     info!("Global shortcut updated by portal: {}", description);
+                    mark_health_success(&format!("Global shortcut updated: {}", description));
                     return;
                 }
             }
         }
 
         info!("Global shortcut updated by portal");
+        mark_health_success("Global shortcut updated by portal");
         return;
     }
 }
@@ -620,7 +888,7 @@ async fn list_shortcuts(
     portal_proxy: &Proxy<'_>,
     connection: &Connection,
     session_handle: &OwnedObjectPath,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let handle_token = new_token("handy_gs_list");
     let request_handle = request_handle_for_token(connection, &handle_token)?;
     let request_proxy = Proxy::new(
@@ -653,11 +921,13 @@ async fn list_shortcuts(
 
     if let Some(shortcuts_value) = response_data.remove("shortcuts") {
         if let Ok(shortcuts) = PortalShortcutList::try_from(shortcuts_value) {
+            let active = extract_trigger_description(&shortcuts);
             log_shortcuts_changed(shortcuts);
+            return Ok(active);
         }
     }
 
-    Ok(())
+    Ok(None)
 }
 
 async fn close_session(connection: &Connection, session_handle: &OwnedObjectPath) {
@@ -737,8 +1007,9 @@ impl ShortcutConfig {
         }
     }
 
-    fn trigger(self) -> Option<String> {
-        let key = keyval_to_shortcuts_key_name(self.keyval)?;
+    fn trigger(self) -> Result<String> {
+        let key = keyval_to_shortcuts_key_name(self.keyval)
+            .ok_or_else(|| anyhow!("Invalid key name for keyval {}", self.keyval))?;
         let mut parts = Vec::with_capacity(5);
 
         if self.modifiers & MOD_CTRL != 0 {
@@ -755,7 +1026,7 @@ impl ShortcutConfig {
         }
 
         parts.push(key);
-        Some(parts.join("+"))
+        Ok(parts.join("+"))
     }
 }
 
@@ -780,4 +1051,57 @@ fn normalize_keyval(keyval: u32) -> u32 {
     } else {
         keyval
     }
+}
+
+fn extract_trigger_description(shortcuts: &PortalShortcutList) -> Option<String> {
+    for (shortcut_id, options) in shortcuts {
+        if shortcut_id != SHORTCUT_ID {
+            continue;
+        }
+        if let Some(value) = options.get("trigger_description") {
+            if let Ok(cloned) = value.try_clone() {
+                if let Ok(description) = String::try_from(cloned) {
+                    return Some(description);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn normalize_trigger_token(token: &str) -> String {
+    let upper = token.trim().to_ascii_uppercase();
+    match upper.as_str() {
+        "SUPER" | "WIN" | "META" => "LOGO".to_string(),
+        "CONTROL" | "PRIMARY" => "CTRL".to_string(),
+        _ => upper,
+    }
+}
+
+fn normalize_trigger(trigger: &str) -> String {
+    let mut modifiers = Vec::new();
+    let mut key = String::new();
+
+    for raw in trigger.split('+') {
+        let token = normalize_trigger_token(raw);
+        match token.as_str() {
+            "CTRL" | "ALT" | "SHIFT" | "LOGO" => modifiers.push(token),
+            _ => key = token,
+        }
+    }
+
+    modifiers.sort_unstable();
+    if key.is_empty() {
+        modifiers.join("+")
+    } else if modifiers.is_empty() {
+        key
+    } else {
+        format!("{}+{}", modifiers.join("+"), key)
+    }
+}
+
+fn triggers_match(actual_trigger: &str, requested_trigger: &str) -> bool {
+    let actual = normalize_trigger(actual_trigger);
+    let requested = normalize_trigger(requested_trigger);
+    !actual.is_empty() && actual == requested
 }

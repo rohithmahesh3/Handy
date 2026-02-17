@@ -19,6 +19,7 @@ use crate::audio_toolkit::{
 enum Cmd {
     Start,
     Stop(mpsc::Sender<Vec<f32>>),
+    Snapshot(mpsc::Sender<Vec<f32>>),
     Shutdown,
 }
 
@@ -200,6 +201,25 @@ impl AudioRecorder {
         })?)
     }
 
+    pub fn snapshot(&self) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+        let (resp_tx, resp_rx) = mpsc::channel();
+        let tx = self.cmd_tx.as_ref().ok_or_else(|| {
+            Error::new(
+                ErrorKind::NotConnected,
+                "Recorder is not open; cannot snapshot recording",
+            )
+        })?;
+        tx.send(Cmd::Snapshot(resp_tx))?;
+        Ok(resp_rx
+            .recv_timeout(Duration::from_millis(800))
+            .map_err(|e| {
+                Error::new(
+                    ErrorKind::TimedOut,
+                    format!("Timed out waiting for recorder snapshot: {}", e),
+                )
+            })?)
+    }
+
     pub fn close(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(tx) = self.cmd_tx.take() {
             let _ = tx.send(Cmd::Shutdown);
@@ -367,6 +387,10 @@ fn run_consumer(
                 frame_resampler
                     .finish(&mut |frame: &[f32]| handle_frame(frame, true, vad, processed_samples));
                 let _ = reply_tx.send(std::mem::take(processed_samples));
+                false
+            }
+            Cmd::Snapshot(reply_tx) => {
+                let _ = reply_tx.send(processed_samples.clone());
                 false
             }
             Cmd::Shutdown => true,

@@ -3,6 +3,8 @@ use gtk4::{Align, Box, ComboBoxText, Orientation, PolicyType, ScrolledWindow, Sw
 use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt};
 use libadwaita::{ActionRow, Clamp, PreferencesGroup};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use zbus::blocking::Connection;
 
 use super::Page;
 use crate::app::AppState;
@@ -11,6 +13,10 @@ use crate::settings::ModelUnloadTimeout;
 pub struct AdvancedPage {
     container: ScrolledWindow,
 }
+
+const HANDY_BUS_NAME: &str = "com.handy.Transcription";
+const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
+const HANDY_INTERFACE: &str = "com.handy.Transcription";
 
 impl AdvancedPage {
     pub fn new(state: &Arc<AppState>) -> Self {
@@ -117,6 +123,37 @@ impl AdvancedPage {
 
         main_box.append(&debug_group);
 
+        let diagnostics_group = PreferencesGroup::builder()
+            .title("Push-to-Talk Diagnostics")
+            .build();
+
+        let status_row = ActionRow::builder()
+            .title("Global Shortcut Status")
+            .subtitle("Checking daemon health...")
+            .build();
+        let refresh_button = gtk4::Button::with_label("Refresh");
+        refresh_button.add_css_class("flat");
+        let status_row_for_click = status_row.clone();
+        refresh_button.connect_clicked(move |_| {
+            status_row_for_click.set_subtitle(&load_ptt_diagnostics_subtitle());
+        });
+        status_row.add_suffix(&refresh_button);
+        diagnostics_group.add(&status_row);
+
+        let help_row = ActionRow::builder()
+            .title("Recovery Hint")
+            .subtitle("If unhealthy, keep Handy daemon running and re-save push-to-talk shortcut.")
+            .build();
+        diagnostics_group.add(&help_row);
+        main_box.append(&diagnostics_group);
+
+        status_row.set_subtitle(&load_ptt_diagnostics_subtitle());
+        let status_row_for_timer = status_row.clone();
+        glib::timeout_add_local(Duration::from_secs(4), move || {
+            status_row_for_timer.set_subtitle(&load_ptt_diagnostics_subtitle());
+            glib::ControlFlow::Continue
+        });
+
         let clamp = Clamp::builder()
             .maximum_size(900)
             .tightening_threshold(600)
@@ -135,5 +172,74 @@ impl AdvancedPage {
 impl Page for AdvancedPage {
     fn widget(&self) -> &Widget {
         self.container.upcast_ref()
+    }
+}
+
+fn load_ptt_diagnostics_subtitle() -> String {
+    let conn = match Connection::session() {
+        Ok(conn) => conn,
+        Err(e) => return format!("Unavailable: cannot connect to session bus ({})", e),
+    };
+
+    let reply = match conn.call_method(
+        Some(HANDY_BUS_NAME),
+        HANDY_OBJECT_PATH,
+        Some(HANDY_INTERFACE),
+        "GetPttDiagnostics",
+        &(),
+    ) {
+        Ok(reply) => reply,
+        Err(e) => return format!("Unavailable: daemon not responding ({})", e),
+    };
+
+    let diagnostics: (bool, String, String, String, u64, bool, bool, u64, u64, u64) =
+        match reply.body().deserialize() {
+            Ok(tuple) => tuple,
+            Err(e) => return format!("Unavailable: invalid diagnostics payload ({})", e),
+        };
+
+    let (
+        healthy,
+        _component,
+        code,
+        message,
+        last_success_ms,
+        portal_session_ok,
+        shortcut_bound,
+        portal_bind_fail_count,
+        press_while_handy_count,
+        release_timeout_fallback_count,
+    ) = diagnostics;
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let age_seconds = if last_success_ms == 0 {
+        None
+    } else {
+        Some(now_ms.saturating_sub(last_success_ms) / 1000)
+    };
+
+    if healthy {
+        match age_seconds {
+            Some(age) => format!(
+                "Healthy | session={} shortcut={} | last ok {}s ago",
+                portal_session_ok, shortcut_bound, age
+            ),
+            None => format!(
+                "Healthy | session={} shortcut={} | last ok unknown",
+                portal_session_ok, shortcut_bound
+            ),
+        }
+    } else {
+        format!(
+            "Unhealthy ({}) | {} | bind_failures={} press_while_handy={} watchdog_fallbacks={}",
+            code,
+            message,
+            portal_bind_fail_count,
+            press_while_handy_count,
+            release_timeout_fallback_count
+        )
     }
 }

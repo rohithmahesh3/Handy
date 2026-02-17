@@ -1,5 +1,8 @@
 use std::ffi::{c_void, CString};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use log::{debug, error, info, warn};
 use notify_rust::Notification;
@@ -15,6 +18,9 @@ use crate::settings::Settings;
 const HANDY_BUS_NAME: &str = "com.handy.Transcription";
 const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
 const HANDY_INTERFACE: &str = "com.handy.Transcription";
+const LIVE_PARTIAL_POLL_MS: u64 = 220;
+const STOP_RECORDING_TIMEOUT_MS: u64 = 20_000;
+
 pub struct HandyContext {
     connection: Option<Connection>,
     settings: Settings,
@@ -24,6 +30,8 @@ pub struct HandyContext {
     notification_shown: bool,
     ptt_pressed: bool,
     last_non_handy_engine: Option<String>,
+    active_session_id: Option<u64>,
+    live_partial_cancel: Option<Arc<AtomicBool>>,
 }
 
 impl HandyContext {
@@ -37,6 +45,8 @@ impl HandyContext {
             notification_shown: false,
             ptt_pressed: false,
             last_non_handy_engine: None,
+            active_session_id: None,
+            live_partial_cancel: None,
         };
         context.refresh_last_non_handy_engine();
         context
@@ -82,7 +92,7 @@ impl HandyContext {
         debug!("Reset");
     }
 
-    pub fn enable(&mut self, _engine: *mut IBusEngine) {
+    pub fn enable(&mut self, engine: *mut IBusEngine) {
         debug!("Engine enabled");
         self.is_enabled = true;
 
@@ -90,7 +100,8 @@ impl HandyContext {
             return;
         }
 
-        // Check if model is selected, show notification if not
+        self.ensure_live_partial_listener(engine);
+
         if !self.notification_shown {
             if let Some(conn) = &self.connection {
                 match conn.call_method(
@@ -110,12 +121,113 @@ impl HandyContext {
                     }
                     Err(e) => {
                         warn!("Failed to get state from daemon: {}", e);
-                        // Daemon might not be running — show service notification
                         self.show_service_notification();
                         self.notification_shown = true;
                     }
                 }
             }
+        }
+    }
+
+    fn ensure_live_partial_listener(&mut self, engine: *mut IBusEngine) {
+        if !self.settings.live_partial_enabled() {
+            self.stop_live_partial_listener();
+            return;
+        }
+
+        if self.live_partial_cancel.is_some() {
+            return;
+        }
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.live_partial_cancel = Some(cancel.clone());
+
+        unsafe {
+            ibus_sys::g_object_ref(engine as gpointer);
+        }
+
+        let engine_addr = engine as usize;
+        std::thread::spawn(move || {
+            let conn = match Connection::session() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    error!("Failed to create partial listener DBus connection: {}", e);
+                    glib::MainContext::default().invoke(move || unsafe {
+                        g_object_unref(engine_addr as gpointer);
+                    });
+                    return;
+                }
+            };
+
+            let mut last_sequence: u64 = 0;
+            let mut preedit_visible = false;
+
+            while !cancel.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(LIVE_PARTIAL_POLL_MS));
+                if cancel.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                let reply = conn.call_method(
+                    Some(HANDY_BUS_NAME),
+                    HANDY_OBJECT_PATH,
+                    Some(HANDY_INTERFACE),
+                    "GetLatestPartial",
+                    &(),
+                );
+
+                let Ok(reply) = reply else {
+                    continue;
+                };
+
+                let Ok((_session_id, sequence_id, text)) =
+                    reply.body().deserialize::<(u64, u64, String)>()
+                else {
+                    continue;
+                };
+
+                if sequence_id == 0 {
+                    last_sequence = 0;
+                    if preedit_visible {
+                        preedit_visible = false;
+                        glib::MainContext::default().invoke(move || {
+                            let engine_ptr = engine_addr as *mut IBusEngine;
+                            clear_preedit_text(engine_ptr);
+                        });
+                    }
+                    continue;
+                }
+
+                if sequence_id <= last_sequence {
+                    continue;
+                }
+                last_sequence = sequence_id;
+
+                let partial = text.trim().to_string();
+                if partial.is_empty() {
+                    continue;
+                }
+
+                preedit_visible = true;
+                glib::MainContext::default().invoke(move || {
+                    let engine_ptr = engine_addr as *mut IBusEngine;
+                    update_preedit_text_to_engine(engine_ptr, &partial);
+                });
+            }
+
+            glib::MainContext::default().invoke(move || {
+                let engine_ptr = engine_addr as *mut IBusEngine;
+                clear_preedit_text(engine_ptr);
+                unsafe {
+                    g_object_unref(engine_ptr as gpointer);
+                }
+            });
+        });
+    }
+
+    fn stop_live_partial_listener(&mut self) {
+        if let Some(cancel) = self.live_partial_cancel.take() {
+            cancel.store(true, Ordering::SeqCst);
         }
     }
 
@@ -179,11 +291,13 @@ impl HandyContext {
 
     pub fn disable(&mut self, engine: *mut IBusEngine) {
         debug!("Engine disabled");
+        self.stop_live_partial_listener();
         self.stop_and_commit(engine, None, true);
         self.is_enabled = false;
         self.is_focused = false;
         self.ptt_pressed = false;
-        self.notification_shown = false; // Reset so notification shows again on next enable
+        self.active_session_id = None;
+        self.notification_shown = false;
         self.refresh_last_non_handy_engine();
     }
 
@@ -249,7 +363,7 @@ impl HandyContext {
         }
     }
 
-    fn start_recording(&mut self, _engine: *mut IBusEngine) {
+    fn start_recording(&mut self, engine: *mut IBusEngine) {
         if self.is_recording {
             return;
         }
@@ -264,14 +378,40 @@ impl HandyContext {
             Some(HANDY_BUS_NAME),
             HANDY_OBJECT_PATH,
             Some(HANDY_INTERFACE),
-            "StartRecording",
+            "StartRecordingSession",
             &(),
         ) {
-            Ok(_) => {
-                self.is_recording = true;
-            }
+            Ok(reply) => match reply.body().deserialize::<u64>() {
+                Ok(session_id) => {
+                    self.active_session_id = Some(session_id);
+                    self.is_recording = true;
+                    self.ensure_live_partial_listener(engine);
+                }
+                Err(e) => {
+                    error!("Failed to decode StartRecordingSession response: {}", e);
+                }
+            },
             Err(e) => {
-                error!("Failed to start recording: {}", e);
+                warn!(
+                    "StartRecordingSession failed ({}), falling back to StartRecording",
+                    e
+                );
+                match conn.call_method(
+                    Some(HANDY_BUS_NAME),
+                    HANDY_OBJECT_PATH,
+                    Some(HANDY_INTERFACE),
+                    "StartRecording",
+                    &(),
+                ) {
+                    Ok(_) => {
+                        self.active_session_id = None;
+                        self.is_recording = true;
+                        self.ensure_live_partial_listener(engine);
+                    }
+                    Err(fallback_err) => {
+                        error!("Failed to start recording: {}", fallback_err);
+                    }
+                }
             }
         }
     }
@@ -292,54 +432,47 @@ impl HandyContext {
             debug!("Checking for active recording before commit");
         }
         self.is_recording = false;
+        let session_id = self.active_session_id.take();
 
         let Some(conn) = self.connection.as_ref().cloned() else {
             return;
         };
 
-        // Prevent use-after-free: ref the GObject so IBus can't destroy it
-        // while our background thread is working.
         unsafe {
             ibus_sys::g_object_ref(engine as gpointer);
         }
 
-        // Stop/transcribe can take seconds; do this off the IBus callback thread.
         let engine_addr = engine as usize;
         std::thread::spawn(move || {
-            let text = match conn.call_method(
-                Some(HANDY_BUS_NAME),
-                HANDY_OBJECT_PATH,
-                Some(HANDY_INTERFACE),
-                "StopRecording",
-                &(),
+            let mut final_text = match call_stop_recording_with_timeout(
+                &conn,
+                session_id,
+                Duration::from_millis(STOP_RECORDING_TIMEOUT_MS),
             ) {
-                Ok(reply) => match reply.body().deserialize::<String>() {
-                    Ok(text) => text,
-                    Err(e) => {
-                        error!("Failed to deserialize transcription response: {}", e);
+                Ok(text) => text,
+                Err(err) => {
+                    warn!("StopRecording failed: {}", err);
+                    let fallback = latest_partial_for_session(&conn, session_id);
+                    if let Some(partial) = fallback {
+                        info!("Using partial fallback text after stop failure");
+                        partial
+                    } else {
+                        let _ = call_cancel_recording(&conn);
                         String::new()
                     }
-                },
-                Err(e) => {
-                    error!("Failed to stop recording: {}", e);
-                    String::new()
                 }
             };
 
-            if text.is_empty() {
-                if let Some(target_engine) = restore_engine.clone() {
-                    switch_engine_async(target_engine);
-                }
-                unsafe {
-                    g_object_unref(engine_addr as gpointer);
-                }
-                return;
+            if final_text.trim().is_empty() {
+                final_text.clear();
             }
 
-            // Commit back on the GLib/IBus main context.
             glib::MainContext::default().invoke(move || {
                 let engine_ptr = engine_addr as *mut IBusEngine;
-                commit_text_to_engine(engine_ptr, &text);
+                clear_preedit_text(engine_ptr);
+                if !final_text.is_empty() {
+                    commit_text_to_engine(engine_ptr, &final_text);
+                }
                 unsafe {
                     g_object_unref(engine_ptr as gpointer);
                 }
@@ -357,6 +490,7 @@ impl HandyContext {
 
         info!("Cancelling recording");
         self.is_recording = false;
+        self.active_session_id = None;
 
         let Some(conn) = &self.connection else {
             return;
@@ -379,6 +513,126 @@ impl HandyContext {
                 self.last_non_handy_engine = Some(engine_name);
             }
         }
+    }
+}
+
+fn call_stop_recording(conn: &Connection, session_id: Option<u64>) -> Result<String, String> {
+    let reply = match session_id {
+        Some(id) => conn.call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "StopRecordingSession",
+            &(id,),
+        ),
+        None => conn.call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "StopRecording",
+            &(),
+        ),
+    }
+    .map_err(|e| format!("D-Bus stop call failed: {}", e))?;
+
+    reply
+        .body()
+        .deserialize::<String>()
+        .map_err(|e| format!("Failed to decode stop response: {}", e))
+}
+
+fn call_stop_recording_with_timeout(
+    conn: &Connection,
+    session_id: Option<u64>,
+    timeout: Duration,
+) -> Result<String, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let conn = conn.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(call_stop_recording(&conn, session_id));
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(RecvTimeoutError::Timeout) => Err(format!(
+            "Timed out waiting for stop after {} ms",
+            timeout.as_millis()
+        )),
+        Err(RecvTimeoutError::Disconnected) => Err("Stop worker disconnected".to_string()),
+    }
+}
+
+fn latest_partial_for_session(
+    conn: &Connection,
+    expected_session_id: Option<u64>,
+) -> Option<String> {
+    let reply = conn
+        .call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "GetLatestPartial",
+            &(),
+        )
+        .ok()?;
+    let (session_id, sequence_id, text) = reply.body().deserialize::<(u64, u64, String)>().ok()?;
+    if sequence_id == 0 {
+        return None;
+    }
+
+    if let Some(expected) = expected_session_id {
+        if session_id != expected {
+            return None;
+        }
+    }
+
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn call_cancel_recording(conn: &Connection) -> Result<(), String> {
+    conn.call_method(
+        Some(HANDY_BUS_NAME),
+        HANDY_OBJECT_PATH,
+        Some(HANDY_INTERFACE),
+        "CancelRecording",
+        &(),
+    )
+    .map_err(|e| format!("CancelRecording call failed: {}", e))?;
+    Ok(())
+}
+
+fn update_preedit_text_to_engine(engine: *mut IBusEngine, text: &str) {
+    let c_text = match CString::new(text) {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to create preedit CString: {}", e);
+            return;
+        }
+    };
+
+    unsafe {
+        let ibus_text = ibus_sys::ibus_text_new_from_string(c_text.as_ptr());
+        if !ibus_text.is_null() {
+            ibus_sys::ibus_engine_update_preedit_text(
+                engine,
+                ibus_text,
+                text.chars().count() as u32,
+                TRUE,
+            );
+            ibus_sys::ibus_engine_show_preedit_text(engine);
+            g_object_unref(ibus_text as gpointer);
+        }
+    }
+}
+
+fn clear_preedit_text(engine: *mut IBusEngine) {
+    unsafe {
+        ibus_sys::ibus_engine_hide_preedit_text(engine);
     }
 }
 
