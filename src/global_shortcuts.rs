@@ -9,7 +9,6 @@ use glib::translate::from_glib;
 use gtk4::gdk;
 use log::{debug, error, info, warn};
 use notify_rust::Notification;
-use tokio::sync::watch;
 use zbus::proxy::SignalStream;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 use zbus::{Connection, Proxy};
@@ -36,8 +35,9 @@ const MOD_CTRL: u32 = 4;
 const MOD_ALT: u32 = 8;
 const MOD_SUPER: u32 = 64;
 
-const WATCHED_SETTINGS_KEYS: [&str; 2] = ["push-to-talk-keyval", "push-to-talk-modifiers"];
 const START_RECORDING_ARM_DELAY_MS: u64 = 120;
+const SETTINGS_POLL_INTERVAL_MS: u64 = 350;
+const RELEASE_WATCHDOG_DELAY_MS: u64 = 700;
 
 static TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
 static PTT_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -67,16 +67,7 @@ enum InternalEvent {
 }
 
 pub fn start_global_shortcuts_listener() {
-    let settings: &'static Settings = Box::leak(Box::new(Settings::new()));
-    let initial_config = ShortcutConfig::from_settings(settings);
-    let (config_tx, config_rx) = watch::channel(initial_config);
-
-    for key in WATCHED_SETTINGS_KEYS {
-        let tx = config_tx.clone();
-        settings.connect_changed(Some(key), move |_| {
-            let _ = tx.send(ShortcutConfig::from_settings(settings));
-        });
-    }
+    let initial_config = ShortcutConfig::from_settings(&Settings::new());
 
     std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -91,28 +82,24 @@ pub fn start_global_shortcuts_listener() {
         };
 
         runtime.block_on(async move {
-            run_listener_loop(config_rx).await;
+            run_listener_loop(initial_config).await;
         });
     });
 }
 
-async fn run_listener_loop(mut config_rx: watch::Receiver<ShortcutConfig>) {
+async fn run_listener_loop(mut active_config: ShortcutConfig) {
     loop {
-        let active_config = *config_rx.borrow_and_update();
-
-        match run_shortcut_session(active_config, &mut config_rx).await {
+        match run_shortcut_session(active_config).await {
             Ok(()) => {}
             Err(e) => warn!("Global shortcut session ended: {}", e),
         }
 
+        active_config = ShortcutConfig::from_settings(&Settings::new());
         tokio::time::sleep(Duration::from_millis(400)).await;
     }
 }
 
-async fn run_shortcut_session(
-    active_config: ShortcutConfig,
-    config_rx: &mut watch::Receiver<ShortcutConfig>,
-) -> Result<()> {
+async fn run_shortcut_session(active_config: ShortcutConfig) -> Result<()> {
     let trigger = active_config
         .trigger()
         .ok_or_else(|| anyhow!("Unsupported push-to-talk shortcut for portal registration"))?;
@@ -132,15 +119,13 @@ async fn run_shortcut_session(
 
     let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel::<InternalEvent>();
     let mut signal_stream = portal_proxy.receive_all_signals().await?;
+    let mut config_poll = tokio::time::interval(Duration::from_millis(SETTINGS_POLL_INTERVAL_MS));
     let mut ptt_state = PttState::Idle;
 
     let loop_result = loop {
         tokio::select! {
-            changed = config_rx.changed() => {
-                if changed.is_err() {
-                    break Ok(());
-                }
-                if *config_rx.borrow_and_update() != active_config {
+            _ = config_poll.tick() => {
+                if ShortcutConfig::from_settings(&Settings::new()) != active_config {
                     info!("Push-to-talk settings changed, rebinding global shortcut");
                     break Ok(());
                 }
@@ -289,6 +274,8 @@ fn on_global_released(ptt_state: &mut PttState) {
             );
             if restore_engine_for_session(current_session, restore_engine, "release").is_err() {
                 spawn_cancel_recording(current_session, "failed restore on release");
+            } else {
+                spawn_release_watchdog(current_session);
             }
             *ptt_state = PttState::Idle;
         }
@@ -443,6 +430,33 @@ fn spawn_cancel_recording(session_id: u64, reason: &'static str) {
     });
 }
 
+fn spawn_release_watchdog(session_id: u64) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(RELEASE_WATCHDOG_DELAY_MS));
+        match call_handy_get_state() {
+            Ok((is_recording, _has_model)) if is_recording => {
+                warn!(
+                    "[ptt:{}] Recording still active after release; forcing cancel",
+                    session_id
+                );
+                if let Err(e) = call_handy_method_no_args("CancelRecording") {
+                    warn!(
+                        "[ptt:{}] Failed to cancel recording from release watchdog: {}",
+                        session_id, e
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                debug!(
+                    "[ptt:{}] Failed to read recording state during release watchdog: {}",
+                    session_id, e
+                );
+            }
+        }
+    });
+}
+
 fn call_handy_method_no_args(method: &str) -> std::result::Result<(), String> {
     let conn = zbus::blocking::Connection::session()
         .map_err(|e| format!("Failed to open session bus: {}", e))?;
@@ -455,6 +469,24 @@ fn call_handy_method_no_args(method: &str) -> std::result::Result<(), String> {
     )
     .map_err(|e| format!("{} call failed: {}", method, e))?;
     Ok(())
+}
+
+fn call_handy_get_state() -> std::result::Result<(bool, bool), String> {
+    let conn = zbus::blocking::Connection::session()
+        .map_err(|e| format!("Failed to open session bus: {}", e))?;
+    let reply = conn
+        .call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "GetState",
+            &(),
+        )
+        .map_err(|e| format!("GetState call failed: {}", e))?;
+    reply
+        .body()
+        .deserialize::<(bool, bool)>()
+        .map_err(|e| format!("GetState decode failed: {}", e))
 }
 
 fn notify_ptt_failure(summary: &str, body: &str) {

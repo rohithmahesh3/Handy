@@ -132,6 +132,34 @@ pub struct ModelManager {
     state_observers: Arc<Mutex<Vec<std::sync::mpsc::Sender<ModelStateEvent>>>>,
 }
 
+struct DownloadInFlightGuard<'a> {
+    manager: &'a ModelManager,
+    model_id: String,
+    active: bool,
+}
+
+impl<'a> DownloadInFlightGuard<'a> {
+    fn new(manager: &'a ModelManager, model_id: &str) -> Self {
+        Self {
+            manager,
+            model_id: model_id.to_string(),
+            active: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for DownloadInFlightGuard<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.manager.clear_download_tracking(&self.model_id);
+        }
+    }
+}
+
 impl ModelManager {
     pub fn new() -> Result<Self> {
         let settings = crate::settings::Settings::new();
@@ -516,16 +544,36 @@ impl ModelManager {
 
         {
             let mut models = self.available_models.lock().unwrap();
-            if let Some(model) = models.get_mut(model_id) {
-                model.is_downloading = true;
-                model.partial_size = resume_from;
+            let model = models
+                .get_mut(model_id)
+                .ok_or_else(|| anyhow::anyhow!("Model not found: {}", model_id))?;
+            if model.is_downloading {
+                return Err(anyhow::anyhow!(
+                    "Download already in progress for model: {}",
+                    model_id
+                ));
             }
+            model.is_downloading = true;
+            model.partial_size = resume_from;
         }
 
-        {
+        let duplicate_inflight = {
             let mut flags = self.cancel_flags.lock().unwrap();
-            flags.insert(model_id.to_string(), cancel_flag.clone());
+            if flags.contains_key(model_id) {
+                true
+            } else {
+                flags.insert(model_id.to_string(), cancel_flag.clone());
+                false
+            }
+        };
+        if duplicate_inflight {
+            self.clear_download_tracking(model_id);
+            return Err(anyhow::anyhow!(
+                "Download already in progress for model: {}",
+                model_id
+            ));
         }
+        let mut guard = DownloadInFlightGuard::new(self, model_id);
 
         // Notify UI that download has started
         self.notify_state_change(
@@ -544,30 +592,36 @@ impl ModelManager {
             request = request.header("Range", format!("bytes={}-", resume_from));
         }
 
-        let mut response = request.send().await?;
+        let mut response = request.send().await.map_err(|e| {
+            self.notify_state_change(
+                model_id,
+                ModelState::Error {
+                    message: format!("Download request failed: {}", e),
+                    retryable: true,
+                },
+            );
+            anyhow::anyhow!("Download request failed: {}", e)
+        })?;
 
         if resume_from > 0 && response.status() == reqwest::StatusCode::OK {
             drop(response);
             let _ = fs::remove_file(&partial_path);
             resume_from = 0;
-            response = client.get(&url).send().await?;
+            response = client.get(&url).send().await.map_err(|e| {
+                self.notify_state_change(
+                    model_id,
+                    ModelState::Error {
+                        message: format!("Download request failed: {}", e),
+                        retryable: true,
+                    },
+                );
+                anyhow::anyhow!("Download request failed: {}", e)
+            })?;
         }
 
         if !response.status().is_success()
             && response.status() != reqwest::StatusCode::PARTIAL_CONTENT
         {
-            // Download failed - notify error state
-            {
-                let mut models = self.available_models.lock().unwrap();
-                if let Some(model) = models.get_mut(model_id) {
-                    model.is_downloading = false;
-                }
-            }
-            {
-                let mut flags = self.cancel_flags.lock().unwrap();
-                flags.remove(model_id);
-            }
-
             self.notify_state_change(
                 model_id,
                 ModelState::Error {
@@ -596,24 +650,33 @@ impl ModelManager {
             std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(&partial_path)?
+                .open(&partial_path)
+                .map_err(|e| {
+                    self.notify_state_change(
+                        model_id,
+                        ModelState::Error {
+                            message: format!("Failed to open partial file: {}", e),
+                            retryable: true,
+                        },
+                    );
+                    anyhow::anyhow!("Failed to open partial file: {}", e)
+                })?
         } else {
-            std::fs::File::create(&partial_path)?
+            std::fs::File::create(&partial_path).map_err(|e| {
+                self.notify_state_change(
+                    model_id,
+                    ModelState::Error {
+                        message: format!("Failed to create partial file: {}", e),
+                        retryable: true,
+                    },
+                );
+                anyhow::anyhow!("Failed to create partial file: {}", e)
+            })?
         };
 
         while let Some(chunk) = stream.next().await {
             if cancel_flag.load(Ordering::Acquire) {
                 drop(file);
-                {
-                    let mut models = self.available_models.lock().unwrap();
-                    if let Some(model) = models.get_mut(model_id) {
-                        model.is_downloading = false;
-                    }
-                }
-                {
-                    let mut flags = self.cancel_flags.lock().unwrap();
-                    flags.remove(model_id);
-                }
 
                 // Notify cancellation
                 self.notify_state_change(model_id, ModelState::Available);
@@ -621,8 +684,26 @@ impl ModelManager {
                 return Ok(());
             }
 
-            let chunk = chunk?;
-            file.write_all(&chunk)?;
+            let chunk = chunk.map_err(|e| {
+                self.notify_state_change(
+                    model_id,
+                    ModelState::Error {
+                        message: format!("Download stream failed: {}", e),
+                        retryable: true,
+                    },
+                );
+                anyhow::anyhow!("Download stream failed: {}", e)
+            })?;
+            file.write_all(&chunk).map_err(|e| {
+                self.notify_state_change(
+                    model_id,
+                    ModelState::Error {
+                        message: format!("Failed to write model data: {}", e),
+                        retryable: true,
+                    },
+                );
+                anyhow::anyhow!("Failed to write model data: {}", e)
+            })?;
             _downloaded += chunk.len() as u64;
 
             // Update progress in model info
@@ -653,7 +734,16 @@ impl ModelManager {
             let tar_path = self
                 .models_dir
                 .join(format!("{}.tar.gz", &model_info.filename));
-            fs::rename(&partial_path, &tar_path)?;
+            fs::rename(&partial_path, &tar_path).map_err(|e| {
+                self.notify_state_change(
+                    model_id,
+                    ModelState::Error {
+                        message: format!("Failed to prepare archive for extraction: {}", e),
+                        retryable: true,
+                    },
+                );
+                anyhow::anyhow!("Failed to prepare archive for extraction: {}", e)
+            })?;
 
             // Notify extraction state
             self.notify_state_change(
@@ -664,18 +754,6 @@ impl ModelManager {
             );
 
             if let Err(e) = self.extract_model(model_id, &tar_path, &model_path).await {
-                // Extraction failed
-                {
-                    let mut flags = self.cancel_flags.lock().unwrap();
-                    flags.remove(model_id);
-                }
-                {
-                    let mut models = self.available_models.lock().unwrap();
-                    if let Some(model) = models.get_mut(model_id) {
-                        model.is_downloading = false;
-                    }
-                }
-
                 self.notify_state_change(
                     model_id,
                     ModelState::Error {
@@ -688,7 +766,16 @@ impl ModelManager {
             }
         } else {
             // For single-file models, just rename the partial file
-            fs::rename(&partial_path, &model_path)?;
+            fs::rename(&partial_path, &model_path).map_err(|e| {
+                self.notify_state_change(
+                    model_id,
+                    ModelState::Error {
+                        message: format!("Failed to finalize model download: {}", e),
+                        retryable: true,
+                    },
+                );
+                anyhow::anyhow!("Failed to finalize model download: {}", e)
+            })?;
         }
 
         {
@@ -707,6 +794,7 @@ impl ModelManager {
 
         // Notify ready state
         self.notify_state_change(model_id, ModelState::Ready);
+        guard.disarm();
 
         self.auto_select_model_if_needed()?;
 
@@ -736,6 +824,9 @@ impl ModelManager {
         let mut archive = Archive::new(decoder);
 
         let extracting_dir = tar_path.with_extension("extracting");
+        if extracting_dir.exists() {
+            fs::remove_dir_all(&extracting_dir)?;
+        }
         fs::create_dir_all(&extracting_dir)?;
 
         archive.unpack(&extracting_dir)?;
@@ -747,6 +838,18 @@ impl ModelManager {
         fs::remove_file(tar_path)?;
 
         Ok(())
+    }
+
+    fn clear_download_tracking(&self, model_id: &str) {
+        {
+            let mut flags = self.cancel_flags.lock().unwrap();
+            flags.remove(model_id);
+        }
+        if let Ok(mut models) = self.available_models.lock() {
+            if let Some(model) = models.get_mut(model_id) {
+                model.is_downloading = false;
+            }
+        }
     }
 
     pub fn cancel_download(&self, model_id: &str) -> Result<()> {
@@ -868,8 +971,13 @@ impl ModelManager {
                 return Err(anyhow::anyhow!("Model not downloaded: {}", model_id));
             }
             drop(models);
+            let previous_model = self.get_current_model();
             *self.selected_model.lock().unwrap() = model_id.to_string();
             crate::settings::Settings::new().set_selected_model(model_id);
+            if !previous_model.is_empty() && previous_model != model_id {
+                self.notify_state_change(&previous_model, ModelState::Ready);
+            }
+            self.notify_state_change(model_id, ModelState::Ready);
             info!("Active model set to: {}", model_id);
             Ok(())
         } else {

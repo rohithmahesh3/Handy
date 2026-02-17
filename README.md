@@ -8,7 +8,8 @@ This is a fork of [Handy](https://github.com/cjpais/Handy) specifically optimize
 
 ## Features
 
-- **Native IBus Integration** - Works like any other input method (Super+Space)
+- **Native IBus Integration** - IBus engine + GNOME input source integration
+- **Global Push-to-Talk** - Uses XDG Desktop Portal global shortcuts
 - **Local Processing** - Uses Whisper/Parakeet for offline speech recognition
 - **Multi-language Support** - Supports 50+ languages
 - **Native GTK4/Libadwaita UI** - GNOME-native preferences window
@@ -31,11 +32,9 @@ After installation, Handy automatically registers with IBus.
 
 ## Usage
 
-| Action                   | Result                |
-| ------------------------ | --------------------- |
-| `Super+Space` to Handy   | Start recording       |
-| Speak                    | Audio is captured     |
-| `Super+Space` to next IM | Text committed to app |
+1. Configure your push-to-talk shortcut in Handy preferences.
+2. Press and hold the shortcut to start recording.
+3. Release the shortcut to stop recording and commit text.
 
 ### Preferences
 
@@ -70,11 +69,10 @@ cargo build --release
 
 ## How It Works
 
-1. **D-Bus Server**: Handy starts a D-Bus server (`com.handy.Transcription`) on launch
-2. **IBus Engine**: The `ibus-handy-engine` connects to Handy via D-Bus
-3. **Recording**: When you switch to Handy IM, the engine signals Handy to start recording
-4. **Transcription**: When you switch away, Handy transcribes and sends text back to IBus
-5. **Commit**: IBus commits the text to the focused application
+1. **Daemon**: `handy --daemon` exports `com.handy.Transcription` on session D-Bus.
+2. **Global shortcut listener**: daemon registers push-to-talk via `org.freedesktop.portal.GlobalShortcuts`.
+3. **IBus bridge**: release restores previous input source; IBus engine stop/commit path commits transcribed text to focused app.
+4. **Transcription**: audio is transcribed locally; optional post-processing can rewrite final output.
 
 ## Model Support
 
@@ -93,6 +91,13 @@ Models are downloaded from the preferences window.
 ```bash
 ibus write-cache
 ibus restart
+```
+
+### Push-to-talk does not trigger
+
+```bash
+systemctl --user status handy.service
+systemctl --user restart handy.service
 ```
 
 ### No microphone access

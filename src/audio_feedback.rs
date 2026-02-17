@@ -1,5 +1,5 @@
 use crate::settings::{Settings, SoundTheme};
-use log::{debug, error};
+use log::{debug, error, warn};
 use rodio::{OutputStream, Sink};
 use std::fs::File;
 use std::io::BufReader;
@@ -42,8 +42,9 @@ pub fn play_feedback_sound(settings: &Settings, sound_type: SoundType) {
     }
     let path = get_sound_path(settings, sound_type);
     let volume = settings.audio_feedback_volume();
+    let output_device = settings.selected_output_device();
     thread::spawn(move || {
-        if let Err(e) = play_audio_file(&path, volume) {
+        if let Err(e) = play_audio_file(&path, volume, output_device.as_deref()) {
             error!("Failed to play sound '{}': {}", path.display(), e);
         }
     });
@@ -54,14 +55,22 @@ pub fn play_feedback_sound_blocking(settings: &Settings, sound_type: SoundType) 
         return;
     }
     let path = get_sound_path(settings, sound_type);
-    if let Err(e) = play_audio_file(&path, settings.audio_feedback_volume()) {
+    if let Err(e) = play_audio_file(
+        &path,
+        settings.audio_feedback_volume(),
+        settings.selected_output_device().as_deref(),
+    ) {
         error!("Failed to play sound '{}': {}", path.display(), e);
     }
 }
 
 pub fn play_test_sound(settings: &Settings, sound_type: SoundType) {
     let path = get_sound_path(settings, sound_type);
-    if let Err(e) = play_audio_file(&path, settings.audio_feedback_volume()) {
+    if let Err(e) = play_audio_file(
+        &path,
+        settings.audio_feedback_volume(),
+        settings.selected_output_device().as_deref(),
+    ) {
         error!("Failed to play sound '{}': {}", path.display(), e);
     }
 }
@@ -69,10 +78,26 @@ pub fn play_test_sound(settings: &Settings, sound_type: SoundType) {
 fn play_audio_file(
     path: &Path,
     volume: f32,
+    output_device_name: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("Playing audio file: {}", path.display());
 
-    let (_stream, stream_handle) = OutputStream::try_default()?;
+    let (_stream, stream_handle) = if let Some(device_name) = output_device_name {
+        match find_output_device_by_name(device_name)
+            .and_then(|device| OutputStream::try_from_device(&device).ok())
+        {
+            Some(stream) => stream,
+            None => {
+                warn!(
+                    "Selected output device '{}' not available, falling back to default output",
+                    device_name
+                );
+                OutputStream::try_default()?
+            }
+        }
+    } else {
+        OutputStream::try_default()?
+    };
 
     let file = File::open(path)?;
     let buf_reader = BufReader::new(file);
@@ -84,4 +109,17 @@ fn play_audio_file(
     sink.sleep_until_end();
 
     Ok(())
+}
+
+fn find_output_device_by_name(device_name: &str) -> Option<rodio::cpal::Device> {
+    use rodio::cpal::traits::{DeviceTrait, HostTrait};
+
+    let host = rodio::cpal::default_host();
+    let mut devices = host.output_devices().ok()?;
+    devices.find(|device| {
+        device
+            .name()
+            .map(|name| name == device_name)
+            .unwrap_or(false)
+    })
 }

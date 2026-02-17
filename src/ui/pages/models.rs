@@ -357,25 +357,33 @@ impl ModelsPage {
         }
         main_box.append(&models_group);
 
-        // Setup periodic refresh for download progress - only update rows that changed
-        let state_clone = state.clone();
-        let _models_group_clone = models_group.clone();
-        // Clone rows Rc for the closure
-        let rows_clone = Rc::clone(&rows);
-        glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
-            let models = state_clone.model_manager.get_available_models();
-            let selected = state_clone.model_manager.get_current_model();
-
-            let mut rows_lock = rows_clone.borrow_mut();
-            for model in models {
-                if let Some(row) = rows_lock.get_mut(&model.id) {
-                    let is_active = model.id == selected;
-                    // Only update if state has changed (check by comparing with current state)
-                    row.update_state(&model, is_active, &state_clone);
-                }
+        let (ui_tx, ui_rx) = std::sync::mpsc::channel::<String>();
+        let event_rx = state.model_manager.subscribe_state_changes();
+        std::thread::spawn(move || {
+            while let Ok(event) = event_rx.recv() {
+                let _ = ui_tx.send(event.model_id);
             }
+        });
 
+        let rows_for_events = Rc::clone(&rows);
+        let state_for_events = state.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+            let mut has_event = false;
+            while ui_rx.try_recv().is_ok() {
+                has_event = true;
+            }
+            if has_event {
+                refresh_rows(&rows_for_events, &state_for_events);
+            }
             glib::ControlFlow::Continue
+        });
+
+        state.settings.connect_changed(Some("selected-model"), {
+            let rows = Rc::clone(&rows);
+            let state = state.clone();
+            move |_| {
+                refresh_rows(&rows, &state);
+            }
         });
 
         let custom_group = PreferencesGroup::builder()
@@ -418,6 +426,19 @@ fn sorted_models(state: &Arc<AppState>) -> Vec<ModelInfo> {
             .then_with(|| a.name.cmp(&b.name))
     });
     models
+}
+
+fn refresh_rows(rows: &Rc<RefCell<HashMap<String, ModelRow>>>, state: &Arc<AppState>) {
+    let models = state.model_manager.get_available_models();
+    let selected = state.model_manager.get_current_model();
+
+    let mut rows_lock = rows.borrow_mut();
+    for model in models {
+        if let Some(row) = rows_lock.get_mut(&model.id) {
+            let is_active = model.id == selected;
+            row.update_state(&model, is_active, state);
+        }
+    }
 }
 
 impl Page for ModelsPage {

@@ -49,14 +49,6 @@ pub enum ModelUnloadTimeout {
     Sec5,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum RecordingMode {
-    #[default]
-    Auto,
-    PushToTalk,
-}
-
 impl ModelUnloadTimeout {
     pub fn to_seconds(self) -> Option<u64> {
         match self {
@@ -189,24 +181,6 @@ impl Settings {
             .ok();
     }
 
-    // Recording
-    pub fn recording_mode(&self) -> RecordingMode {
-        let value = self.gio_settings.enum_("recording-mode");
-        match value {
-            0 => RecordingMode::Auto,
-            1 => RecordingMode::PushToTalk,
-            _ => RecordingMode::default(),
-        }
-    }
-
-    pub fn set_recording_mode(&self, mode: RecordingMode) {
-        let value = match mode {
-            RecordingMode::Auto => 0,
-            RecordingMode::PushToTalk => 1,
-        };
-        self.gio_settings.set_enum("recording-mode", value).ok();
-    }
-
     pub fn mute_while_recording(&self) -> bool {
         self.gio_settings.boolean("mute-while-recording")
     }
@@ -234,26 +208,6 @@ impl Settings {
     pub fn set_push_to_talk_modifiers(&self, value: u32) {
         self.gio_settings
             .set_uint("push-to-talk-modifiers", value)
-            .ok();
-    }
-
-    pub fn realtime_partial_enabled(&self) -> bool {
-        self.gio_settings.boolean("realtime-partial-enabled")
-    }
-
-    pub fn set_realtime_partial_enabled(&self, value: bool) {
-        self.gio_settings
-            .set_boolean("realtime-partial-enabled", value)
-            .ok();
-    }
-
-    pub fn realtime_partial_interval_ms(&self) -> u32 {
-        self.gio_settings.uint("realtime-partial-interval-ms")
-    }
-
-    pub fn set_realtime_partial_interval_ms(&self, value: u32) {
-        self.gio_settings
-            .set_uint("realtime-partial-interval-ms", value)
             .ok();
     }
 

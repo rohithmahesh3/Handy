@@ -5,7 +5,9 @@
 
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::transcription::TranscriptionManager;
+use crate::settings::{PostProcessProvider, Settings};
 use crate::text_utils::convert_chinese_variant;
+use crate::{audio_feedback::play_feedback_sound, audio_feedback::SoundType};
 use log::{debug, error, info, warn};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -98,6 +100,7 @@ impl HandyTranscription {
         if recording_started {
             self.state.is_recording.store(true, Ordering::SeqCst);
             self.emit_recording_state_changed(true).await?;
+            play_feedback_sound(&Settings::new(), SoundType::Start);
             info!("D-Bus: Recording started in {:?}", start_time.elapsed());
             Ok(())
         } else {
@@ -111,6 +114,12 @@ impl HandyTranscription {
         debug!("D-Bus: StopRecording called");
         let stop_time = Instant::now();
 
+        let was_recording = self.state.is_recording.swap(false, Ordering::SeqCst);
+        if was_recording {
+            self.emit_recording_state_changed(false).await?;
+        }
+
+        play_feedback_sound(&Settings::new(), SoundType::Stop);
         self.state.recording_manager.remove_mute();
 
         if let Some(samples) = self.state.recording_manager.stop_recording("ibus") {
@@ -130,18 +139,19 @@ impl HandyTranscription {
                     );
 
                     let lang = self.state.selected_language.lock().unwrap().clone();
-                    let final_text = convert_chinese_variant(&transcription, &lang);
+                    let converted_text = convert_chinese_variant(&transcription, &lang);
+                    let output_text =
+                        match post_process_transcription_if_enabled(&converted_text).await {
+                            Some(text) => text,
+                            None => converted_text,
+                        };
 
-                    self.state.is_recording.store(false, Ordering::SeqCst);
-                    self.emit_recording_state_changed(false).await?;
-                    self.emit_transcription_ready(&final_text).await?;
+                    self.emit_transcription_ready(&output_text).await?;
 
-                    Ok(final_text)
+                    Ok(output_text)
                 }
                 Err(err) => {
                     error!("D-Bus: Transcription error: {}", err);
-                    self.state.is_recording.store(false, Ordering::SeqCst);
-                    self.emit_recording_state_changed(false).await?;
                     self.emit_error(&format!("Transcription failed: {}", err))
                         .await?;
                     Err(fdo::Error::Failed(format!("Transcription failed: {}", err)))
@@ -149,8 +159,6 @@ impl HandyTranscription {
             }
         } else {
             warn!("D-Bus: No samples retrieved from recording stop");
-            self.state.is_recording.store(false, Ordering::SeqCst);
-            self.emit_recording_state_changed(false).await?;
             Ok(String::new())
         }
     }
@@ -187,7 +195,7 @@ impl HandyTranscription {
     /// Set the language for transcription
     async fn set_language(&self, language: String) -> fdo::Result<()> {
         *self.state.selected_language.lock().unwrap() = language.clone();
-        let settings = crate::settings::Settings::new();
+        let settings = Settings::new();
         settings.set_selected_language(&language);
         self.state
             .transcription_manager
@@ -209,6 +217,84 @@ impl HandyTranscription {
     /// Signal emitted when an error occurs
     #[zbus(signal)]
     async fn error(ctxt: &SignalContext<'_>, message: &str) -> zbus::Result<()>;
+}
+
+struct PostProcessRequest {
+    provider: PostProcessProvider,
+    api_key: String,
+    model: String,
+    prompt_text: String,
+}
+
+fn build_post_process_request(text: &str) -> Option<PostProcessRequest> {
+    let settings = Settings::new();
+    if !settings.post_process_enabled() {
+        return None;
+    }
+
+    let provider_id = settings.post_process_provider_id();
+    let api_key = settings.post_process_api_keys().get(&provider_id)?.clone();
+    if api_key.is_empty() {
+        return None;
+    }
+    let model = settings.post_process_models().get(&provider_id)?.clone();
+    if model.is_empty() {
+        return None;
+    }
+
+    let prompts = settings.post_process_prompts();
+    let selected_id = settings.post_process_selected_prompt_id();
+    let prompt = if let Some(selected) = selected_id {
+        prompts.iter().find(|p| p.id == selected)
+    } else {
+        prompts.first()
+    }?;
+
+    let base_url = settings
+        .post_process_base_urls()
+        .get(&provider_id)
+        .cloned()
+        .unwrap_or_else(|| match provider_id.as_str() {
+            "openai" => "https://api.openai.com/v1".to_string(),
+            "anthropic" => "https://api.anthropic.com/v1".to_string(),
+            "openrouter" => "https://openrouter.ai/api/v1".to_string(),
+            "groq" => "https://api.groq.com/openai/v1".to_string(),
+            "cerebras" => "https://api.cerebras.ai/v1".to_string(),
+            _ => "http://localhost:11434/v1".to_string(),
+        });
+    let provider = PostProcessProvider {
+        id: provider_id.clone(),
+        label: provider_id.clone(),
+        base_url,
+        allow_base_url_edit: provider_id == "custom",
+    };
+
+    let prompt_text = prompt.prompt.replace("${output}", text);
+    Some(PostProcessRequest {
+        provider,
+        api_key,
+        model,
+        prompt_text,
+    })
+}
+
+async fn post_process_transcription_if_enabled(text: &str) -> Option<String> {
+    let request = build_post_process_request(text)?;
+    let processed = crate::llm_client::send_chat_completion(
+        &request.provider,
+        request.api_key,
+        &request.model,
+        request.prompt_text,
+    )
+    .await
+    .ok()
+    .flatten()?;
+    let trimmed = processed.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 impl HandyTranscription {

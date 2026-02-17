@@ -1,16 +1,17 @@
 use gtk4::prelude::*;
 use libadwaita::Application as AdwApplication;
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 
 use crate::dbus::{self, HandyState};
 use crate::global_shortcuts::start_global_shortcuts_listener;
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::model::ModelManager;
 use crate::managers::transcription::TranscriptionManager;
-use crate::settings::Settings;
+use crate::settings::{LogLevel, Settings};
 use crate::ui::window::MainWindow;
 
 const UI_APP_ID: &str = "com.handy.Handy";
+static LOGGER_INIT: Once = Once::new();
 
 pub struct AppState {
     pub settings: Settings,
@@ -24,8 +25,35 @@ struct RuntimeState {
     transcription_manager: Arc<TranscriptionManager>,
 }
 
+fn level_filter_from_settings(settings: &Settings) -> log::LevelFilter {
+    match settings.log_level() {
+        LogLevel::Trace => log::LevelFilter::Trace,
+        LogLevel::Debug => log::LevelFilter::Debug,
+        LogLevel::Info => log::LevelFilter::Info,
+        LogLevel::Warn => log::LevelFilter::Warn,
+        LogLevel::Error => log::LevelFilter::Error,
+    }
+}
+
+fn apply_runtime_log_level(settings: &Settings) {
+    log::set_max_level(level_filter_from_settings(settings));
+}
+
+fn init_logging(settings: &Settings) {
+    let initial_level = level_filter_from_settings(settings);
+    LOGGER_INIT.call_once(|| {
+        let mut builder = env_logger::Builder::new();
+        builder
+            .filter_level(initial_level)
+            .format_timestamp_millis();
+        let _ = builder.try_init();
+    });
+    apply_runtime_log_level(settings);
+}
+
 fn init_ui_state() -> Arc<AppState> {
     let settings = Settings::new();
+    init_logging(&settings);
     let model_manager = Arc::new(ModelManager::new().expect("Failed to initialize model manager"));
 
     #[allow(clippy::arc_with_non_send_sync)]
@@ -37,6 +65,7 @@ fn init_ui_state() -> Arc<AppState> {
 
 fn init_runtime() -> (Arc<RuntimeState>, Arc<HandyState>) {
     let settings = Settings::new();
+    init_logging(&settings);
 
     let recording_manager =
         Arc::new(AudioRecordingManager::new().expect("Failed to initialize recording manager"));
@@ -197,9 +226,19 @@ fn wire_settings_sync(state: &Arc<RuntimeState>, handy_state: &Arc<HandyState>) 
         }
     });
 
-    state.settings.connect_changed(Some("debug-mode"), {
+    state.settings.connect_changed(Some("log-level"), {
+        let settings = state.settings.clone();
         move |_| {
-            log::info!("Debug mode setting changed - restart required for full effect");
+            apply_runtime_log_level(&settings);
+            log::info!("Log level changed to {:?}", settings.log_level());
+        }
+    });
+
+    state.settings.connect_changed(Some("debug-mode"), {
+        let settings = state.settings.clone();
+        move |_| {
+            apply_runtime_log_level(&settings);
+            log::info!("Debug mode setting changed");
         }
     });
 

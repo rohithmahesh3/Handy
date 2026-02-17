@@ -1,21 +1,24 @@
 # AGENTS.md
 
-This file is the source-of-truth guidance for coding agents working in this repository.
+Source-of-truth instructions for coding agents in this repository.
 
-## Scope
+## Project Scope
 
-This project is a **Fedora Workstation + GNOME + Wayland only** speech-to-text app with native IBus integration.
+Handy is a **Fedora Workstation + GNOME + Wayland** speech-to-text project with IBus integration.
 
-- Main app: `handy`
-- D-Bus daemon mode: `handy --daemon`
-- IBus engine binary: `ibus-handy-engine`
-- D-Bus service name: `com.handy.Transcription`
+Targets in scope:
+- `handy` (GTK4/libadwaita preferences UI)
+- `handy --daemon` (recording/transcription D-Bus runtime)
+- `ibus-handy-engine` (IBus engine process)
 
-Do not design for non-GNOME desktops or non-Wayland input stacks unless explicitly asked.
+Out of scope unless explicitly requested:
+- Non-GNOME desktop support
+- Non-Wayland input stack support
+- Generic cross-distro abstractions that weaken Fedora/GNOME behavior
 
 ## Build, Test, Run
 
-### System dependencies (Fedora)
+### Fedora dependencies
 
 ```bash
 sudo dnf install -y \
@@ -39,57 +42,53 @@ sudo dnf install -y \
 cargo build
 cargo build --release
 
-# Lint / format / tests
-cargo clippy --all-targets --all-features -- -D warnings
+# Quality gates
 cargo fmt --all
+cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 
-# Run UI app
+# Run UI
 cargo run --release
 
-# Run daemon (D-Bus server)
+# Run daemon
 cargo run --release -- --daemon
 
-# Run IBus engine binary (testing)
+# Run IBus engine (dev/testing)
 cargo run --release --bin ibus-handy-engine --features cli -- --ibus
 ```
 
-### Model setup (required for development)
+### Model bootstrap for development
 
 ```bash
 mkdir -p resources/models
 curl -o resources/models/silero_vad_v4.onnx https://blob.handy.computer/silero_vad_v4.onnx
 ```
 
-### RPM build
+## Packaging Workflow
+
+RPM build entrypoint:
 
 ```bash
 ./build-rpm.sh
 ```
 
-`build-rpm.sh` generates these from templates before building:
+`build-rpm.sh` generates these files from templates at build time:
 - `packaging/fedora/ibus-handy.spec` from `packaging/fedora/ibus-handy.spec.in`
 - `packaging/fedora/handy.xml` from `packaging/fedora/handy.xml.in`
 
-## Runtime Architecture (Current)
+Generated files are not intended to be committed.
 
-### 1) Application processes
+## Runtime Architecture
 
-- `handy` without args: GTK4/Libadwaita preferences UI.
-- `handy --daemon`: starts recording/model runtime and exports `com.handy.Transcription` on session bus.
-- `ibus-handy-engine`: launched by IBus, handles IBus callbacks and global push-to-talk registration.
+### Process model
 
-### 2) IBus engine stack
+- `handy`: preferences UI only.
+- `handy --daemon`: owns recording state, transcription, D-Bus API, global PTT registration.
+- `ibus-handy-engine`: IBus callbacks and commit path to focused app.
 
-- C GObject wrapper in `ibus-sys/wrapper.c` defines `IBusHandyEngine`.
-- Rust callback handlers are wired from `src/ibus_engine/context.rs`.
-- `src/ibus_engine/ibus_api.rs` provides IBus global engine get/set helpers via FFI:
-  - `ibus_handy_get_global_engine_name`
-  - `ibus_handy_set_global_engine`
+### D-Bus contract
 
-### 3) D-Bus interface
-
-Bus/object/interface:
+Service:
 - Bus: `com.handy.Transcription`
 - Path: `/com/handy/Transcription`
 - Interface: `com.handy.Transcription`
@@ -107,89 +106,73 @@ Signals:
 - `RecordingStateChanged(bool)`
 - `Error(string)`
 
-## Recording Modes
+## Push-to-Talk Behavior
 
-Configured by GSettings key `recording-mode`:
+Handy is push-to-talk only.
 
-- `auto`:
-  - Enter/focus Handy source starts recording.
-  - Leaving/disabling source stops recording and commits final text.
+Settings keys used for PTT:
+- `push-to-talk-keyval`
+- `push-to-talk-modifiers`
 
-- `push_to_talk`:
-  - Local PTT works through key events in `context.rs` when Handy source is active.
-  - Global PTT is implemented in `global_shortcuts.rs` through XDG Desktop Portal `GlobalShortcuts`.
+Global PTT path (`src/global_shortcuts.rs`):
+1. On press: store current engine, switch to Handy engine, call `StartRecording`.
+2. On release: restore previous engine.
+3. Engine disable callback handles stop/transcribe/commit path.
+4. Release watchdog checks for stuck recording and calls `CancelRecording` as fallback.
 
-## Global Push-to-Talk (Portal)
+## Critical Constraints
 
-File: `src/ibus_engine/global_shortcuts.rs`
+1. Do not reintroduce shell-based input-source switching.
+Use FFI-backed helpers (`src/ibus_control.rs`, `src/ibus_engine/ibus_api.rs`).
 
-Behavior:
-- Watches these settings live:
-  - `recording-mode`
-  - `push-to-talk-keyval`
-  - `push-to-talk-modifiers`
-- Creates portal session (`CreateSession`), binds shortcut (`BindShortcuts`), reads active shortcut (`ListShortcuts`), and listens to:
-  - `Activated`
-  - `Deactivated`
-  - `ShortcutsChanged`
-- On `Activated`:
-  - Start recording over D-Bus
-  - Save previous engine
-  - Switch to Handy engine
-- On `Deactivated`:
-  - Restore previous engine
+2. Do not block IBus callback threads with long operations.
+Stop/transcribe work must remain off callback thread.
 
-Important:
-- Shortcut re-registration is automatic on settings changes (no engine restart needed).
-- Portal request lifecycle uses request-handle token paths and explicit session close (`org.freedesktop.portal.Session.Close`).
+3. Preserve GObject lifetime safety in async commit paths.
+Keep ref/unref pattern intact in `src/ibus_engine/context.rs`.
 
-## Settings and Live Sync
+4. Keep portal session lifecycle clean.
+Handle response codes and close sessions explicitly.
 
-Schema: `data/com.handy.Transcription.gschema.xml`  
-Rust wrapper: `src/settings.rs`
+5. Keep daemon state transitions consistent.
+`RecordingStateChanged(false)` should happen immediately when stop starts, not after long transcription.
 
-Notable recording keys:
-- `recording-mode` (`auto` / `push_to_talk`)
-- `push-to-talk-keyval` (`u32` keyval)
-- `push-to-talk-modifiers` (`u32` bitmask)
-- `mute-while-recording`
+## Settings and Feature Notes
 
-UI capture for PTT shortcut:
-- `src/ui/pages/general.rs`
-- Uses `EventControllerKey` and stores keyval/modifiers into GSettings.
+Schema file: `data/com.handy.Transcription.gschema.xml`.
 
-Daemon runtime applies many settings live in `src/app.rs` via `connect_changed(...)`.
+Current active behavior:
+- Push-to-talk recording
+- Optional audio feedback sounds
+- Optional LLM post-processing on final transcript
 
-## Critical Implementation Constraints
+Removed/obsolete paths should not be reintroduced without product decision:
+- `recording-mode` auto mode
+- realtime partial transcription settings
 
-1. **Do not reintroduce shell-based `ibus engine` switching.**  
-Use `src/ibus_engine/ibus_api.rs` (FFI-backed global engine get/set).
-
-2. **Do not block IBus callback threads with long operations.**  
-`StopRecording`/transcription path is offloaded and commits back on GLib main context.
-
-3. **When touching engine lifecycle, preserve GObject safety pattern.**  
-`context.rs` refs engine object before async work and unrefs after commit.
-
-4. **Keep portal/global shortcut code resilient.**  
-Handle response codes and session cleanup; avoid leaking portal sessions.
-
-## Important Files
+## Key Source Files
 
 Core:
-- `src/main.rs` - app entry, chooses UI vs daemon mode
-- `src/app.rs` - UI startup and daemon runtime wiring
-- `src/dbus/server.rs` - `com.handy.Transcription` server
-- `src/settings.rs` - typed GSettings wrapper
-- `data/com.handy.Transcription.gschema.xml` - schema
+- `src/main.rs`
+- `src/app.rs`
+- `src/dbus/server.rs`
+- `src/settings.rs`
 
-IBus:
-- `src/bin/ibus-handy-engine.rs` - engine binary entrypoint
-- `src/ibus_engine/context.rs` - IBus callbacks and commit flow
-- `src/ibus_engine/global_shortcuts.rs` - global PTT via portal
-- `src/ibus_engine/ibus_api.rs` - IBus global engine helper API
-- `ibus-sys/wrapper.c` / `ibus-sys/wrapper.h` - C wrapper and helper exports
-- `ibus-sys/src/lib.rs` - Rust FFI declarations
+IBus and PTT:
+- `src/global_shortcuts.rs`
+- `src/ibus_engine/context.rs`
+- `src/ibus_control.rs`
+- `src/ibus_engine/ibus_api.rs`
+- `src/bin/ibus-handy-engine.rs`
+- `ibus-sys/wrapper.c`
+- `ibus-sys/wrapper.h`
+
+Models/audio:
+- `src/managers/model.rs`
+- `src/managers/audio.rs`
+- `src/managers/transcription.rs`
+- `src/audio_toolkit/audio/recorder.rs`
+- `src/audio_feedback.rs`
 
 UI:
 - `src/ui/window.rs`
@@ -204,12 +187,10 @@ Packaging:
 - `packaging/fedora/handy.service`
 - `packaging/fedora/com.handy.Transcription.service`
 
-## Coding Conventions
+## Definition of Done for Agent Changes
 
-- Rust edition: 2021
-- Run before finalizing:
-  - `cargo fmt --all`
-  - `cargo clippy --all-targets --all-features -- -D warnings`
-  - `cargo test`
-- Keep logic in Rust where possible; C wrapper should stay thin.
-- Prefer adding behavior through existing settings + runtime sync instead of one-off env flags.
+Before finalizing any non-trivial change:
+1. Run `cargo fmt --all`.
+2. Run `cargo clippy --all-targets --all-features -- -D warnings`.
+3. Run `cargo test`.
+4. If packaging/schema changed, ensure generated artifacts are handled correctly and docs remain aligned.
