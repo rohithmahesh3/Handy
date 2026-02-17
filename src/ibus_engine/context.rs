@@ -98,8 +98,7 @@ impl HandyContext {
                     &(),
                 ) {
                     Ok(reply) => {
-                        if let Ok((_, has_model)) = reply.body().deserialize::<(bool, bool)>()
-                        {
+                        if let Ok((_, has_model)) = reply.body().deserialize::<(bool, bool)>() {
                             if !has_model {
                                 self.show_model_notification();
                                 self.notification_shown = true;
@@ -116,7 +115,7 @@ impl HandyContext {
             }
         }
 
-        if self.is_focused && !self.is_recording {
+        if !self.is_recording {
             self.start_recording(engine);
         }
     }
@@ -179,14 +178,14 @@ impl HandyContext {
         });
     }
 
-    pub fn disable(&mut self, _engine: *mut IBusEngine) {
+    pub fn disable(&mut self, engine: *mut IBusEngine) {
         debug!("Engine disabled");
+        if self.is_recording {
+            self.stop_and_commit(engine);
+        }
         self.is_enabled = false;
         self.is_focused = false;
         self.notification_shown = false; // Reset so notification shows again on next enable
-        if self.is_recording {
-            self.cancel_recording();
-        }
     }
 
     pub fn process_key_event(
@@ -356,7 +355,7 @@ unsafe extern "C" fn process_key_event_callback(
     if context.is_null() || engine.is_null() {
         return 0;
     }
-    let context = &*(context as *const SharedContext);
+    let context = &*(context as *const Mutex<HandyContext>);
     if let Ok(mut ctx) = context.lock() {
         ctx.process_key_event(engine, keyval, keycode, modifiers)
     } else {
@@ -368,7 +367,7 @@ unsafe extern "C" fn focus_in_callback(context: *mut c_void, engine: *mut IBusEn
     if context.is_null() || engine.is_null() {
         return;
     }
-    let context = &*(context as *const SharedContext);
+    let context = &*(context as *const Mutex<HandyContext>);
     if let Ok(mut ctx) = context.lock() {
         ctx.focus_in(engine);
     }
@@ -378,7 +377,7 @@ unsafe extern "C" fn focus_out_callback(context: *mut c_void, engine: *mut IBusE
     if context.is_null() || engine.is_null() {
         return;
     }
-    let context = &*(context as *const SharedContext);
+    let context = &*(context as *const Mutex<HandyContext>);
     if let Ok(mut ctx) = context.lock() {
         ctx.focus_out(engine);
     }
@@ -388,7 +387,7 @@ unsafe extern "C" fn reset_callback(context: *mut c_void, engine: *mut IBusEngin
     if context.is_null() || engine.is_null() {
         return;
     }
-    let context = &*(context as *const SharedContext);
+    let context = &*(context as *const Mutex<HandyContext>);
     if let Ok(mut ctx) = context.lock() {
         ctx.reset(engine);
     }
@@ -398,7 +397,7 @@ unsafe extern "C" fn enable_callback(context: *mut c_void, engine: *mut IBusEngi
     if context.is_null() || engine.is_null() {
         return;
     }
-    let context = &*(context as *const SharedContext);
+    let context = &*(context as *const Mutex<HandyContext>);
     if let Ok(mut ctx) = context.lock() {
         ctx.enable(engine);
     }
@@ -408,7 +407,7 @@ unsafe extern "C" fn disable_callback(context: *mut c_void, engine: *mut IBusEng
     if context.is_null() || engine.is_null() {
         return;
     }
-    let context = &*(context as *const SharedContext);
+    let context = &*(context as *const Mutex<HandyContext>);
     if let Ok(mut ctx) = context.lock() {
         ctx.disable(engine);
     }
