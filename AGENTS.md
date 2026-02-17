@@ -1,20 +1,23 @@
 # AGENTS.md
 
-This file provides guidance to AI coding agents working in this repository.
+This file is the source-of-truth guidance for coding agents working in this repository.
 
-## Overview
+## Scope
 
-This is a **Fedora/GNOME-only fork** of Handy with native IBus input method integration. It targets Fedora Workstation on Wayland only.
+This project is a **Fedora Workstation + GNOME + Wayland only** speech-to-text app with native IBus integration.
 
-## Build/Lint/Test Commands
+- Main app: `handy`
+- D-Bus daemon mode: `handy --daemon`
+- IBus engine binary: `ibus-handy-engine`
+- D-Bus service name: `com.handy.Transcription`
 
-**Prerequisites:**
+Do not design for non-GNOME desktops or non-Wayland input stacks unless explicitly asked.
 
-- [Rust](https://rustup.rs/) (latest stable)
-- GTK4, Libadwaita, IBus development packages
+## Build, Test, Run
+
+### System dependencies (Fedora)
 
 ```bash
-# Install dependencies (Fedora)
 sudo dnf install -y \
     gtk4-devel \
     libadwaita-devel \
@@ -27,230 +30,186 @@ sudo dnf install -y \
     cmake \
     clang-devel \
     glslc
+```
 
-# Development build
+### Developer commands
+
+```bash
+# Build
 cargo build
-
-# Production build
 cargo build --release
 
-# Linting
+# Lint / format / tests
 cargo clippy --all-targets --all-features -- -D warnings
-
-# Formatting
-cargo fmt
-
-# Testing
+cargo fmt --all
 cargo test
 
-# Run main application
+# Run UI app
 cargo run --release
 
-# Run IBus engine (for testing)
+# Run daemon (D-Bus server)
+cargo run --release -- --daemon
+
+# Run IBus engine binary (testing)
 cargo run --release --bin ibus-handy-engine --features cli -- --ibus
 ```
 
-**Model Setup (Required for Development):**
+### Model setup (required for development)
 
 ```bash
 mkdir -p resources/models
 curl -o resources/models/silero_vad_v4.onnx https://blob.handy.computer/silero_vad_v4.onnx
 ```
 
-**RPM Build:**
+### RPM build
 
 ```bash
 ./build-rpm.sh
 ```
 
-## Architecture Overview
+`build-rpm.sh` generates these from templates before building:
+- `packaging/fedora/ibus-handy.spec` from `packaging/fedora/ibus-handy.spec.in`
+- `packaging/fedora/handy.xml` from `packaging/fedora/handy.xml.in`
 
-Handy is a speech-to-text application for Fedora Workstation/GNOME/Wayland with native IBus integration.
+## Runtime Architecture (Current)
 
-### Core Components
+### 1) Application processes
 
-**Application (Rust - src/):**
+- `handy` without args: GTK4/Libadwaita preferences UI.
+- `handy --daemon`: starts recording/model runtime and exports `com.handy.Transcription` on session bus.
+- `ibus-handy-engine`: launched by IBus, handles IBus callbacks and global push-to-talk registration.
 
-- `main.rs` - Entry point for main GTK application
-- `app.rs` - GTK application setup and initialization
-- `lib.rs` - Module exports
-- `managers/` - Core business logic (audio.rs, model.rs, transcription.rs)
-- `audio_toolkit/` - Low-level audio processing (device, recorder, resampler, VAD)
-- `settings.rs` - Application settings with GSettings (dconf)
-- `text_utils.rs` - Text processing utilities (Chinese variant conversion)
-- `llm_client.rs` - LLM API client for post-processing
-- `actions.rs` - Transcription actions with post-processing support
-- `dbus/` - D-Bus server for IBus communication
-- `ibus_engine/` - Rust IBus engine implementation
-  - `context.rs` - Engine state and D-Bus client
-  - `mod.rs` - Module exports
-- `ui/` - GTK4/Libadwaita UI components
-  - `window.rs` - Main preferences window
-  - `sidebar.rs` - Navigation sidebar
-  - `pages/` - Settings pages (general, models, advanced, about)
+### 2) IBus engine stack
 
-**IBus Engine Binary (Rust - src/bin/):**
+- C GObject wrapper in `ibus-sys/wrapper.c` defines `IBusHandyEngine`.
+- Rust callback handlers are wired from `src/ibus_engine/context.rs`.
+- `src/ibus_engine/ibus_api.rs` provides IBus global engine get/set helpers via FFI:
+  - `ibus_handy_get_global_engine_name`
+  - `ibus_handy_set_global_engine`
 
-- `ibus-handy-engine.rs` - Separate binary launched by IBus daemon
-  - Uses C wrapper (wrapper.c) for GObject integration
-  - Communicates with main app via D-Bus
+### 3) D-Bus interface
 
-**IBus Bindings (Rust - ibus-sys/):**
+Bus/object/interface:
+- Bus: `com.handy.Transcription`
+- Path: `/com/handy/Transcription`
+- Interface: `com.handy.Transcription`
 
-- `src/lib.rs` - FFI bindings to libibus-1.0
-- `wrapper.c/h` - C glue code for GObject subclassing
-- `build.rs` - Compiles C wrapper and links IBus
+Methods:
+- `StartRecording()`
+- `StopRecording() -> string`
+- `CancelRecording()`
+- `GetState() -> (bool is_recording, bool has_model_selected)`
+- `GetLanguage() -> string`
+- `SetLanguage(string)`
 
-**Packaging (packaging/fedora/):**
+Signals:
+- `TranscriptionReady(string)`
+- `RecordingStateChanged(bool)`
+- `Error(string)`
 
-- `ibus-handy.spec` - Fedora RPM spec file
-- `handy.desktop` - Desktop entry file
-- `handy.service` - Systemd user service for autostart
-- `handy.xml` - IBus component registration
-- `com.handy.Transcription.service` - D-Bus service activation
+## Recording Modes
 
-**Data (data/):**
+Configured by GSettings key `recording-mode`:
 
-- `com.handy.Transcription.gschema.xml` - GSettings schema
+- `auto`:
+  - Enter/focus Handy source starts recording.
+  - Leaving/disabling source stops recording and commits final text.
 
-**Resources (resources/):**
+- `push_to_talk`:
+  - Local PTT works through key events in `context.rs` when Handy source is active.
+  - Global PTT is implemented in `global_shortcuts.rs` through XDG Desktop Portal `GlobalShortcuts`.
 
-- `icons/handy.svg` - Application icon
-- `models/` - ML models (VAD, etc.)
-- `*.wav` - Audio feedback sounds
+## Global Push-to-Talk (Portal)
 
-### Key Patterns
+File: `src/ibus_engine/global_shortcuts.rs`
 
-- **Manager Pattern:** Core functionality in managers (Audio, Model, Transcription)
-- **GSettings:** Persistent settings via dconf/GSettings
-- **D-Bus Server:** Always-on D-Bus server (`com.handy.Transcription`) for IBus communication
-- **Hybrid IBus Engine:** C wrapper for GObject + Rust callbacks
-- **Pipeline Processing:** Audio → VAD → Whisper → Text output via IBus commit
+Behavior:
+- Watches these settings live:
+  - `recording-mode`
+  - `push-to-talk-keyval`
+  - `push-to-talk-modifiers`
+- Creates portal session (`CreateSession`), binds shortcut (`BindShortcuts`), reads active shortcut (`ListShortcuts`), and listens to:
+  - `Activated`
+  - `Deactivated`
+  - `ShortcutsChanged`
+- On `Activated`:
+  - Start recording over D-Bus
+  - Save previous engine
+  - Switch to Handy engine
+- On `Deactivated`:
+  - Restore previous engine
 
-### IBus Engine Architecture
+Important:
+- Shortcut re-registration is automatic on settings changes (no engine restart needed).
+- Portal request lifecycle uses request-handle token paths and explicit session close (`org.freedesktop.portal.Session.Close`).
 
-```
-┌─────────────────────────────────────────────┐
-│  IBus Daemon (C)                             │
-└──────────────────┬──────────────────────────┘
-                   │ GObject signals
-┌──────────────────▼──────────────────────────┐
-│  wrapper.c (C)                               │
-│  - Defines IBusHandyEngine GObject class     │
-│  - Implements IBusEngineClass vfuncs         │
-│  - Bridges to Rust via function pointers     │
-└──────────────────┬──────────────────────────┘
-                   │ C function pointers
-┌──────────────────▼──────────────────────────┐
-│  Rust (src/ibus_engine/)                     │
-│  - HandyContext holds engine state           │
-│  - Callbacks handle focus/key events         │
-│  - D-Bus client talks to main Handy app      │
-└──────────────────────────────────────────────┘
-```
+## Settings and Live Sync
 
-### D-Bus Interface
+Schema: `data/com.handy.Transcription.gschema.xml`  
+Rust wrapper: `src/settings.rs`
 
-**Bus Name:** `com.handy.Transcription`
-**Object Path:** `/com/handy/Transcription`
+Notable recording keys:
+- `recording-mode` (`auto` / `push_to_talk`)
+- `push-to-talk-keyval` (`u32` keyval)
+- `push-to-talk-modifiers` (`u32` bitmask)
+- `mute-while-recording`
 
-**Methods:**
+UI capture for PTT shortcut:
+- `src/ui/pages/general.rs`
+- Uses `EventControllerKey` and stores keyval/modifiers into GSettings.
 
-- `StartRecording()` - Start recording audio
-- `StopRecording()` → `string` - Stop and return transcribed text
-- `CancelRecording()` - Cancel without transcribing
-- `GetState()` → `(bool, bool)` - Get (is_recording, is_model_loaded)
-- `GetLanguage()` → `string` - Get current language
-- `SetLanguage(string)` - Set language for transcription
+Daemon runtime applies many settings live in `src/app.rs` via `connect_changed(...)`.
 
-**Signals:**
+## Critical Implementation Constraints
 
-- `TranscriptionReady(string)` - Emitted when transcription is complete
-- `RecordingStateChanged(bool)` - Emitted when recording state changes
-- `Error(string)` - Emitted on errors
+1. **Do not reintroduce shell-based `ibus engine` switching.**  
+Use `src/ibus_engine/ibus_api.rs` (FFI-backed global engine get/set).
 
-## Code Style Guidelines
+2. **Do not block IBus callback threads with long operations.**  
+`StopRecording`/transcription path is offloaded and commits back on GLib main context.
 
-### Rust
+3. **When touching engine lifecycle, preserve GObject safety pattern.**  
+`context.rs` refs engine object before async work and unrefs after commit.
 
-**Imports:**
-
-```rust
-// std first, then external crates, then local modules
-use std::sync::{Arc, Mutex};
-use log::{debug, error, info};
-use gtk::prelude::*;
-use crate::settings::Settings;
-```
-
-**Naming:**
-
-- Types: PascalCase (`AudioRecordingManager`, `RecordingState`)
-- Functions: snake_case (`try_start_recording`, `get_effective_microphone_device`)
-- Modules: snake_case (`audio_toolkit`, `llm_client`)
-- Constants: SCREAMING_SNAKE_CASE (`WHISPER_SAMPLE_RATE`)
-
-**Error Handling:**
-
-- Use `anyhow::Error` for application errors
-- Use `map_err(|e| format!("Failed to...: {}", e))?` for error context
-
-**Formatting:**
-
-- `cargo fmt` (Rust 2021 edition)
-- No comments unless requested
-
-### C (IBus Wrapper)
-
-- Follow GObject conventions for class structure
-- Use `ibus_` prefix for IBus-related functions
-- Keep wrapper minimal - logic goes in Rust
-
-## Technology Stack
-
-**Core Libraries:**
-
-- `transcribe-rs` - Local speech recognition (Whisper, Parakeet, Moonshine, SenseVoice)
-- `cpal` - Audio I/O (PipeWire)
-- `vad-rs` - Voice Activity Detection (Silero)
-- `zbus` - D-Bus communication
-
-**UI:**
-
-- GTK4 for widget toolkit
-- Libadwaita for GNOME-styled components
-- GSettings/dconf for persistent configuration
-
-**Backend:**
-
-- Tokio for async runtime
-
-**IBus:**
-
-- `ibus-sys` - Rust FFI bindings to libibus-1.0
-- C wrapper for GObject subclassing
-- Direct D-Bus calls to Handy
-
-## Platform Support
-
-This fork supports **Fedora Workstation on GNOME/Wayland only**.
-
-- Requires IBus >= 1.5.0
-- Requires PipeWire for audio
-- Uses GSettings for configuration
-- Text committed directly via IBus (no external typing tools)
+4. **Keep portal/global shortcut code resilient.**  
+Handle response codes and session cleanup; avoid leaking portal sessions.
 
 ## Important Files
 
-- `src/lib.rs` - Module exports
-- `src/app.rs` - GTK application initialization
-- `src/dbus/server.rs` - D-Bus server implementation
-- `src/ibus_engine/context.rs` - IBus engine implementation
-- `src/settings.rs` - Settings and GSettings integration
-- `src/ui/window.rs` - Main preferences window
-- `src/ui/pages/models.rs` - Model management page
-- `src/ui/pages/advanced.rs` - Advanced settings page
-- `ibus-sys/wrapper.c` - C wrapper for IBus GObject
-- `data/com.handy.Transcription.gschema.xml` - GSettings schema
-- `packaging/fedora/ibus-handy.spec` - Fedora RPM specification
-- `packaging/fedora/handy.xml` - IBus component registration
+Core:
+- `src/main.rs` - app entry, chooses UI vs daemon mode
+- `src/app.rs` - UI startup and daemon runtime wiring
+- `src/dbus/server.rs` - `com.handy.Transcription` server
+- `src/settings.rs` - typed GSettings wrapper
+- `data/com.handy.Transcription.gschema.xml` - schema
+
+IBus:
+- `src/bin/ibus-handy-engine.rs` - engine binary entrypoint
+- `src/ibus_engine/context.rs` - IBus callbacks and commit flow
+- `src/ibus_engine/global_shortcuts.rs` - global PTT via portal
+- `src/ibus_engine/ibus_api.rs` - IBus global engine helper API
+- `ibus-sys/wrapper.c` / `ibus-sys/wrapper.h` - C wrapper and helper exports
+- `ibus-sys/src/lib.rs` - Rust FFI declarations
+
+UI:
+- `src/ui/window.rs`
+- `src/ui/pages/general.rs`
+- `src/ui/pages/models.rs`
+- `src/ui/pages/advanced.rs`
+
+Packaging:
+- `build-rpm.sh`
+- `packaging/fedora/ibus-handy.spec.in`
+- `packaging/fedora/handy.xml.in`
+- `packaging/fedora/handy.service`
+- `packaging/fedora/com.handy.Transcription.service`
+
+## Coding Conventions
+
+- Rust edition: 2021
+- Run before finalizing:
+  - `cargo fmt --all`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test`
+- Keep logic in Rust where possible; C wrapper should stay thin.
+- Prefer adding behavior through existing settings + runtime sync instead of one-off env flags.
