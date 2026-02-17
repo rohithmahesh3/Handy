@@ -2,7 +2,7 @@
 set -e
 
 VERSION="0.7.5"
-RELEASE="6"
+RELEASE="7"
 DIST="$(rpm --eval '%dist' | sed 's/^\.//' | tr -d '\n')"
 if [ -z "$DIST" ]; then
     DIST="fc40"

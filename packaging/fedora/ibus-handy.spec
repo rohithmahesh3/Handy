@@ -1,6 +1,6 @@
 Name:           ibus-handy
 Version:        0.7.5
-Release:        6%{?dist}
+Release:        7%{?dist}
 Summary:        Speech-to-text for GNOME/Wayland via IBus
 
 License:        MIT
@@ -38,7 +38,7 @@ cargo build --release --features cli
 install -Dm755 target/release/handy %{buildroot}%{_bindir}/handy
 install -Dm755 target/release/ibus-handy-engine %{buildroot}%{_libexecdir}/ibus-handy-engine
 
-install -Dm644 packaging/fedora/handy.desktop %{buildroot}%{_datadir}/applications/handy.desktop
+install -Dm644 packaging/fedora/handy.desktop %{buildroot}%{_datadir}/applications/com.handy.Handy.desktop
 install -Dm644 resources/icons/handy.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/handy.svg
 install -Dm644 resources/icons/handy.svg %{buildroot}%{_datadir}/handy/icons/handy.svg
 install -Dm644 resources/models/silero_vad_v4.onnx %{buildroot}%{_datadir}/handy/models/silero_vad_v4.onnx
@@ -75,13 +75,18 @@ glib-compile-schemas %{_datadir}/glib-2.0/schemas 2>/dev/null || :
 %{_datadir}/handy/sounds/pop_start.wav
 %{_datadir}/handy/sounds/pop_stop.wav
 %{_datadir}/ibus/component/org.freedesktop.IBus.Handy.xml
-%{_datadir}/applications/handy.desktop
+%{_datadir}/applications/com.handy.Handy.desktop
 %{_datadir}/icons/hicolor/scalable/apps/handy.svg
 %{_datadir}/dbus-1/services/com.handy.Transcription.service
 %{_datadir}/glib-2.0/schemas/com.handy.Transcription.gschema.xml
 %{_userunitdir}/handy.service
 
 %changelog
+* Tue Feb 17 2026 Handy Team <handy@example.com> - 0.7.5-7
+- Align desktop file identity with GTK app ID for proper GNOME dock icon matching
+- Set StartupWMClass to com.handy.Handy
+- Use themed icon name for IBus engine metadata
+
 * Tue Feb 17 2026 Handy Team <handy@example.com> - 0.7.5-6
 - Fix switch row focus/activation visual regression in settings UI
 - Restore native PreferencesGroup model row rendering and button spacing

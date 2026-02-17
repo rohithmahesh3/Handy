@@ -14,7 +14,7 @@
             <language>other</language>
             <license>MIT</license>
             <author>Handy Team</author>
-            <icon>/usr/share/handy/icons/handy.svg</icon>
+            <icon>handy</icon>
             <layout>default</layout>
             <symbol>H</symbol>
             <setup>/usr/bin/handy</setup>

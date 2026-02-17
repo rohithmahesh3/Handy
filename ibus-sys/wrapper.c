@@ -201,7 +201,7 @@ int ibus_handy_init(bool ibus_mode) {
                 "other",
                 "MIT",
                 "Handy Team",
-                PKGDATADIR "/icons/handy.svg",
+                "handy",
                 "default"
             )
         );

@@ -9,5 +9,5 @@ Terminal=false
 Type=Application
 Categories=Settings;Accessibility;GNOME;GTK;
 Keywords=speech;voice;dictation;ibus;input;accessibility;
-StartupWMClass=handy
+StartupWMClass=com.handy.Handy
 DBusActivatable=false
