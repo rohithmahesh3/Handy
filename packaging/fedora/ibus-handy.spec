@@ -1,6 +1,6 @@
 Name:           ibus-handy
 Version:        0.7.5
-Release:        8%{?dist}
+Release:        9%{?dist}
 Summary:        Speech-to-text for GNOME/Wayland via IBus
 
 License:        MIT
@@ -82,6 +82,10 @@ glib-compile-schemas %{_datadir}/glib-2.0/schemas 2>/dev/null || :
 %{_userunitdir}/handy.service
 
 %changelog
+* Tue Feb 17 2026 Handy Team <handy@example.com> - 0.7.5-9
+- Decouple UI startup from daemon runtime initialization so preferences window opens reliably
+- Add safe fallback from always-on microphone mode to on-demand mode on init failures
+
 * Tue Feb 17 2026 Handy Team <handy@example.com> - 0.7.5-8
 - Fix models page startup hang caused by invalid AdwPreferencesGroup child removal
 - Remove unsafe periodic model row refresh loop in UI

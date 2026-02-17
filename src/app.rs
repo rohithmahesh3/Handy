@@ -13,12 +13,28 @@ const UI_APP_ID: &str = "com.handy.Handy";
 
 pub struct AppState {
     pub settings: Settings,
-    pub recording_manager: Arc<AudioRecordingManager>,
     pub model_manager: Arc<ModelManager>,
-    pub transcription_manager: Arc<TranscriptionManager>,
 }
 
-fn init_runtime() -> (Arc<AppState>, Arc<HandyState>) {
+struct RuntimeState {
+    settings: Settings,
+    recording_manager: Arc<AudioRecordingManager>,
+    model_manager: Arc<ModelManager>,
+    transcription_manager: Arc<TranscriptionManager>,
+}
+
+fn init_ui_state() -> Arc<AppState> {
+    let settings = Settings::new();
+    let model_manager = Arc::new(ModelManager::new().expect("Failed to initialize model manager"));
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    Arc::new(AppState {
+        settings,
+        model_manager,
+    })
+}
+
+fn init_runtime() -> (Arc<RuntimeState>, Arc<HandyState>) {
     let settings = Settings::new();
 
     let recording_manager =
@@ -30,7 +46,7 @@ fn init_runtime() -> (Arc<AppState>, Arc<HandyState>) {
     );
 
     #[allow(clippy::arc_with_non_send_sync)]
-    let state = Arc::new(AppState {
+    let state = Arc::new(RuntimeState {
         settings: settings.clone(),
         recording_manager: recording_manager.clone(),
         model_manager: model_manager.clone(),
@@ -48,7 +64,7 @@ fn init_runtime() -> (Arc<AppState>, Arc<HandyState>) {
     (state, handy_state)
 }
 
-fn wire_settings_sync(state: &Arc<AppState>, handy_state: &Arc<HandyState>) {
+fn wire_settings_sync(state: &Arc<RuntimeState>, handy_state: &Arc<HandyState>) {
     state.settings.connect_changed(Some("selected-language"), {
         let settings = state.settings.clone();
         let handy_state = handy_state.clone();
@@ -151,22 +167,11 @@ fn wire_settings_sync(state: &Arc<AppState>, handy_state: &Arc<HandyState>) {
         });
 }
 
-fn spawn_dbus_server(handy_state: Arc<HandyState>) {
-    let dbus_state = handy_state;
-    glib::MainContext::default().spawn_local(async move {
-        match dbus::start_dbus_server(dbus_state).await {
-            Ok(_) => log::info!("D-Bus server started successfully"),
-            Err(e) => log::error!("Failed to start D-Bus server: {}", e),
-        }
-    });
-}
-
 pub fn run_ui() {
     gtk4::init().expect("Failed to initialize GTK");
     let _ = libadwaita::init();
 
-    let (state, handy_state) = init_runtime();
-    spawn_dbus_server(handy_state);
+    let state = init_ui_state();
 
     let app = AdwApplication::builder().application_id(UI_APP_ID).build();
 
@@ -180,7 +185,7 @@ pub fn run_ui() {
 }
 
 pub fn run_daemon() {
-    let (_state, handy_state) = init_runtime();
+    let (_runtime_state, handy_state) = init_runtime();
 
     let context = glib::MainContext::default();
     match context.block_on(dbus::start_dbus_server(handy_state)) {
