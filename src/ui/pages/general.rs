@@ -45,6 +45,8 @@ impl GeneralPage {
             .build();
         mute_switch.set_valign(Align::Center);
         mute_switch.set_vexpand(false);
+        mute_switch.set_hexpand(false);
+        mute_switch.set_halign(Align::End);
         mute_row.add_suffix(&mute_switch);
         mute_switch.connect_active_notify({
             let settings = state.settings.clone();
@@ -67,6 +69,8 @@ impl GeneralPage {
             .build();
         feedback_switch.set_valign(Align::Center);
         feedback_switch.set_vexpand(false);
+        feedback_switch.set_hexpand(false);
+        feedback_switch.set_halign(Align::End);
         feedback_row.add_suffix(&feedback_switch);
         feedback_switch.connect_active_notify({
             let settings = state.settings.clone();
@@ -151,6 +155,8 @@ impl GeneralPage {
             .build();
         translate_switch.set_valign(Align::Center);
         translate_switch.set_vexpand(false);
+        translate_switch.set_hexpand(false);
+        translate_switch.set_halign(Align::End);
         translate_row.add_suffix(&translate_switch);
         translate_switch.connect_active_notify({
             let settings = state.settings.clone();

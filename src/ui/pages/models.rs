@@ -4,11 +4,18 @@ use gtk4::{
 };
 use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt};
 use libadwaita::{ActionRow, Clamp, PreferencesGroup, ToastOverlay};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use tokio::runtime::Runtime;
 
 use super::Page;
 use crate::app::AppState;
 use crate::managers::model::ModelInfo;
+
+static DOWNLOAD_RUNTIME: OnceLock<Runtime> = OnceLock::new();
+
+fn get_download_runtime() -> &'static Runtime {
+    DOWNLOAD_RUNTIME.get_or_init(|| Runtime::new().expect("Failed to create download runtime"))
+}
 
 pub struct ModelsPage {
     container: ScrolledWindow,
@@ -180,21 +187,25 @@ fn create_model_row(model: &ModelInfo, selected_model: &str, state: &Arc<AppStat
         let model_id = model.id.clone();
         let model_manager = state.model_manager.clone();
         download_btn.connect_clicked(move |_| {
-            let model_id = model_id.clone();
+            let model_id_for_blocking = model_id.clone();
+            let model_id_for_log = model_id.clone();
             let model_manager = model_manager.clone();
-            std::thread::spawn(move || {
-                let runtime = match tokio::runtime::Runtime::new() {
-                    Ok(runtime) => runtime,
-                    Err(e) => {
-                        log::error!("Failed to create Tokio runtime for model download: {}", e);
-                        return;
-                    }
-                };
 
-                if let Err(e) = runtime.block_on(model_manager.download_model(&model_id)) {
-                    log::error!("Failed to download model: {}", e);
-                }
+            let handle = get_download_runtime().spawn_blocking(move || {
+                let rt = tokio::runtime::Runtime::new()
+                    .map_err(|e| format!("Failed to create inner runtime: {}", e))?;
+
+                rt.block_on(model_manager.download_model(&model_id_for_blocking))
+                    .map_err(|e| format!("Download failed: {}", e))
             });
+
+            std::mem::drop(get_download_runtime().spawn(async move {
+                match handle.await {
+                    Ok(Ok(())) => log::info!("Model {} downloaded successfully", model_id_for_log),
+                    Ok(Err(e)) => log::error!("Download error: {}", e),
+                    Err(e) => log::error!("Download task panicked: {}", e),
+                }
+            }));
         });
         state_box.append(&download_btn);
     }

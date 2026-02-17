@@ -83,6 +83,8 @@ impl AdvancedPage {
             .build();
         debug_switch.set_valign(Align::Center);
         debug_switch.set_vexpand(false);
+        debug_switch.set_hexpand(false);
+        debug_switch.set_halign(Align::End);
 
         let state_clone = state.clone();
         debug_switch.connect_active_notify(move |switch| {
@@ -101,6 +103,8 @@ impl AdvancedPage {
             .build();
         experimental_switch.set_valign(Align::Center);
         experimental_switch.set_vexpand(false);
+        experimental_switch.set_hexpand(false);
+        experimental_switch.set_halign(Align::End);
 
         let state_clone = state.clone();
         experimental_switch.connect_active_notify(move |switch| {

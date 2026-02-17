@@ -2,6 +2,7 @@ use std::ffi::{c_void, CString};
 use std::sync::{Arc, Mutex};
 
 use log::{debug, error, info, warn};
+use notify_rust::Notification;
 use zbus::blocking::Connection;
 
 use ibus_sys::keys::IBUS_KEY_Escape;
@@ -17,6 +18,7 @@ pub struct HandyContext {
     is_recording: bool,
     is_focused: bool,
     is_enabled: bool,
+    notification_shown: bool,
 }
 
 impl HandyContext {
@@ -26,6 +28,7 @@ impl HandyContext {
             is_recording: false,
             is_focused: false,
             is_enabled: false,
+            notification_shown: false,
         }
     }
 
@@ -84,15 +87,71 @@ impl HandyContext {
             return;
         }
 
+        // Check if model is loaded, show notification if not
+        if !self.notification_shown {
+            if let Some(conn) = &self.connection {
+                match conn.call_method(
+                    Some(HANDY_BUS_NAME),
+                    HANDY_OBJECT_PATH,
+                    Some(HANDY_INTERFACE),
+                    "GetState",
+                    &(),
+                ) {
+                    Ok(reply) => {
+                        if let Ok((_, is_model_loaded)) = reply.body().deserialize::<(bool, bool)>()
+                        {
+                            if !is_model_loaded {
+                                self.show_model_notification();
+                                self.notification_shown = true;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to get state: {}", e);
+                    }
+                }
+            }
+        }
+
         if self.is_focused && !self.is_recording {
             self.start_recording(engine);
         }
+    }
+
+    fn show_model_notification(&self) {
+        debug!("Showing model notification");
+
+        std::thread::spawn(|| {
+            let notification = Notification::new()
+                .summary("Handy Speech-to-Text")
+                .body("No speech model configured. Click to open preferences.")
+                .timeout(notify_rust::Timeout::Never)
+                .action("default", "Open Preferences")
+                .show();
+
+            match notification {
+                Ok(handle) => {
+                    handle.wait_for_action(|action| {
+                        if action == "default" || action == "clicked" {
+                            info!("Notification clicked, opening Handy GUI");
+                            if let Err(e) = std::process::Command::new("/usr/bin/handy").spawn() {
+                                error!("Failed to spawn handy: {}", e);
+                            }
+                        }
+                    });
+                }
+                Err(e) => {
+                    error!("Failed to show notification: {}", e);
+                }
+            }
+        });
     }
 
     pub fn disable(&mut self, _engine: *mut IBusEngine) {
         debug!("Engine disabled");
         self.is_enabled = false;
         self.is_focused = false;
+        self.notification_shown = false; // Reset so notification shows again on next enable
         if self.is_recording {
             self.cancel_recording();
         }
