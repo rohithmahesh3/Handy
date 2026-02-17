@@ -75,6 +75,12 @@ impl HandyTranscription {
         debug!("D-Bus: StartRecording called");
         let start_time = Instant::now();
 
+        // Check if a model is selected and downloaded before starting
+        if !self.state.transcription_manager.has_model_selected() {
+            self.emit_error("No model selected. Open Handy preferences to download and select a model.").await?;
+            return Err(fdo::Error::Failed("No model selected".to_string()));
+        }
+
         self.state.transcription_manager.initiate_model_load();
 
         let recording_started = self.state.recording_manager.try_start_recording("ibus");
@@ -159,12 +165,15 @@ impl HandyTranscription {
         Ok(())
     }
 
-    /// Get current state: (is_recording, is_model_loaded)
+    /// Get current state: (is_recording, has_model_selected)
+    ///
+    /// The second value indicates whether a model is selected and downloaded
+    /// (not whether it's currently loaded in memory — it may be auto-loaded on demand).
     async fn get_state(&self) -> fdo::Result<(bool, bool)> {
         let is_recording = self.state.is_recording.load(Ordering::SeqCst);
-        let is_model_loaded = self.state.transcription_manager.is_model_loaded();
+        let has_model = self.state.transcription_manager.has_model_selected();
 
-        Ok((is_recording, is_model_loaded))
+        Ok((is_recording, has_model))
     }
 
     /// Get the currently selected language

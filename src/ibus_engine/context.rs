@@ -87,7 +87,7 @@ impl HandyContext {
             return;
         }
 
-        // Check if model is loaded, show notification if not
+        // Check if model is selected, show notification if not
         if !self.notification_shown {
             if let Some(conn) = &self.connection {
                 match conn.call_method(
@@ -98,16 +98,19 @@ impl HandyContext {
                     &(),
                 ) {
                     Ok(reply) => {
-                        if let Ok((_, is_model_loaded)) = reply.body().deserialize::<(bool, bool)>()
+                        if let Ok((_, has_model)) = reply.body().deserialize::<(bool, bool)>()
                         {
-                            if !is_model_loaded {
+                            if !has_model {
                                 self.show_model_notification();
                                 self.notification_shown = true;
                             }
                         }
                     }
                     Err(e) => {
-                        warn!("Failed to get state: {}", e);
+                        warn!("Failed to get state from daemon: {}", e);
+                        // Daemon might not be running — show service notification
+                        self.show_service_notification();
+                        self.notification_shown = true;
                     }
                 }
             }
@@ -134,6 +137,35 @@ impl HandyContext {
                     handle.wait_for_action(|action| {
                         if action == "default" || action == "clicked" {
                             info!("Notification clicked, opening Handy GUI");
+                            if let Err(e) = std::process::Command::new("/usr/bin/handy").spawn() {
+                                error!("Failed to spawn handy: {}", e);
+                            }
+                        }
+                    });
+                }
+                Err(e) => {
+                    error!("Failed to show notification: {}", e);
+                }
+            }
+        });
+    }
+
+    fn show_service_notification(&self) {
+        debug!("Showing service notification");
+
+        std::thread::spawn(|| {
+            let notification = Notification::new()
+                .summary("Handy Speech-to-Text")
+                .body("Handy service is not running. Click to open preferences and start it.")
+                .timeout(notify_rust::Timeout::Never)
+                .action("default", "Open Preferences")
+                .show();
+
+            match notification {
+                Ok(handle) => {
+                    handle.wait_for_action(|action| {
+                        if action == "default" || action == "clicked" {
+                            info!("Service notification clicked, opening Handy GUI");
                             if let Err(e) = std::process::Command::new("/usr/bin/handy").spawn() {
                                 error!("Failed to spawn handy: {}", e);
                             }

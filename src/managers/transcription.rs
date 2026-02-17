@@ -142,6 +142,20 @@ impl TranscriptionManager {
         engine.is_some()
     }
 
+    /// Returns true if a model is selected in settings AND downloaded to disk.
+    /// This is distinct from `is_model_loaded()` which checks if the engine is
+    /// currently loaded in memory (it may have been unloaded by the idle timeout).
+    pub fn has_model_selected(&self) -> bool {
+        let selected = self.model_manager.get_current_model();
+        if selected.is_empty() {
+            return false;
+        }
+        self.model_manager
+            .get_model_info(&selected)
+            .map(|m| m.is_downloaded)
+            .unwrap_or(false)
+    }
+
     pub fn unload_model(&self) -> Result<()> {
         debug!("Unloading model");
 
