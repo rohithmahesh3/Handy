@@ -48,6 +48,28 @@ impl ModelsPage {
         }
         main_box.append(&models_group);
 
+        // Setup periodic refresh for download progress
+        let state_clone = state.clone();
+        let models_group_clone = models_group.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+            let models = state_clone.model_manager.get_available_models();
+            let has_active_download = models.iter().any(|m| m.is_downloading);
+
+            if has_active_download {
+                // Refresh the models list
+                while let Some(child) = models_group_clone.first_child() {
+                    models_group_clone.remove(&child);
+                }
+                let selected = state_clone.model_manager.get_current_model();
+                for model in sorted_models(&state_clone) {
+                    let row = create_model_row(&model, &selected, &state_clone);
+                    models_group_clone.add(&row);
+                }
+            }
+
+            glib::ControlFlow::Continue
+        });
+
         let custom_group = PreferencesGroup::builder()
             .title("Custom Models")
             .description("Place Whisper .bin files in ~/.local/share/handy/models/")
@@ -184,9 +206,28 @@ fn create_model_row(model: &ModelInfo, selected_model: &str, state: &Arc<AppStat
             .css_classes(["pill", "suggested-action"])
             .build();
 
+        // Check if already downloading and disable button if so
+        if model.is_downloading {
+            download_btn.set_sensitive(false);
+            download_btn.set_label("Downloading...");
+        }
+
         let model_id = model.id.clone();
         let model_manager = state.model_manager.clone();
+        let download_btn_weak = download_btn.downgrade();
         download_btn.connect_clicked(move |_| {
+            // Check if already downloading
+            if model_manager.is_model_downloading(&model_id) {
+                log::warn!("Download already in progress for model: {}", model_id);
+                return;
+            }
+
+            // Disable button immediately
+            if let Some(btn) = download_btn_weak.upgrade() {
+                btn.set_sensitive(false);
+                btn.set_label("Downloading...");
+            }
+
             let model_id_for_blocking = model_id.clone();
             let model_id_for_log = model_id.clone();
             let model_manager = model_manager.clone();
@@ -202,8 +243,14 @@ fn create_model_row(model: &ModelInfo, selected_model: &str, state: &Arc<AppStat
             std::mem::drop(get_download_runtime().spawn(async move {
                 match handle.await {
                     Ok(Ok(())) => log::info!("Model {} downloaded successfully", model_id_for_log),
-                    Ok(Err(e)) => log::error!("Download error: {}", e),
-                    Err(e) => log::error!("Download task panicked: {}", e),
+                    Ok(Err(e)) => {
+                        log::error!("Download error: {}", e);
+                        // Button will be re-enabled on next UI refresh
+                    }
+                    Err(e) => {
+                        log::error!("Download task panicked: {}", e);
+                        // Button will be re-enabled on next UI refresh
+                    }
                 }
             }));
         });

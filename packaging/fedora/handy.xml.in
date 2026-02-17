@@ -3,7 +3,7 @@
     <name>org.freedesktop.IBus.Handy</name>
     <description>Handy Speech-to-Text</description>
     <exec>/usr/libexec/ibus-handy-engine --ibus</exec>
-    <version>0.7.5</version>
+    <version>@VERSION@</version>
     <author>Handy Team</author>
     <license>MIT</license>
     <homepage>https://github.com/rohithmahesh/Handy</homepage>

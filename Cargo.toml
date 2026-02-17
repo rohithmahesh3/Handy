@@ -63,6 +63,7 @@ flate2 = "1.0"
 ferrous-opencc = "0.2.3"
 dirs = "6"
 notify-rust = "4"
+ctrlc = "3.4"
 
 # CLI (for ibus-handy-engine binary only)
 clap = { version = "4", features = ["derive"], optional = true }

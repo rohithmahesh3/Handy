@@ -165,6 +165,52 @@ fn wire_settings_sync(state: &Arc<RuntimeState>, handy_state: &Arc<HandyState>) 
                 }
             }
         });
+
+    // Additional settings listeners for live updates
+    state.settings.connect_changed(Some("audio-feedback"), {
+        let settings = state.settings.clone();
+        move |_| {
+            let enabled = settings.audio_feedback();
+            log::info!("Audio feedback setting changed to: {}", enabled);
+            // Audio feedback is read on-demand during playback
+        }
+    });
+
+    state
+        .settings
+        .connect_changed(Some("audio-feedback-volume"), {
+            let settings = state.settings.clone();
+            move |_| {
+                let volume = settings.audio_feedback_volume();
+                log::info!("Audio feedback volume changed to: {}", volume);
+                // Audio feedback volume is read on-demand during playback
+            }
+        });
+
+    state.settings.connect_changed(Some("sound-theme"), {
+        let settings = state.settings.clone();
+        move |_| {
+            let theme = settings.sound_theme();
+            log::info!("Sound theme changed to: {:?}", theme);
+            // Sound theme is read on-demand during playback
+        }
+    });
+
+    state.settings.connect_changed(Some("debug-mode"), {
+        move |_| {
+            log::info!("Debug mode setting changed - restart required for full effect");
+        }
+    });
+
+    state
+        .settings
+        .connect_changed(Some("experimental-enabled"), {
+            move |_| {
+                log::info!(
+                    "Experimental features setting changed - restart required for full effect"
+                );
+            }
+        });
 }
 
 pub fn run_ui() {
@@ -185,16 +231,47 @@ pub fn run_ui() {
 }
 
 pub fn run_daemon() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     let (_runtime_state, handy_state) = init_runtime();
 
     let context = glib::MainContext::default();
     match context.block_on(dbus::start_dbus_server(handy_state)) {
-        Ok(_) => {
+        Ok(dbus_state) => {
             let main_loop = glib::MainLoop::new(None, false);
+
+            // Setup shutdown signal handler
+            let shutdown_requested = Arc::new(AtomicBool::new(false));
+            let shutdown_flag = shutdown_requested.clone();
+
+            if let Err(e) = ctrlc::set_handler(move || {
+                log::info!("Shutdown signal received, initiating graceful shutdown...");
+                shutdown_flag.store(true, Ordering::SeqCst);
+            }) {
+                log::error!("Failed to set Ctrl-C handler: {}", e);
+            }
+
+            // Monitor shutdown flag
+            let main_loop_clone = main_loop.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                if shutdown_requested.load(Ordering::SeqCst) {
+                    main_loop_clone.quit();
+                }
+                glib::ControlFlow::Continue
+            });
+
             main_loop.run();
+
+            // Graceful shutdown
+            log::info!("Shutting down D-Bus server...");
+            if let Err(e) = context.block_on(dbus::stop_dbus_server(&dbus_state)) {
+                log::error!("Error during D-Bus server shutdown: {}", e);
+            }
+            log::info!("Shutdown complete");
         }
         Err(e) => {
             eprintln!("Failed to start D-Bus server in daemon mode: {}", e);
+            std::process::exit(1);
         }
     }
 }

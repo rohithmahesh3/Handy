@@ -27,6 +27,12 @@ sed -e "s/@VERSION@/$VERSION/g" \
     packaging/fedora/ibus-handy.spec.in > packaging/fedora/ibus-handy.spec
 echo "Generated packaging/fedora/ibus-handy.spec"
 
+# Generate handy.xml from template
+echo "Generating handy.xml from template..."
+sed -e "s/@VERSION@/$VERSION/g" \
+    packaging/fedora/handy.xml.in > packaging/fedora/handy.xml
+echo "Generated packaging/fedora/handy.xml"
+
 # Create source tarball
 echo "Creating source tarball..."
 TARBALL="ibus-handy-${VERSION}.tar.gz"
