@@ -145,20 +145,20 @@ impl AdvancedPage {
 
         let help_row = ActionRow::builder()
             .title("Recovery Hint")
-            .subtitle("If unhealthy, keep Handy daemon running and re-save push-to-talk shortcut.")
+            .subtitle("If unhealthy, ensure the Handy daemon is running and your user has access to /dev/input.")
             .build();
         diagnostics_group.add(&help_row);
 
         let authorize_row = ActionRow::builder()
-            .title("Authorize Global Shortcut")
-            .subtitle("Run interactive portal authorization from this window")
+            .title("Check Input Access")
+            .subtitle("Verify that keyboard devices are accessible for push-to-talk")
             .build();
-        let authorize_button = gtk4::Button::with_label("Authorize Now");
-        authorize_button.add_css_class("suggested-action");
+        let authorize_button = gtk4::Button::with_label("Check Now");
+        authorize_button.add_css_class("flat");
         let status_row_for_auth = status_row.clone();
         authorize_button.connect_clicked(move |button| {
             button.set_sensitive(false);
-            button.set_label("Authorizing...");
+            button.set_label("Checking...");
             let button_weak = button.downgrade();
             let status_row = status_row_for_auth.clone();
             let (tx, rx) = std::sync::mpsc::channel();
@@ -168,20 +168,20 @@ impl AdvancedPage {
             glib::timeout_add_local(Duration::from_millis(120), move || match rx.try_recv() {
                 Ok(result) => {
                     match result {
-                        Ok(trigger) => {
+                        Ok(result_msg) => {
                             status_row.set_subtitle(&format!(
-                                "Authorization succeeded for '{}'",
-                                trigger
+                                "✓ {}",
+                                result_msg
                             ));
                             request_shortcut_listener_rebind();
                         }
                         Err(e) => {
-                            status_row.set_subtitle(&format!("Authorization failed: {}", e));
+                            status_row.set_subtitle(&format!("✗ {}", e));
                         }
                     }
                     if let Some(button) = button_weak.upgrade() {
                         button.set_sensitive(true);
-                        button.set_label("Authorize Now");
+                        button.set_label("Check Now");
                     }
                     glib::ControlFlow::Break
                 }
@@ -189,9 +189,9 @@ impl AdvancedPage {
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     if let Some(button) = button_weak.upgrade() {
                         button.set_sensitive(true);
-                        button.set_label("Authorize Now");
+                        button.set_label("Check Now");
                     }
-                    status_row.set_subtitle("Authorization failed: worker disconnected");
+                    status_row.set_subtitle("Check failed: worker disconnected");
                     glib::ControlFlow::Break
                 }
             });

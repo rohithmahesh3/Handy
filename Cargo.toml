@@ -48,6 +48,10 @@ vad-rs = { git = "https://github.com/cjpais/vad-rs", default-features = false }
 # D-Bus for IBus
 zbus = "4.4"
 
+# Input monitoring
+evdev = { version = "0.12", features = ["tokio"] }
+xkbcommon = "0.8"
+
 # Utils
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

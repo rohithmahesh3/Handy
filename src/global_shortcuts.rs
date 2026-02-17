@@ -1,54 +1,40 @@
-use std::collections::HashMap;
-use std::convert::TryFrom;
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
-use futures_util::StreamExt;
-use glib::translate::from_glib;
-use gtk4::gdk;
+use anyhow::{anyhow, Result};
+use evdev::{Device, EventType, InputEventKind};
 use log::{debug, error, info, warn};
 use notify_rust::Notification;
-use zbus::proxy::SignalStream;
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
-use zbus::{Connection, Proxy};
+use tokio::sync::mpsc;
 
 use crate::ibus_control::{
     get_current_engine, is_handy_engine, set_global_engine, HANDY_ENGINE_NAME,
 };
+use crate::key_mapping::{
+    gdk_keyval_to_evdev, is_modifier_key, modifier_flag_for_key, modifiers_from_held_keys,
+    EvdevKeybinding, MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER,
+};
 use crate::settings::Settings;
-
-const PORTAL_BUS: &str = "org.freedesktop.portal.Desktop";
-const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
-const SHORTCUTS_IFACE: &str = "org.freedesktop.portal.GlobalShortcuts";
-const REQUEST_IFACE: &str = "org.freedesktop.portal.Request";
-const SESSION_IFACE: &str = "org.freedesktop.portal.Session";
 
 const HANDY_BUS_NAME: &str = "com.handy.Transcription";
 const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
 const HANDY_INTERFACE: &str = "com.handy.Transcription";
 
-const SHORTCUT_ID: &str = "push_to_talk";
-
-const MOD_SHIFT: u32 = 1;
-const MOD_CTRL: u32 = 4;
-const MOD_ALT: u32 = 8;
-const MOD_SUPER: u32 = 64;
-
 const START_RECORDING_ARM_DELAY_MS: u64 = 120;
 const SETTINGS_POLL_INTERVAL_MS: u64 = 350;
 const RELEASE_WATCHDOG_DELAY_MS: u64 = 700;
 const FAILURE_NOTIFICATION_COOLDOWN_MS: u64 = 8_000;
+const DEVICE_RESCAN_INTERVAL_SECS: u64 = 5;
 
-static TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
 static PTT_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 static HEALTH_STATE: OnceLock<Mutex<PttRuntimeHealth>> = OnceLock::new();
 static LAST_NON_HANDY_ENGINE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static FORCE_REBIND_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-type ShortcutOptions = HashMap<String, OwnedValue>;
-type PortalShortcutList = Vec<(String, ShortcutOptions)>;
+// ── PTT state machine ──────────────────────────────────────────────────
 
 #[derive(Debug)]
 enum PttState {
@@ -70,6 +56,8 @@ enum InternalEvent {
         result: std::result::Result<(), String>,
     },
 }
+
+// ── Health diagnostics ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 struct PttRuntimeHealth {
@@ -137,9 +125,9 @@ fn mark_health_error(code: &str, message: &str) {
         health.component = "global_shortcuts".to_string();
         health.code = code.to_string();
         health.message = message.to_string();
-        if code.starts_with("portal_") {
+        if code.starts_with("portal_") || code.starts_with("evdev_") {
             health.portal_session_ok = false;
-            if code.contains("bind") {
+            if code.contains("bind") || code.contains("permission") {
                 health.shortcut_bound = false;
                 health.portal_bind_fail_count = health.portal_bind_fail_count.saturating_add(1);
             }
@@ -190,6 +178,8 @@ pub fn ptt_diagnostics_tuple() -> (bool, String, String, String, u64, bool, bool
     }
 }
 
+// ── Public entry points ────────────────────────────────────────────────
+
 pub fn start_global_shortcuts_listener() {
     let initial_config = ShortcutConfig::from_settings(&Settings::new());
     mark_health_error("initializing", "Starting global push-to-talk listener");
@@ -211,7 +201,7 @@ pub fn start_global_shortcuts_listener() {
         };
 
         runtime.block_on(async move {
-            run_listener_loop(initial_config).await;
+            run_evdev_listener_loop(initial_config).await;
         });
     });
 }
@@ -220,220 +210,175 @@ pub fn request_shortcut_listener_rebind() {
     FORCE_REBIND_REQUESTED.store(true, Ordering::SeqCst);
 }
 
+/// Called from the UI "Authorize Now" button (legacy path).
+/// With evdev this is no longer needed — included only for API compatibility.
 pub fn authorize_shortcut_interactively_from_ui() -> Result<String> {
-    let active_config = ShortcutConfig::from_settings(&Settings::new());
-    let trigger = active_config
-        .trigger()
-        .map_err(|reason| anyhow!("Unsupported push-to-talk shortcut: {}", reason))?;
+    let config = ShortcutConfig::from_settings(&Settings::new());
+    let _keybinding = config.resolve().ok_or_else(|| {
+        anyhow!(
+            "Cannot resolve keybinding for keyval {:#x} + modifiers {:#x}",
+            config.keyval,
+            config.modifiers
+        )
+    })?;
+    let description = config.human_description();
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("Failed to create runtime for shortcut authorization")?;
-
-    runtime.block_on(async move {
-        let connection = Connection::session().await?;
-        let portal_proxy =
-            Proxy::new(&connection, PORTAL_BUS, PORTAL_PATH, SHORTCUTS_IFACE).await?;
-
-        let session_handle = create_session(&portal_proxy, &connection).await?;
-        let operation_result = async {
-            bind_shortcut(&portal_proxy, &connection, &session_handle, &trigger).await?;
-            let effective_trigger =
-                list_shortcuts(&portal_proxy, &connection, &session_handle).await?;
-
-            match effective_trigger {
-                Some(actual) if triggers_match(&actual, &trigger) => Ok(actual),
-                Some(actual) => Err(anyhow!(
-                    "Configured '{}', but portal bound '{}'",
-                    trigger,
-                    actual
-                )),
-                None => Ok(trigger),
-            }
+    // Try opening a keyboard device to validate permissions
+    match find_keyboard_devices() {
+        Ok(devices) if !devices.is_empty() => {
+            request_shortcut_listener_rebind();
+            Ok(format!(
+                "evdev: {} keyboard(s) accessible, shortcut {} ready",
+                devices.len(),
+                description
+            ))
         }
-        .await;
-
-        close_session(&connection, &session_handle).await;
-        operation_result
-    })
+        Ok(_) => Err(anyhow!(
+            "No keyboard devices found in /dev/input/. Is the input group set up?"
+        )),
+        Err(e) => Err(anyhow!("Cannot access keyboard devices: {}", e)),
+    }
 }
 
-async fn run_listener_loop(mut active_config: ShortcutConfig) {
+// ── evdev listener loop ────────────────────────────────────────────────
+
+async fn run_evdev_listener_loop(mut active_config: ShortcutConfig) {
     loop {
-        match run_shortcut_session(active_config).await {
-            Ok(()) => {}
+        let keybinding = match active_config.resolve() {
+            Some(kb) => kb,
+            None => {
+                let msg = format!(
+                    "Unsupported push-to-talk shortcut: keyval {:#x}",
+                    active_config.keyval
+                );
+                mark_health_error("invalid_shortcut", &msg);
+                notify_ptt_failure(
+                    "Invalid push-to-talk shortcut",
+                    "Set a supported shortcut in Handy preferences.",
+                );
+                // Wait before retrying
+                sleep_until_retry_or_rebind(5_000).await;
+                active_config = ShortcutConfig::from_settings(&Settings::new());
+                continue;
+            }
+        };
+
+        match run_evdev_session(&active_config, &keybinding).await {
+            Ok(()) => {
+                // Session ended normally (settings changed, rebind requested)
+                info!("evdev session ended normally, restarting");
+            }
             Err(e) => {
-                warn!("Global shortcut session ended: {}", e);
-                if should_override_health_as_session_ended() {
-                    mark_health_error("portal_session_ended", &e.to_string());
-                }
+                warn!("evdev session error: {}", e);
+                let code = if e.to_string().contains("Permission denied")
+                    || e.to_string().contains("permission")
+                {
+                    "evdev_permission_denied"
+                } else {
+                    "evdev_session_error"
+                };
+                mark_health_error(code, &e.to_string());
                 notify_ptt_failure(
                     "Global push-to-talk is unavailable",
-                    &format!("Portal session failed: {}", e),
+                    &format!("Keyboard input error: {}", e),
                 );
             }
         }
 
         active_config = ShortcutConfig::from_settings(&Settings::new());
-        let retry_delay_ms = health_state()
-            .lock()
-            .ok()
-            .map(|health| {
-                if health.code == "portal_bind_interaction_unavailable" {
-                    10_000
-                } else {
-                    400
-                }
-            })
-            .unwrap_or(400);
-        sleep_until_retry_or_rebind(retry_delay_ms).await;
+        sleep_until_retry_or_rebind(2_000).await;
     }
 }
 
-async fn run_shortcut_session(active_config: ShortcutConfig) -> Result<()> {
-    let trigger = match active_config.trigger() {
-        Ok(trigger) => trigger,
-        Err(reason) => {
-            let message = format!("Unsupported push-to-talk shortcut: {}", reason);
-            mark_health_error("invalid_shortcut", &message);
-            notify_ptt_failure(
-                "Invalid push-to-talk shortcut",
-                "Set a shortcut like Ctrl/Alt/Super + key in Handy preferences.",
-            );
-            return Err(anyhow!(message));
-        }
-    };
-
-    let connection = Connection::session().await?;
-    let portal_proxy = Proxy::new(&connection, PORTAL_BUS, PORTAL_PATH, SHORTCUTS_IFACE).await?;
-
-    let session_handle = create_session(&portal_proxy, &connection)
-        .await
-        .inspect_err(|e| {
-            mark_health_error("portal_create_session_failed", &e.to_string());
-        })?;
-    if let Ok(mut health) = health_state().lock() {
-        health.portal_session_ok = true;
+async fn run_evdev_session(
+    active_config: &ShortcutConfig,
+    keybinding: &EvdevKeybinding,
+) -> Result<()> {
+    let devices = find_keyboard_devices()?;
+    if devices.is_empty() {
+        return Err(anyhow!(
+            "No keyboard devices found. Check /dev/input/ permissions."
+        ));
     }
 
-    if let Err(e) = bind_shortcut(&portal_proxy, &connection, &session_handle, &trigger).await {
-        let health_code = if e.to_string().contains("interaction unavailable") {
-            "portal_bind_interaction_unavailable"
-        } else {
-            "portal_bind_failed"
-        };
-        mark_health_error(health_code, &e.to_string());
-        notify_ptt_failure(
-            "Global push-to-talk registration failed",
-            "Failed to bind configured shortcut. Open Handy diagnostics.",
-        );
-        close_session(&connection, &session_handle).await;
-        return Err(e);
-    }
-    if let Ok(mut health) = health_state().lock() {
-        health.shortcut_bound = true;
-    }
-    let effective_trigger = match list_shortcuts(&portal_proxy, &connection, &session_handle).await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            mark_health_error("portal_list_shortcuts_failed", &e.to_string());
-            close_session(&connection, &session_handle).await;
-            return Err(e);
-        }
-    };
-    if let Some(actual_trigger) = effective_trigger {
-        if !triggers_match(&actual_trigger, &trigger) {
-            mark_health_error(
-                "portal_trigger_mismatch",
-                &format!(
-                    "Requested '{}', portal active '{}'",
-                    trigger, actual_trigger
-                ),
-            );
-            notify_ptt_failure(
-                "Global shortcut mismatch",
-                &format!(
-                    "Configured '{}', but portal bound '{}'",
-                    trigger, actual_trigger
-                ),
-            );
-        } else {
-            mark_health_success(&format!("Global shortcut active: {}", trigger));
-        }
-    } else {
-        mark_health_error(
-            "portal_missing_shortcut",
-            "Portal did not return an active push-to-talk shortcut",
-        );
-        notify_ptt_failure(
-            "Global shortcut not active",
-            "Portal did not activate the configured push-to-talk shortcut.",
-        );
-        close_session(&connection, &session_handle).await;
-        return Err(anyhow!("Portal did not return active shortcut"));
-    }
-    if let Err(e) = list_shortcuts(&portal_proxy, &connection, &session_handle).await {
-        warn!("Failed to query registered shortcuts: {}", e);
-    }
-    info!("Global push-to-talk registered with trigger {}", trigger);
+    let description = active_config.human_description();
+    let n_devices = devices.len();
+    mark_health_success(&format!(
+        "Listening on {} keyboard(s) for {}",
+        n_devices, description
+    ));
+    info!(
+        "evdev: listening on {} keyboard device(s) for PTT shortcut {}",
+        n_devices, description
+    );
 
-    let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel::<InternalEvent>();
-    let mut signal_stream = portal_proxy.receive_all_signals().await?;
-    let mut config_poll = tokio::time::interval(Duration::from_millis(SETTINGS_POLL_INTERVAL_MS));
+    let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<InternalEvent>();
+    let (key_tx, mut key_rx) = mpsc::unbounded_channel::<KeyEvent>();
+
+    // Spawn a reader task for each keyboard device
+    let mut reader_handles = Vec::new();
+    for device_path in &devices {
+        let path = device_path.clone();
+        let tx = key_tx.clone();
+        let handle = tokio::spawn(async move {
+            if let Err(e) = read_device_events(path.clone(), tx).await {
+                warn!("evdev reader for {:?} ended: {}", path, e);
+            }
+        });
+        reader_handles.push(handle);
+    }
+    // Drop the original sender so the channel closes when all reader tasks end
+    drop(key_tx);
+
     let mut ptt_state = PttState::Idle;
+    let mut config_poll = tokio::time::interval(Duration::from_millis(SETTINGS_POLL_INTERVAL_MS));
+    let mut held_modifiers: HashSet<u16> = HashSet::new();
 
     let loop_result = loop {
         tokio::select! {
             _ = config_poll.tick() => {
-                if ShortcutConfig::from_settings(&Settings::new()) != active_config {
-                    info!("Push-to-talk settings changed, rebinding global shortcut");
+                let new_config = ShortcutConfig::from_settings(&Settings::new());
+                if new_config != *active_config {
+                    info!("Push-to-talk settings changed, restarting evdev session");
+                    break Ok(());
+                }
+                if FORCE_REBIND_REQUESTED.swap(false, Ordering::SeqCst) {
+                    info!("Force rebind requested, restarting evdev session");
                     break Ok(());
                 }
             }
-            maybe_signal = signal_stream.next() => {
-                let Some(signal_msg) = maybe_signal else {
-                    break Err(anyhow!("Global shortcut signal stream closed"));
+            maybe_key = key_rx.recv() => {
+                let Some(event) = maybe_key else {
+                    // All reader tasks exited — keyboard disconnected?
+                    break Err(anyhow!(
+                        "All keyboard device readers disconnected"
+                    ));
                 };
 
-                let header = signal_msg.header();
-                let Some(member) = header.member() else {
-                    continue;
-                };
-
-                match member.as_str() {
-                    "Activated" => match parse_shortcut_press_signal(&signal_msg) {
-                        Ok((handle, shortcut_id)) => {
-                            if handle == session_handle && shortcut_id == SHORTCUT_ID {
+                match event {
+                    KeyEvent::Press(code) => {
+                        if is_modifier_key(code) {
+                            held_modifiers.insert(code);
+                        } else if code == keybinding.key_code {
+                            let current_mods = modifiers_from_held_keys(&held_modifiers);
+                            if current_mods == keybinding.modifiers {
                                 on_global_pressed(&mut ptt_state, &internal_tx);
                             }
                         }
-                        Err(e) => {
-                            warn!("Ignoring malformed GlobalShortcuts Activated signal: {}", e);
-                        }
-                    },
-                    "Deactivated" => match parse_shortcut_press_signal(&signal_msg) {
-                        Ok((handle, shortcut_id)) => {
-                            if handle == session_handle && shortcut_id == SHORTCUT_ID {
-                                on_global_released(&mut ptt_state);
+                    }
+                    KeyEvent::Release(code) => {
+                        if is_modifier_key(code) {
+                            held_modifiers.remove(&code);
+                            // If a required modifier was released while PTT is active, treat as release
+                            if let Some(flag) = modifier_flag_for_key(code) {
+                                if keybinding.modifiers & flag != 0 && !matches!(ptt_state, PttState::Idle) {
+                                    on_global_released(&mut ptt_state);
+                                }
                             }
+                        } else if code == keybinding.key_code {
+                            on_global_released(&mut ptt_state);
                         }
-                        Err(e) => {
-                            warn!("Ignoring malformed GlobalShortcuts Deactivated signal: {}", e);
-                        }
-                    },
-                    "ShortcutsChanged" => match parse_shortcuts_changed_signal(&signal_msg) {
-                        Ok((handle, shortcuts)) => {
-                            if handle == session_handle {
-                                log_shortcuts_changed(shortcuts);
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Ignoring malformed GlobalShortcuts ShortcutsChanged signal: {}", e);
-                        }
-                    },
-                    _ => {}
+                    }
                 }
             }
             maybe_internal = internal_rx.recv() => {
@@ -446,14 +391,117 @@ async fn run_shortcut_session(active_config: ShortcutConfig) -> Result<()> {
     };
 
     cleanup_state(&mut ptt_state);
-    close_session(&connection, &session_handle).await;
+
+    // Cancel all reader tasks
+    for handle in reader_handles {
+        handle.abort();
+    }
 
     loop_result
 }
 
+// ── evdev device management ────────────────────────────────────────────
+
+#[derive(Debug)]
+enum KeyEvent {
+    Press(u16),
+    Release(u16),
+}
+
+fn find_keyboard_devices() -> Result<Vec<PathBuf>> {
+    let mut keyboards = Vec::new();
+
+    let input_dir = std::fs::read_dir("/dev/input").map_err(|e| {
+        anyhow!(
+            "Cannot read /dev/input: {}. You may need to add your user to the 'input' group.",
+            e
+        )
+    })?;
+
+    for entry in input_dir.flatten() {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if !name.starts_with("event") {
+            continue;
+        }
+
+        match Device::open(&path) {
+            Ok(device) => {
+                // Check if this device has keyboard capabilities (EV_KEY with key codes)
+                if device.supported_events().contains(EventType::KEY) {
+                    let supported_keys = device.supported_keys();
+                    let has_keyboard_keys = supported_keys
+                        .map(|keys| {
+                            // A real keyboard has letter keys
+                            keys.contains(evdev::Key::KEY_A)
+                                && keys.contains(evdev::Key::KEY_Z)
+                                && keys.contains(evdev::Key::KEY_SPACE)
+                        })
+                        .unwrap_or(false);
+
+                    if has_keyboard_keys {
+                        let dev_name = device.name().unwrap_or("unknown");
+                        info!("evdev: found keyboard device {:?} ({})", path, dev_name);
+                        keyboards.push(path);
+                    }
+                }
+            }
+            Err(e) => {
+                debug!("evdev: cannot open {:?}: {}", path, e);
+            }
+        }
+    }
+
+    Ok(keyboards)
+}
+
+async fn read_device_events(path: PathBuf, tx: mpsc::UnboundedSender<KeyEvent>) -> Result<()> {
+    let device = Device::open(&path)
+        .map_err(|e| anyhow!("Failed to open {:?}: {}", path, e))?;
+    let mut stream = device
+        .into_event_stream()
+        .map_err(|e| anyhow!("Failed to create event stream for {:?}: {}", path, e))?;
+
+    loop {
+        let event = stream
+            .next_event()
+            .await
+            .map_err(|e| anyhow!("Event read error on {:?}: {}", path, e))?;
+
+        if let InputEventKind::Key(key) = event.kind() {
+            let code = key.code();
+            match event.value() {
+                1 => {
+                    // Key press
+                    if tx.send(KeyEvent::Press(code)).is_err() {
+                        break;
+                    }
+                }
+                0 => {
+                    // Key release
+                    if tx.send(KeyEvent::Release(code)).is_err() {
+                        break;
+                    }
+                }
+                2 => {
+                    // Key repeat — ignore for PTT
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ── PTT press/release handlers (preserved from original) ───────────────
+
 fn on_global_pressed(
     ptt_state: &mut PttState,
-    internal_tx: &tokio::sync::mpsc::UnboundedSender<InternalEvent>,
+    internal_tx: &mpsc::UnboundedSender<InternalEvent>,
 ) {
     if !matches!(ptt_state, PttState::Idle) {
         debug!("Ignoring duplicate global PTT press while not idle");
@@ -691,6 +739,8 @@ fn cleanup_state(ptt_state: &mut PttState) {
     *ptt_state = PttState::Idle;
 }
 
+// ── Helpers (preserved from original) ──────────────────────────────────
+
 fn restore_engine_for_session(session_id: u64, restore_engine: &str, reason: &str) -> Result<()> {
     match set_global_engine(restore_engine) {
         Ok(()) => {
@@ -715,7 +765,7 @@ fn restore_engine_for_session(session_id: u64, restore_engine: &str, reason: &st
     }
 }
 
-fn spawn_start_recording(session_id: u64, tx: tokio::sync::mpsc::UnboundedSender<InternalEvent>) {
+fn spawn_start_recording(session_id: u64, tx: mpsc::UnboundedSender<InternalEvent>) {
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(START_RECORDING_ARM_DELAY_MS));
         let result = call_handy_method_no_args("StartRecording").map(|_| ());
@@ -830,233 +880,7 @@ fn next_ptt_session_id() -> u64 {
     PTT_SESSION_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
-fn log_shortcuts_changed(shortcuts: PortalShortcutList) {
-    for (shortcut_id, options) in shortcuts {
-        if shortcut_id != SHORTCUT_ID {
-            continue;
-        }
-
-        if let Some(value) = options.get("trigger_description") {
-            if let Ok(cloned) = value.try_clone() {
-                if let Ok(description) = String::try_from(cloned) {
-                    info!("Global shortcut updated by portal: {}", description);
-                    mark_health_success(&format!("Global shortcut updated: {}", description));
-                    return;
-                }
-            }
-        }
-
-        info!("Global shortcut updated by portal");
-        mark_health_success("Global shortcut updated by portal");
-        return;
-    }
-}
-
-async fn create_session(
-    portal_proxy: &Proxy<'_>,
-    connection: &Connection,
-) -> Result<OwnedObjectPath> {
-    let handle_token = new_token("handy_gs_create");
-    let request_handle = request_handle_for_token(connection, &handle_token)?;
-    let request_proxy = Proxy::new(
-        connection,
-        PORTAL_BUS,
-        request_handle.as_str(),
-        REQUEST_IFACE,
-    )
-    .await?;
-    let mut response_stream = request_proxy.receive_signal("Response").await?;
-
-    let mut options: ShortcutOptions = HashMap::new();
-    options.insert(
-        "handle_token".to_string(),
-        Value::from(handle_token).try_into()?,
-    );
-    options.insert(
-        "session_handle_token".to_string(),
-        Value::from(new_token("handy_gs_session")).try_into()?,
-    );
-
-    let returned_request_handle: OwnedObjectPath =
-        portal_proxy.call("CreateSession", &(options)).await?;
-    if returned_request_handle != request_handle {
-        warn!(
-            "Portal returned unexpected request handle {}; expected {}",
-            returned_request_handle, request_handle
-        );
-    }
-
-    let (response_code, mut response_data) = await_request_response(&mut response_stream).await?;
-    ensure_success_response("GlobalShortcuts CreateSession", response_code)?;
-
-    let session_handle_value = response_data
-        .remove("session_handle")
-        .ok_or_else(|| anyhow!("CreateSession response missing session_handle"))?;
-
-    parse_owned_object_path(session_handle_value)
-        .context("CreateSession returned non-object-path session_handle")
-}
-
-async fn bind_shortcut(
-    portal_proxy: &Proxy<'_>,
-    connection: &Connection,
-    session_handle: &OwnedObjectPath,
-    trigger: &str,
-) -> Result<()> {
-    let handle_token = new_token("handy_gs_bind");
-    let request_handle = request_handle_for_token(connection, &handle_token)?;
-    let request_proxy = Proxy::new(
-        connection,
-        PORTAL_BUS,
-        request_handle.as_str(),
-        REQUEST_IFACE,
-    )
-    .await?;
-    let mut response_stream = request_proxy.receive_signal("Response").await?;
-
-    let mut shortcut_options: ShortcutOptions = HashMap::new();
-    shortcut_options.insert(
-        "description".to_string(),
-        Value::from("Handy push-to-talk").try_into()?,
-    );
-    shortcut_options.insert(
-        "preferred_trigger".to_string(),
-        Value::from(trigger).try_into()?,
-    );
-    let shortcuts = vec![(SHORTCUT_ID.to_string(), shortcut_options)];
-
-    let mut bind_options: ShortcutOptions = HashMap::new();
-    bind_options.insert(
-        "handle_token".to_string(),
-        Value::from(handle_token).try_into()?,
-    );
-
-    let returned_request_handle: OwnedObjectPath = portal_proxy
-        .call(
-            "BindShortcuts",
-            &(session_handle, shortcuts, String::new(), bind_options),
-        )
-        .await?;
-    if returned_request_handle != request_handle {
-        warn!(
-            "Portal returned unexpected bind request handle {}; expected {}",
-            returned_request_handle, request_handle
-        );
-    }
-
-    let (response_code, _) = await_request_response(&mut response_stream).await?;
-    ensure_success_response("GlobalShortcuts BindShortcuts", response_code)
-}
-
-async fn list_shortcuts(
-    portal_proxy: &Proxy<'_>,
-    connection: &Connection,
-    session_handle: &OwnedObjectPath,
-) -> Result<Option<String>> {
-    let handle_token = new_token("handy_gs_list");
-    let request_handle = request_handle_for_token(connection, &handle_token)?;
-    let request_proxy = Proxy::new(
-        connection,
-        PORTAL_BUS,
-        request_handle.as_str(),
-        REQUEST_IFACE,
-    )
-    .await?;
-    let mut response_stream = request_proxy.receive_signal("Response").await?;
-
-    let mut list_options: ShortcutOptions = HashMap::new();
-    list_options.insert(
-        "handle_token".to_string(),
-        Value::from(handle_token).try_into()?,
-    );
-
-    let returned_request_handle: OwnedObjectPath = portal_proxy
-        .call("ListShortcuts", &(session_handle, list_options))
-        .await?;
-    if returned_request_handle != request_handle {
-        warn!(
-            "Portal returned unexpected list request handle {}; expected {}",
-            returned_request_handle, request_handle
-        );
-    }
-
-    let (response_code, mut response_data) = await_request_response(&mut response_stream).await?;
-    ensure_success_response("GlobalShortcuts ListShortcuts", response_code)?;
-
-    if let Some(shortcuts_value) = response_data.remove("shortcuts") {
-        if let Ok(shortcuts) = PortalShortcutList::try_from(shortcuts_value) {
-            let active = extract_trigger_description(&shortcuts);
-            log_shortcuts_changed(shortcuts);
-            return Ok(active);
-        }
-    }
-
-    Ok(None)
-}
-
-async fn close_session(connection: &Connection, session_handle: &OwnedObjectPath) {
-    let session_proxy = match Proxy::new(
-        connection,
-        PORTAL_BUS,
-        session_handle.as_str(),
-        SESSION_IFACE,
-    )
-    .await
-    {
-        Ok(proxy) => proxy,
-        Err(e) => {
-            warn!("Failed to create portal session proxy for close: {}", e);
-            return;
-        }
-    };
-
-    let close_result: zbus::Result<()> = session_proxy.call("Close", &()).await;
-    if let Err(e) = close_result {
-        warn!("Failed to close portal shortcut session: {}", e);
-    }
-}
-
-async fn await_request_response(
-    response_stream: &mut SignalStream<'_>,
-) -> Result<(u32, ShortcutOptions)> {
-    let response_msg = response_stream
-        .next()
-        .await
-        .ok_or_else(|| anyhow!("Portal request response stream ended"))?;
-    response_msg
-        .body()
-        .deserialize::<(u32, ShortcutOptions)>()
-        .context("Failed to decode portal Request::Response body")
-}
-
-fn ensure_success_response(operation: &str, response_code: u32) -> Result<()> {
-    match response_code {
-        0 => Ok(()),
-        1 => Err(anyhow!("{} canceled by user", operation)),
-        2 => Err(anyhow!("{} failed: interaction unavailable", operation)),
-        code => Err(anyhow!("{} failed with code {}", operation, code)),
-    }
-}
-
-fn request_handle_for_token(connection: &Connection, token: &str) -> Result<OwnedObjectPath> {
-    let unique_name = connection
-        .unique_name()
-        .ok_or_else(|| anyhow!("Session bus has no unique name"))?
-        .as_str();
-    let sender = unique_name.trim_start_matches(':').replace('.', "_");
-    let request_path = format!(
-        "/org/freedesktop/portal/desktop/request/{}/{}",
-        sender, token
-    );
-
-    OwnedObjectPath::try_from(request_path)
-        .map_err(|e| anyhow!("Invalid portal request path: {}", e))
-}
-
-fn new_token(prefix: &str) -> String {
-    let seq = TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{}_{}_{}", prefix, std::process::id(), seq)
-}
+// ── Shortcut config ────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ShortcutConfig {
@@ -1072,42 +896,36 @@ impl ShortcutConfig {
         }
     }
 
-    fn trigger(self) -> Result<String> {
-        let key = keyval_to_shortcuts_key_name(self.keyval)
-            .ok_or_else(|| anyhow!("Invalid key name for keyval {}", self.keyval))?;
-        let mut parts = Vec::with_capacity(5);
+    /// Resolve to an evdev keybinding.
+    fn resolve(&self) -> Option<EvdevKeybinding> {
+        crate::key_mapping::resolve_keybinding(self.keyval, self.modifiers)
+    }
 
+    /// Human-readable description of the shortcut.
+    fn human_description(&self) -> String {
+        let mut parts = Vec::with_capacity(5);
         if self.modifiers & MOD_CTRL != 0 {
-            parts.push("CTRL".to_string());
+            parts.push("Ctrl");
         }
         if self.modifiers & MOD_ALT != 0 {
-            parts.push("ALT".to_string());
+            parts.push("Alt");
         }
         if self.modifiers & MOD_SHIFT != 0 {
-            parts.push("SHIFT".to_string());
+            parts.push("Shift");
         }
         if self.modifiers & MOD_SUPER != 0 {
-            parts.push("LOGO".to_string());
+            parts.push("Super");
         }
 
-        parts.push(key);
-        Ok(parts.join("+"))
+        let key_name = gdk_keyval_to_evdev(self.keyval)
+            .map(|code| format!("{:?}", evdev::Key(code)))
+            .unwrap_or_else(|| format!("keyval_{:#x}", self.keyval));
+
+        parts.push(&key_name);
+        // Need to collect since key_name is a local
+        let parts_owned: Vec<String> = parts.iter().map(|s| s.to_string()).collect();
+        parts_owned.join("+")
     }
-}
-
-fn keyval_to_shortcuts_key_name(keyval: u32) -> Option<String> {
-    let key: gdk::Key = unsafe { from_glib(keyval) };
-    let name = key.name()?.to_string();
-
-    if name.is_empty()
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    {
-        return None;
-    }
-
-    Some(name)
 }
 
 fn normalize_keyval(keyval: u32) -> u32 {
@@ -1116,153 +934,6 @@ fn normalize_keyval(keyval: u32) -> u32 {
     } else {
         keyval
     }
-}
-
-fn extract_trigger_description(shortcuts: &PortalShortcutList) -> Option<String> {
-    for (shortcut_id, options) in shortcuts {
-        if shortcut_id != SHORTCUT_ID {
-            continue;
-        }
-        if let Some(value) = options.get("trigger_description") {
-            if let Ok(cloned) = value.try_clone() {
-                if let Ok(description) = String::try_from(cloned) {
-                    return Some(description);
-                }
-            }
-        }
-    }
-    None
-}
-
-fn parse_shortcut_press_signal(message: &zbus::Message) -> Result<(OwnedObjectPath, String)> {
-    if let Ok((handle, shortcut_id, _timestamp, _options)) =
-        message
-            .body()
-            .deserialize::<(OwnedObjectPath, String, u32, ShortcutOptions)>()
-    {
-        return Ok((handle, shortcut_id));
-    }
-
-    if let Ok((handle, shortcut_id, _timestamp, _options)) =
-        message
-            .body()
-            .deserialize::<(OwnedObjectPath, String, u64, ShortcutOptions)>()
-    {
-        return Ok((handle, shortcut_id));
-    }
-
-    if let Ok((handle, shortcut_id, _timestamp)) = message
-        .body()
-        .deserialize::<(OwnedObjectPath, String, u32)>()
-    {
-        return Ok((handle, shortcut_id));
-    }
-
-    if let Ok((handle, shortcut_id, _timestamp)) = message
-        .body()
-        .deserialize::<(OwnedObjectPath, String, u64)>()
-    {
-        return Ok((handle, shortcut_id));
-    }
-
-    Err(anyhow!(
-        "unsupported payload for shortcut activation/deactivation signal"
-    ))
-}
-
-fn parse_shortcuts_changed_signal(
-    message: &zbus::Message,
-) -> Result<(OwnedObjectPath, PortalShortcutList)> {
-    if let Ok((handle, shortcuts)) = message
-        .body()
-        .deserialize::<(OwnedObjectPath, PortalShortcutList)>()
-    {
-        return Ok((handle, shortcuts));
-    }
-
-    let (handle, _options): (OwnedObjectPath, ShortcutOptions) = message
-        .body()
-        .deserialize()
-        .context("ShortcutsChanged payload is not supported")?;
-    Ok((handle, Vec::new()))
-}
-
-fn parse_owned_object_path(value: OwnedValue) -> Result<OwnedObjectPath> {
-    parse_owned_object_path_inner(value, 0)
-}
-
-fn parse_owned_object_path_inner(value: OwnedValue, depth: u8) -> Result<OwnedObjectPath> {
-    if depth > 6 {
-        return Err(anyhow!(
-            "session_handle variant nesting exceeded supported depth"
-        ));
-    }
-
-    if let Ok(path) = OwnedObjectPath::try_from(value.try_clone()?) {
-        return Ok(path);
-    }
-
-    if let Ok(path_string) = String::try_from(value.try_clone()?) {
-        return OwnedObjectPath::try_from(path_string)
-            .context("session_handle string is not a valid object path");
-    }
-
-    let inner: Value<'_> = Value::try_from(&value).context("session_handle has invalid value")?;
-    if let Value::Value(nested) = inner {
-        let nested_owned =
-            OwnedValue::try_from(*nested).context("failed to own nested session_handle variant")?;
-        return parse_owned_object_path_inner(nested_owned, depth + 1);
-    }
-
-    Err(anyhow!("session_handle type is not object-path compatible"))
-}
-
-fn normalize_trigger_token(token: &str) -> String {
-    let upper = token.trim().to_ascii_uppercase();
-    match upper.as_str() {
-        "SUPER" | "WIN" | "META" => "LOGO".to_string(),
-        "CONTROL" | "PRIMARY" => "CTRL".to_string(),
-        _ => upper,
-    }
-}
-
-fn normalize_trigger(trigger: &str) -> String {
-    let mut modifiers = Vec::new();
-    let mut key = String::new();
-
-    for raw in trigger.split('+') {
-        let token = normalize_trigger_token(raw);
-        match token.as_str() {
-            "CTRL" | "ALT" | "SHIFT" | "LOGO" => modifiers.push(token),
-            _ => key = token,
-        }
-    }
-
-    modifiers.sort_unstable();
-    if key.is_empty() {
-        modifiers.join("+")
-    } else if modifiers.is_empty() {
-        key
-    } else {
-        format!("{}+{}", modifiers.join("+"), key)
-    }
-}
-
-fn triggers_match(actual_trigger: &str, requested_trigger: &str) -> bool {
-    let actual = normalize_trigger(actual_trigger);
-    let requested = normalize_trigger(requested_trigger);
-    !actual.is_empty() && actual == requested
-}
-
-fn should_override_health_as_session_ended() -> bool {
-    let Ok(health) = health_state().lock() else {
-        return true;
-    };
-
-    matches!(
-        health.code.as_str(),
-        "ok" | "initializing" | "portal_session_ended"
-    )
 }
 
 async fn sleep_until_retry_or_rebind(total_delay_ms: u64) {
