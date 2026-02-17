@@ -1,20 +1,321 @@
 use gtk4::prelude::*;
 use gtk4::{
-    Box, Button, Image, Label, Orientation, PolicyType, ProgressBar, ScrolledWindow, Widget,
+    Box, Button, Image, Label, Orientation, PolicyType, ProgressBar, ScrolledWindow, Spinner,
+    Widget,
 };
 use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt};
 use libadwaita::{ActionRow, Clamp, PreferencesGroup, ToastOverlay};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use tokio::runtime::Runtime;
 
 use super::Page;
 use crate::app::AppState;
-use crate::managers::model::ModelInfo;
+use crate::managers::model::{ModelInfo, ModelState};
 
 static DOWNLOAD_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
 fn get_download_runtime() -> &'static Runtime {
     DOWNLOAD_RUNTIME.get_or_init(|| Runtime::new().expect("Failed to create download runtime"))
+}
+
+/// Persistent row for a model that updates in-place
+struct ModelRow {
+    row: ActionRow,
+    state_box: Box,
+    model_id: String,
+    current_widgets: Vec<Widget>,
+}
+
+impl ModelRow {
+    fn new(model: &ModelInfo, is_active: bool, state: &Arc<AppState>) -> Self {
+        let row = ActionRow::builder()
+            .title(&model.name)
+            .subtitle(&model.description)
+            .build();
+
+        if model.is_recommended {
+            row.add_prefix(&Image::from_icon_name("starred-symbolic"));
+        }
+
+        let size_label = Label::builder()
+            .label(format!("{} MB", model.size_mb))
+            .css_classes(["dim-label", "caption"])
+            .build();
+        row.add_suffix(&size_label);
+
+        let state_box = Box::builder()
+            .orientation(Orientation::Horizontal)
+            .spacing(6)
+            .build();
+
+        let mut row = Self {
+            row,
+            state_box,
+            model_id: model.id.clone(),
+            current_widgets: Vec::new(),
+        };
+
+        // Initial state update
+        row.update_state(model, is_active, state);
+
+        row
+    }
+
+    /// Update the row UI based on model state
+    fn update_state(&mut self, _model: &ModelInfo, is_active: bool, state: &Arc<AppState>) {
+        // Clear existing state widgets
+        while let Some(child) = self.state_box.first_child() {
+            self.state_box.remove(&child);
+        }
+        self.current_widgets.clear();
+
+        // Get current state from ModelManager
+        let model_state = state
+            .model_manager
+            .get_model_state(&self.model_id)
+            .unwrap_or(ModelState::Available);
+
+        match model_state {
+            ModelState::Available => {
+                self.show_available_state(state);
+            }
+            ModelState::Downloading {
+                bytes_downloaded,
+                bytes_total,
+                ..
+            } => {
+                self.show_downloading_state(bytes_downloaded, bytes_total, state);
+            }
+            ModelState::Extracting { .. } => {
+                self.show_extracting_state(state);
+            }
+            ModelState::Ready => {
+                self.show_ready_state(is_active, state);
+            }
+            ModelState::Error { message, retryable } => {
+                self.show_error_state(&message, retryable, state);
+            }
+        }
+
+        self.row.add_suffix(&self.state_box);
+    }
+
+    fn show_available_state(&mut self, state: &Arc<AppState>) {
+        if let Some(model) = state.model_manager.get_model_info(&self.model_id) {
+            if model.url.is_some() {
+                let download_btn = Button::builder()
+                    .label("Download")
+                    .css_classes(["pill", "suggested-action"])
+                    .build();
+
+                let model_id = self.model_id.clone();
+                let model_manager = state.model_manager.clone();
+                let state_clone = state.clone();
+                download_btn.connect_clicked(move |_| {
+                    if model_manager.is_model_downloading(&model_id) {
+                        log::warn!("Download already in progress for model: {}", model_id);
+                        return;
+                    }
+
+                    let model_id_for_blocking = model_id.clone();
+                    let model_id_for_log = model_id.clone();
+                    let model_manager = model_manager.clone();
+                    let _state_clone2 = state_clone.clone();
+
+                    let handle = get_download_runtime().spawn_blocking(move || {
+                        let rt = tokio::runtime::Runtime::new()
+                            .map_err(|e| format!("Failed to create inner runtime: {}", e))?;
+
+                        rt.block_on(model_manager.download_model(&model_id_for_blocking))
+                            .map_err(|e| format!("Download failed: {}", e))
+                    });
+
+                    std::mem::drop(get_download_runtime().spawn(async move {
+                        match handle.await {
+                            Ok(Ok(())) => {
+                                log::info!("Model {} downloaded successfully", model_id_for_log)
+                            }
+                            Ok(Err(e)) => {
+                                log::error!("Download error: {}", e);
+                            }
+                            Err(e) => {
+                                log::error!("Download task panicked: {}", e);
+                            }
+                        }
+                    }));
+                });
+
+                self.state_box.append(&download_btn);
+                self.current_widgets.push(download_btn.upcast());
+            }
+        }
+    }
+
+    fn show_downloading_state(
+        &mut self,
+        bytes_downloaded: u64,
+        bytes_total: u64,
+        state: &Arc<AppState>,
+    ) {
+        let percentage = if bytes_total == 0 {
+            0.0
+        } else {
+            (bytes_downloaded as f64 / bytes_total as f64) * 100.0
+        };
+
+        let progress_text = format!("{:.0}%", percentage);
+        let progress = ProgressBar::builder()
+            .fraction(percentage / 100.0)
+            .show_text(true)
+            .text(&progress_text)
+            .width_request(120)
+            .build();
+
+        let cancel_btn = Button::builder()
+            .label("Cancel")
+            .css_classes(["pill"])
+            .build();
+
+        let model_id = self.model_id.clone();
+        let state_clone = state.clone();
+        cancel_btn.connect_clicked(move |_| {
+            if let Err(e) = state_clone.model_manager.cancel_download(&model_id) {
+                log::error!("Failed to cancel download: {}", e);
+            }
+        });
+
+        self.state_box.append(&progress);
+        self.state_box.append(&cancel_btn);
+        self.current_widgets.push(progress.upcast());
+        self.current_widgets.push(cancel_btn.upcast());
+    }
+
+    fn show_extracting_state(&mut self, _state: &Arc<AppState>) {
+        let spinner = Spinner::builder().spinning(true).width_request(24).build();
+
+        let label = Label::builder()
+            .label("Extracting...")
+            .css_classes(["dim-label"])
+            .build();
+
+        let cancel_btn = Button::builder()
+            .label("Cancel")
+            .css_classes(["pill"])
+            .sensitive(false) // Can't cancel extraction
+            .build();
+
+        self.state_box.append(&spinner);
+        self.state_box.append(&label);
+        self.state_box.append(&cancel_btn);
+        self.current_widgets.push(spinner.upcast());
+        self.current_widgets.push(label.upcast());
+        self.current_widgets.push(cancel_btn.upcast());
+    }
+
+    fn show_ready_state(&mut self, is_active: bool, state: &Arc<AppState>) {
+        if is_active {
+            let active_label = Label::builder()
+                .label("Active")
+                .css_classes(["success", "caption"])
+                .build();
+            self.state_box.append(&active_label);
+            self.current_widgets.push(active_label.upcast());
+        } else {
+            let select_btn = Button::builder()
+                .label("Select")
+                .css_classes(["pill", "suggested-action"])
+                .build();
+
+            let model_id = self.model_id.clone();
+            let state_clone = state.clone();
+            select_btn.connect_clicked(move |_| {
+                if let Err(e) = state_clone.model_manager.set_active_model(&model_id) {
+                    log::error!("Failed to set active model: {}", e);
+                }
+            });
+
+            self.state_box.append(&select_btn);
+            self.current_widgets.push(select_btn.upcast());
+        }
+
+        // Check if we can delete (not custom model)
+        if let Some(model) = state.model_manager.get_model_info(&self.model_id) {
+            if !model.is_custom {
+                let delete_btn = Button::builder()
+                    .icon_name("user-trash-symbolic")
+                    .css_classes(["destructive-action", "pill"])
+                    .build();
+
+                let model_id = self.model_id.clone();
+                let state_clone = state.clone();
+                delete_btn.connect_clicked(move |_| {
+                    if let Err(e) = state_clone.model_manager.delete_model(&model_id) {
+                        log::error!("Failed to delete model: {}", e);
+                    }
+                });
+
+                self.state_box.append(&delete_btn);
+                self.current_widgets.push(delete_btn.upcast());
+            }
+        }
+    }
+
+    fn show_error_state(&mut self, _message: &str, retryable: bool, state: &Arc<AppState>) {
+        let error_label = Label::builder()
+            .label("Error")
+            .css_classes(["error", "caption"])
+            .build();
+        self.state_box.append(&error_label);
+        self.current_widgets.push(error_label.upcast());
+
+        if retryable {
+            let retry_btn = Button::builder()
+                .label("Retry")
+                .css_classes(["pill", "suggested-action"])
+                .build();
+
+            let model_id = self.model_id.clone();
+            let state_clone = state.clone();
+            retry_btn.connect_clicked(move |_| {
+                // Trigger download again
+                let model_manager = state_clone.model_manager.clone();
+                let model_id_for_blocking = model_id.clone();
+                let model_id_for_log = model_id.clone();
+
+                let handle = get_download_runtime().spawn_blocking(move || {
+                    let rt = tokio::runtime::Runtime::new()
+                        .map_err(|e| format!("Failed to create inner runtime: {}", e))?;
+
+                    rt.block_on(model_manager.download_model(&model_id_for_blocking))
+                        .map_err(|e| format!("Download failed: {}", e))
+                });
+
+                std::mem::drop(get_download_runtime().spawn(async move {
+                    match handle.await {
+                        Ok(Ok(())) => {
+                            log::info!("Model {} downloaded successfully", model_id_for_log)
+                        }
+                        Ok(Err(e)) => {
+                            log::error!("Download error: {}", e);
+                        }
+                        Err(e) => {
+                            log::error!("Download task panicked: {}", e);
+                        }
+                    }
+                }));
+            });
+
+            self.state_box.append(&retry_btn);
+            self.current_widgets.push(retry_btn.upcast());
+        }
+    }
+
+    fn widget(&self) -> &ActionRow {
+        &self.row
+    }
 }
 
 pub struct ModelsPage {
@@ -41,29 +342,35 @@ impl ModelsPage {
             .description("Download and select transcription models")
             .build();
 
+        // Create persistent rows for all models
+        let rows: Rc<RefCell<HashMap<String, ModelRow>>> = Rc::new(RefCell::new(HashMap::new()));
         let selected_model = state.model_manager.get_current_model();
-        for model in sorted_models(state) {
-            let row = create_model_row(&model, &selected_model, state);
-            models_group.add(&row);
+        {
+            let mut rows_lock = rows.borrow_mut();
+            for model in sorted_models(state) {
+                let is_active = model.id == selected_model;
+                let row = ModelRow::new(&model, is_active, state);
+                models_group.add(row.widget());
+                rows_lock.insert(model.id.clone(), row);
+            }
         }
         main_box.append(&models_group);
 
-        // Setup periodic refresh for download progress
+        // Setup periodic refresh for download progress - only update rows that changed
         let state_clone = state.clone();
-        let models_group_clone = models_group.clone();
+        let _models_group_clone = models_group.clone();
+        // Clone rows Rc for the closure
+        let rows_clone = Rc::clone(&rows);
         glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
             let models = state_clone.model_manager.get_available_models();
-            let has_active_download = models.iter().any(|m| m.is_downloading);
+            let selected = state_clone.model_manager.get_current_model();
 
-            if has_active_download {
-                // Refresh the models list
-                while let Some(child) = models_group_clone.first_child() {
-                    models_group_clone.remove(&child);
-                }
-                let selected = state_clone.model_manager.get_current_model();
-                for model in sorted_models(&state_clone) {
-                    let row = create_model_row(&model, &selected, &state_clone);
-                    models_group_clone.add(&row);
+            let mut rows_lock = rows_clone.borrow_mut();
+            for model in models {
+                if let Some(row) = rows_lock.get_mut(&model.id) {
+                    let is_active = model.id == selected;
+                    // Only update if state has changed (check by comparing with current state)
+                    row.update_state(&model, is_active, &state_clone);
                 }
             }
 
@@ -110,155 +417,6 @@ fn sorted_models(state: &Arc<AppState>) -> Vec<ModelInfo> {
             .then_with(|| a.name.cmp(&b.name))
     });
     models
-}
-
-fn create_model_row(model: &ModelInfo, selected_model: &str, state: &Arc<AppState>) -> ActionRow {
-    let row = ActionRow::builder()
-        .title(&model.name)
-        .subtitle(&model.description)
-        .build();
-
-    if model.is_recommended {
-        row.add_prefix(&Image::from_icon_name("starred-symbolic"));
-    }
-
-    let size_label = Label::builder()
-        .label(format!("{} MB", model.size_mb))
-        .css_classes(["dim-label", "caption"])
-        .build();
-    row.add_suffix(&size_label);
-
-    let state_box = Box::builder()
-        .orientation(Orientation::Horizontal)
-        .spacing(6)
-        .build();
-
-    if model.is_downloaded {
-        if model.id == selected_model {
-            let active_label = Label::builder()
-                .label("Active")
-                .css_classes(["success", "caption"])
-                .build();
-            state_box.append(&active_label);
-        } else {
-            let select_btn = Button::builder()
-                .label("Select")
-                .css_classes(["pill", "suggested-action"])
-                .build();
-
-            let model_id = model.id.clone();
-            let state_clone = state.clone();
-            select_btn.connect_clicked(move |_| {
-                if let Err(e) = state_clone.model_manager.set_active_model(&model_id) {
-                    log::error!("Failed to set active model: {}", e);
-                }
-            });
-            state_box.append(&select_btn);
-        }
-
-        if !model.is_custom {
-            let delete_btn = Button::builder()
-                .icon_name("user-trash-symbolic")
-                .css_classes(["destructive-action", "pill"])
-                .build();
-
-            let model_id = model.id.clone();
-            let state_clone = state.clone();
-            delete_btn.connect_clicked(move |_| {
-                if let Err(e) = state_clone.model_manager.delete_model(&model_id) {
-                    log::error!("Failed to delete model: {}", e);
-                }
-            });
-            state_box.append(&delete_btn);
-        }
-    } else if model.is_downloading {
-        let total_bytes = model.size_mb.saturating_mul(1024 * 1024);
-        let fraction = if total_bytes == 0 {
-            0.0
-        } else {
-            (model.partial_size as f64 / total_bytes as f64).clamp(0.0, 1.0)
-        };
-        let progress_text = format!("{:.0}%", fraction * 100.0);
-
-        let progress = ProgressBar::builder()
-            .fraction(fraction)
-            .show_text(true)
-            .text(&progress_text)
-            .width_request(120)
-            .build();
-        state_box.append(&progress);
-
-        let cancel_btn = Button::builder()
-            .label("Cancel")
-            .css_classes(["pill"])
-            .build();
-        let model_id = model.id.clone();
-        let state_clone = state.clone();
-        cancel_btn.connect_clicked(move |_| {
-            if let Err(e) = state_clone.model_manager.cancel_download(&model_id) {
-                log::error!("Failed to cancel download: {}", e);
-            }
-        });
-        state_box.append(&cancel_btn);
-    } else if model.url.is_some() {
-        let download_btn = Button::builder()
-            .label("Download")
-            .css_classes(["pill", "suggested-action"])
-            .build();
-
-        // Check if already downloading and disable button if so
-        if model.is_downloading {
-            download_btn.set_sensitive(false);
-            download_btn.set_label("Downloading...");
-        }
-
-        let model_id = model.id.clone();
-        let model_manager = state.model_manager.clone();
-        let download_btn_weak = download_btn.downgrade();
-        download_btn.connect_clicked(move |_| {
-            // Check if already downloading
-            if model_manager.is_model_downloading(&model_id) {
-                log::warn!("Download already in progress for model: {}", model_id);
-                return;
-            }
-
-            // Disable button immediately
-            if let Some(btn) = download_btn_weak.upgrade() {
-                btn.set_sensitive(false);
-                btn.set_label("Downloading...");
-            }
-
-            let model_id_for_blocking = model_id.clone();
-            let model_id_for_log = model_id.clone();
-            let model_manager = model_manager.clone();
-
-            let handle = get_download_runtime().spawn_blocking(move || {
-                let rt = tokio::runtime::Runtime::new()
-                    .map_err(|e| format!("Failed to create inner runtime: {}", e))?;
-
-                rt.block_on(model_manager.download_model(&model_id_for_blocking))
-                    .map_err(|e| format!("Download failed: {}", e))
-            });
-
-            std::mem::drop(get_download_runtime().spawn(async move {
-                match handle.await {
-                    Ok(Ok(())) => log::info!("Model {} downloaded successfully", model_id_for_log),
-                    Ok(Err(e)) => {
-                        log::error!("Download error: {}", e);
-                        // Button will be re-enabled on next UI refresh
-                    }
-                    Err(e) => {
-                        log::error!("Download task panicked: {}", e);
-                        // Button will be re-enabled on next UI refresh
-                    }
-                }
-            }));
-        });
-        state_box.append(&download_btn);
-    }
-
-    row.add_suffix(&state_box);
-    row
 }
 
 impl Page for ModelsPage {

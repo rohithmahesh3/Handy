@@ -49,12 +49,87 @@ pub struct DownloadProgress {
     pub percentage: f64,
 }
 
+/// Represents the current state of a model in its lifecycle
+#[derive(Debug, Clone)]
+pub enum ModelState {
+    /// Model is available for download
+    Available,
+    /// Download is in progress
+    Downloading {
+        bytes_downloaded: u64,
+        bytes_total: u64,
+        cancel_flag: Arc<AtomicBool>,
+    },
+    /// File downloaded, extracting archive
+    Extracting { progress_message: String },
+    /// Model is downloaded and ready to use
+    Ready,
+    /// An error occurred (may be retryable)
+    Error { message: String, retryable: bool },
+}
+
+impl ModelState {
+    /// Check if the model can be downloaded
+    pub fn can_download(&self) -> bool {
+        matches!(self, ModelState::Available | ModelState::Error { .. })
+    }
+
+    /// Check if download is in progress
+    pub fn is_downloading(&self) -> bool {
+        matches!(self, ModelState::Downloading { .. })
+    }
+
+    /// Check if extraction is in progress
+    pub fn is_extracting(&self) -> bool {
+        matches!(self, ModelState::Extracting { .. })
+    }
+
+    /// Check if the model is ready to use
+    pub fn is_ready(&self) -> bool {
+        matches!(self, ModelState::Ready)
+    }
+
+    /// Get progress percentage if downloading
+    pub fn progress_percentage(&self) -> Option<f64> {
+        match self {
+            ModelState::Downloading {
+                bytes_downloaded,
+                bytes_total,
+                ..
+            } => {
+                if *bytes_total == 0 {
+                    Some(0.0)
+                } else {
+                    Some((*bytes_downloaded as f64 / *bytes_total as f64) * 100.0)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Get cancel flag if downloading
+    pub fn cancel_flag(&self) -> Option<Arc<AtomicBool>> {
+        match self {
+            ModelState::Downloading { cancel_flag, .. } => Some(cancel_flag.clone()),
+            _ => None,
+        }
+    }
+}
+
+/// Event emitted when a model's state changes
+#[derive(Debug, Clone)]
+pub struct ModelStateEvent {
+    pub model_id: String,
+    pub state: ModelState,
+}
+
 pub struct ModelManager {
     selected_model: Mutex<String>,
     models_dir: PathBuf,
     available_models: Mutex<HashMap<String, ModelInfo>>,
     cancel_flags: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     extracting_models: Arc<Mutex<HashSet<String>>>,
+    state_observers: Arc<Mutex<Vec<std::sync::mpsc::Sender<ModelStateEvent>>>>,
 }
 
 impl ModelManager {
@@ -230,6 +305,7 @@ impl ModelManager {
             available_models: Mutex::new(available_models),
             cancel_flags: Arc::new(Mutex::new(HashMap::new())),
             extracting_models: Arc::new(Mutex::new(HashSet::new())),
+            state_observers: Arc::new(Mutex::new(Vec::new())),
         };
 
         manager.update_download_status()?;
@@ -434,18 +510,32 @@ impl ModelManager {
             0
         };
 
+        // Set downloading state and notify
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let total_bytes = model_info.size_mb * 1024 * 1024;
+
         {
             let mut models = self.available_models.lock().unwrap();
             if let Some(model) = models.get_mut(model_id) {
                 model.is_downloading = true;
+                model.partial_size = resume_from;
             }
         }
 
-        let cancel_flag = Arc::new(AtomicBool::new(false));
         {
             let mut flags = self.cancel_flags.lock().unwrap();
             flags.insert(model_id.to_string(), cancel_flag.clone());
         }
+
+        // Notify UI that download has started
+        self.notify_state_change(
+            model_id,
+            ModelState::Downloading {
+                bytes_downloaded: resume_from,
+                bytes_total: total_bytes,
+                cancel_flag: cancel_flag.clone(),
+            },
+        );
 
         let client = reqwest::Client::new();
         let mut request = client.get(&url);
@@ -466,12 +556,26 @@ impl ModelManager {
         if !response.status().is_success()
             && response.status() != reqwest::StatusCode::PARTIAL_CONTENT
         {
+            // Download failed - notify error state
             {
                 let mut models = self.available_models.lock().unwrap();
                 if let Some(model) = models.get_mut(model_id) {
                     model.is_downloading = false;
                 }
             }
+            {
+                let mut flags = self.cancel_flags.lock().unwrap();
+                flags.remove(model_id);
+            }
+
+            self.notify_state_change(
+                model_id,
+                ModelState::Error {
+                    message: format!("HTTP {}", response.status()),
+                    retryable: true,
+                },
+            );
+
             return Err(anyhow::anyhow!(
                 "Failed to download: HTTP {}",
                 response.status()
@@ -486,6 +590,7 @@ impl ModelManager {
 
         let mut _downloaded = resume_from;
         let mut stream = response.bytes_stream();
+        let mut last_notify_bytes = resume_from;
 
         let mut file = if resume_from > 0 {
             std::fs::OpenOptions::new()
@@ -509,16 +614,35 @@ impl ModelManager {
                     let mut flags = self.cancel_flags.lock().unwrap();
                     flags.remove(model_id);
                 }
+
+                // Notify cancellation
+                self.notify_state_change(model_id, ModelState::Available);
+
                 return Ok(());
             }
 
             let chunk = chunk?;
             file.write_all(&chunk)?;
             _downloaded += chunk.len() as u64;
+
+            // Update progress in model info
             if let Ok(mut models) = self.available_models.lock() {
                 if let Some(model) = models.get_mut(model_id) {
                     model.partial_size = _downloaded;
                 }
+            }
+
+            // Notify progress every 1MB to avoid spamming
+            if _downloaded - last_notify_bytes >= 1024 * 1024 {
+                self.notify_state_change(
+                    model_id,
+                    ModelState::Downloading {
+                        bytes_downloaded: _downloaded,
+                        bytes_total: total_bytes,
+                        cancel_flag: cancel_flag.clone(),
+                    },
+                );
+                last_notify_bytes = _downloaded;
             }
         }
 
@@ -527,7 +651,37 @@ impl ModelManager {
         fs::rename(&partial_path, &model_path)?;
 
         if model_info.is_directory {
-            self.extract_model(model_id, &model_path).await?;
+            // Notify extraction state
+            self.notify_state_change(
+                model_id,
+                ModelState::Extracting {
+                    progress_message: "Extracting files...".to_string(),
+                },
+            );
+
+            if let Err(e) = self.extract_model(model_id, &model_path).await {
+                // Extraction failed
+                {
+                    let mut flags = self.cancel_flags.lock().unwrap();
+                    flags.remove(model_id);
+                }
+                {
+                    let mut models = self.available_models.lock().unwrap();
+                    if let Some(model) = models.get_mut(model_id) {
+                        model.is_downloading = false;
+                    }
+                }
+
+                self.notify_state_change(
+                    model_id,
+                    ModelState::Error {
+                        message: format!("Extraction failed: {}", e),
+                        retryable: true,
+                    },
+                );
+
+                return Err(e);
+            }
         }
 
         {
@@ -543,6 +697,9 @@ impl ModelManager {
                 model.partial_size = 0;
             }
         }
+
+        // Notify ready state
+        self.notify_state_change(model_id, ModelState::Ready);
 
         self.auto_select_model_if_needed()?;
 
@@ -607,6 +764,64 @@ impl ModelManager {
             .unwrap_or(false)
     }
 
+    /// Subscribe to model state changes
+    /// Returns a std::sync::mpsc::Receiver that can be used with glib::MainContext::default().invoke()
+    pub fn subscribe_state_changes(&self) -> std::sync::mpsc::Receiver<ModelStateEvent> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        {
+            let mut observers = self.state_observers.lock().unwrap();
+            observers.push(sender);
+        }
+        receiver
+    }
+
+    /// Notify all observers of a state change
+    fn notify_state_change(&self, model_id: &str, state: ModelState) {
+        let event = ModelStateEvent {
+            model_id: model_id.to_string(),
+            state,
+        };
+        let observers = self.state_observers.lock().unwrap();
+        for observer in observers.iter() {
+            let _ = observer.send(event.clone());
+        }
+    }
+
+    /// Get the current state of a model
+    pub fn get_model_state(&self, model_id: &str) -> Option<ModelState> {
+        let models = self.available_models.lock().unwrap();
+        models.get(model_id).map(|m| {
+            if m.is_downloading {
+                let cancel_flag = self
+                    .cancel_flags
+                    .lock()
+                    .unwrap()
+                    .get(model_id)
+                    .cloned()
+                    .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+                ModelState::Downloading {
+                    bytes_downloaded: m.partial_size,
+                    bytes_total: m.size_mb * 1024 * 1024,
+                    cancel_flag,
+                }
+            } else if m.is_downloaded {
+                let is_extracting = self.extracting_models.lock().unwrap().contains(model_id);
+                if is_extracting {
+                    ModelState::Extracting {
+                        progress_message: "Extracting files...".to_string(),
+                    }
+                } else {
+                    ModelState::Ready
+                }
+            } else if m.partial_size > 0 {
+                // Has partial download but not currently downloading
+                ModelState::Available
+            } else {
+                ModelState::Available
+            }
+        })
+    }
+
     pub fn delete_model(&self, model_id: &str) -> Result<()> {
         let model_info = {
             let models = self.available_models.lock().unwrap();
@@ -637,6 +852,9 @@ impl ModelManager {
                 *self.selected_model.lock().unwrap() = String::new();
                 crate::settings::Settings::new().set_selected_model("");
             }
+
+            // Notify that model is now available again
+            self.notify_state_change(model_id, ModelState::Available);
         }
 
         Ok(())
