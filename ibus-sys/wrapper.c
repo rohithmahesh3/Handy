@@ -77,38 +77,38 @@ static gboolean ibus_handy_engine_process_key_event(
     guint keycode,
     guint modifiers
 ) {
-    if (global_key_event_cb) {
+    if (global_key_event_cb && global_context) {
         return global_key_event_cb(global_context, engine, keyval, keycode, modifiers);
     }
     return FALSE;
 }
 
 static void ibus_handy_engine_focus_in(IBusEngine *engine) {
-    if (global_focus_in_cb) {
+    if (global_focus_in_cb && global_context) {
         global_focus_in_cb(global_context, engine);
     }
 }
 
 static void ibus_handy_engine_focus_out(IBusEngine *engine) {
-    if (global_focus_out_cb) {
+    if (global_focus_out_cb && global_context) {
         global_focus_out_cb(global_context, engine);
     }
 }
 
 static void ibus_handy_engine_reset(IBusEngine *engine) {
-    if (global_reset_cb) {
+    if (global_reset_cb && global_context) {
         global_reset_cb(global_context, engine);
     }
 }
 
 static void ibus_handy_engine_enable(IBusEngine *engine) {
-    if (global_enable_cb) {
+    if (global_enable_cb && global_context) {
         global_enable_cb(global_context, engine);
     }
 }
 
 static void ibus_handy_engine_disable(IBusEngine *engine) {
-    if (global_disable_cb) {
+    if (global_disable_cb && global_context) {
         global_disable_cb(global_context, engine);
     }
 }
