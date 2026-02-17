@@ -111,14 +111,19 @@ Signals:
 Handy is push-to-talk only.
 
 Settings keys used for PTT:
-- `push-to-talk-keyval`
-- `push-to-talk-modifiers`
+- `push-to-talk-keyval` (GDK keyval stored in GSettings)
+- `push-to-talk-modifiers` (GDK modifier bitmask)
 
-Global PTT path (`src/global_shortcuts.rs`):
-1. On press: store current engine, switch to Handy engine, call `StartRecording`.
-2. On release: restore previous engine.
-3. Engine disable callback handles stop/transcribe/commit path.
-4. Release watchdog checks for stuck recording and calls `CancelRecording` as fallback.
+Global PTT uses **evdev** for keyboard monitoring (`src/global_shortcuts.rs`):
+1. On startup: discover keyboard devices in `/dev/input/event*`, open event streams.
+2. GDK keyvals from settings are mapped to evdev keycodes via `src/key_mapping.rs`.
+3. On press: store current engine, switch to Handy engine, call `StartRecording`.
+4. On release: restore previous engine.
+5. Engine disable callback handles stop/transcribe/commit path.
+6. Release watchdog checks for stuck recording and calls `CancelRecording` as fallback.
+
+This approach requires read access to `/dev/input/event*` devices. A udev rule
+(`packaging/fedora/90-handy-input.rules`) ensures `uaccess` for the active desktop user.
 
 ## Critical Constraints
 
@@ -131,8 +136,8 @@ Stop/transcribe work must remain off callback thread.
 3. Preserve GObject lifetime safety in async commit paths.
 Keep ref/unref pattern intact in `src/ibus_engine/context.rs`.
 
-4. Keep portal session lifecycle clean.
-Handle response codes and close sessions explicitly.
+4. Keep evdev device lifecycle clean.
+   Close device streams on session restart; abort reader tasks on config change.
 
 5. Keep daemon state transitions consistent.
 `RecordingStateChanged(false)` should happen immediately when stop starts, not after long transcription.
@@ -160,6 +165,7 @@ Core:
 
 IBus and PTT:
 - `src/global_shortcuts.rs`
+- `src/key_mapping.rs`
 - `src/ibus_engine/context.rs`
 - `src/ibus_control.rs`
 - `src/ibus_engine/ibus_api.rs`
@@ -186,6 +192,7 @@ Packaging:
 - `packaging/fedora/handy.xml.in`
 - `packaging/fedora/handy.service`
 - `packaging/fedora/com.handy.Transcription.service`
+- `packaging/fedora/90-handy-input.rules`
 
 ## Definition of Done for Agent Changes
 
