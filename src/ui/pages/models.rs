@@ -51,17 +51,20 @@ impl ModelRow {
             .spacing(6)
             .build();
 
-        let mut row = Self {
+        let mut model_row = Self {
             row,
             state_box,
             model_id: model.id.clone(),
             current_widgets: Vec::new(),
         };
 
-        // Initial state update
-        row.update_state(model, is_active, state);
+        // Add state_box as suffix once — update_state only changes its children
+        model_row.row.add_suffix(&model_row.state_box);
 
-        row
+        // Initial state update
+        model_row.update_state(model, is_active, state);
+
+        model_row
     }
 
     /// Update the row UI based on model state
@@ -99,8 +102,6 @@ impl ModelRow {
                 self.show_error_state(&message, retryable, state);
             }
         }
-
-        self.row.add_suffix(&self.state_box);
     }
 
     fn show_available_state(&mut self, state: &Arc<AppState>) {
