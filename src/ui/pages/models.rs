@@ -33,7 +33,12 @@ impl ModelsPage {
             .title("Available Models")
             .description("Download and select transcription models")
             .build();
-        populate_models_group(&models_group, state);
+
+        let selected_model = state.model_manager.get_current_model();
+        for model in sorted_models(state) {
+            let row = create_model_row(&model, &selected_model, state);
+            models_group.add(&row);
+        }
         main_box.append(&models_group);
 
         let custom_group = PreferencesGroup::builder()
@@ -52,15 +57,6 @@ impl ModelsPage {
         main_box.append(&custom_group);
         toast_overlay.set_child(Some(&main_box));
 
-        {
-            let models_group = models_group.clone();
-            let state = state.clone();
-            glib::timeout_add_local(std::time::Duration::from_millis(700), move || {
-                populate_models_group(&models_group, &state);
-                glib::ControlFlow::Continue
-            });
-        }
-
         let clamp = Clamp::builder()
             .maximum_size(900)
             .tightening_threshold(600)
@@ -76,12 +72,6 @@ impl ModelsPage {
     }
 }
 
-fn clear_group(group: &PreferencesGroup) {
-    while let Some(child) = group.first_child() {
-        group.remove(&child);
-    }
-}
-
 fn sorted_models(state: &Arc<AppState>) -> Vec<ModelInfo> {
     let mut models = state.model_manager.get_available_models();
     models.sort_by(|a, b| {
@@ -91,18 +81,6 @@ fn sorted_models(state: &Arc<AppState>) -> Vec<ModelInfo> {
             .then_with(|| a.name.cmp(&b.name))
     });
     models
-}
-
-fn populate_models_group(group: &PreferencesGroup, state: &Arc<AppState>) {
-    clear_group(group);
-
-    let models = sorted_models(state);
-    let selected_model = state.model_manager.get_current_model();
-
-    for model in models {
-        let row = create_model_row(&model, &selected_model, state);
-        group.add(&row);
-    }
 }
 
 fn create_model_row(model: &ModelInfo, selected_model: &str, state: &Arc<AppState>) -> ActionRow {
