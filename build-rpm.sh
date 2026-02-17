@@ -1,8 +1,9 @@
 #!/bin/bash
 set -e
 
-VERSION="0.7.5"
-RELEASE="10"
+# Single source of truth - read version from Cargo.toml and release from RELEASE file
+VERSION=$(grep '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+RELEASE=$(cat RELEASE)
 DIST="$(rpm --eval '%dist' | sed 's/^\.//' | tr -d '\n')"
 if [ -z "$DIST" ]; then
     DIST="fc40"
@@ -18,6 +19,13 @@ command -v rsync >/dev/null 2>&1 || { echo "Error: rsync not found. Please insta
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+
+# Generate spec file from template
+echo "Generating spec file from template..."
+sed -e "s/@VERSION@/$VERSION/g" \
+    -e "s/@RELEASE@/$RELEASE/g" \
+    packaging/fedora/ibus-handy.spec.in > packaging/fedora/ibus-handy.spec
+echo "Generated packaging/fedora/ibus-handy.spec"
 
 # Create source tarball
 echo "Creating source tarball..."

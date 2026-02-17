@@ -30,3 +30,6 @@ recording_*
 # RPM build
 *.rpm
 *.tar.gz
+
+# Generated files
+packaging/fedora/ibus-handy.spec

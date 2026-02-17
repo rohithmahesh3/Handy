@@ -1,11 +1,11 @@
 Name:           ibus-handy
-Version:        0.7.11
-Release:        1%{?dist}
+Version:        @VERSION@
+Release:        @RELEASE@%{?dist}
 Summary:        Speech-to-text for GNOME/Wayland via IBus
 
 License:        MIT
 URL:            https://github.com/rohithmahesh/Handy
-Source0:        ibus-handy-%{version}.tar.gz
+Source0:        ibus-handy-@VERSION@.tar.gz
 
 BuildRequires:  rustc, cargo
 BuildRequires:  pkgconfig(gtk4)
