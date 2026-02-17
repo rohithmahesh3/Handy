@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::convert::TryFrom;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
 use glib::translate::from_glib;
 use gtk4::gdk;
@@ -45,6 +45,7 @@ static TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
 static PTT_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 static HEALTH_STATE: OnceLock<Mutex<PttRuntimeHealth>> = OnceLock::new();
 static LAST_NON_HANDY_ENGINE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static FORCE_REBIND_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 type ShortcutOptions = HashMap<String, OwnedValue>;
 type PortalShortcutList = Vec<(String, ShortcutOptions)>;
@@ -215,13 +216,58 @@ pub fn start_global_shortcuts_listener() {
     });
 }
 
+pub fn request_shortcut_listener_rebind() {
+    FORCE_REBIND_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+pub fn authorize_shortcut_interactively_from_ui() -> Result<String> {
+    let active_config = ShortcutConfig::from_settings(&Settings::new());
+    let trigger = active_config
+        .trigger()
+        .map_err(|reason| anyhow!("Unsupported push-to-talk shortcut: {}", reason))?;
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("Failed to create runtime for shortcut authorization")?;
+
+    runtime.block_on(async move {
+        let connection = Connection::session().await?;
+        let portal_proxy =
+            Proxy::new(&connection, PORTAL_BUS, PORTAL_PATH, SHORTCUTS_IFACE).await?;
+
+        let session_handle = create_session(&portal_proxy, &connection).await?;
+        let operation_result = async {
+            bind_shortcut(&portal_proxy, &connection, &session_handle, &trigger).await?;
+            let effective_trigger =
+                list_shortcuts(&portal_proxy, &connection, &session_handle).await?;
+
+            match effective_trigger {
+                Some(actual) if triggers_match(&actual, &trigger) => Ok(actual),
+                Some(actual) => Err(anyhow!(
+                    "Configured '{}', but portal bound '{}'",
+                    trigger,
+                    actual
+                )),
+                None => Ok(trigger),
+            }
+        }
+        .await;
+
+        close_session(&connection, &session_handle).await;
+        operation_result
+    })
+}
+
 async fn run_listener_loop(mut active_config: ShortcutConfig) {
     loop {
         match run_shortcut_session(active_config).await {
             Ok(()) => {}
             Err(e) => {
                 warn!("Global shortcut session ended: {}", e);
-                mark_health_error("portal_session_ended", &e.to_string());
+                if should_override_health_as_session_ended() {
+                    mark_health_error("portal_session_ended", &e.to_string());
+                }
                 notify_ptt_failure(
                     "Global push-to-talk is unavailable",
                     &format!("Portal session failed: {}", e),
@@ -230,7 +276,18 @@ async fn run_listener_loop(mut active_config: ShortcutConfig) {
         }
 
         active_config = ShortcutConfig::from_settings(&Settings::new());
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        let retry_delay_ms = health_state()
+            .lock()
+            .ok()
+            .map(|health| {
+                if health.code == "portal_bind_interaction_unavailable" {
+                    10_000
+                } else {
+                    400
+                }
+            })
+            .unwrap_or(400);
+        sleep_until_retry_or_rebind(retry_delay_ms).await;
     }
 }
 
@@ -261,7 +318,12 @@ async fn run_shortcut_session(active_config: ShortcutConfig) -> Result<()> {
     }
 
     if let Err(e) = bind_shortcut(&portal_proxy, &connection, &session_handle, &trigger).await {
-        mark_health_error("portal_bind_failed", &e.to_string());
+        let health_code = if e.to_string().contains("interaction unavailable") {
+            "portal_bind_interaction_unavailable"
+        } else {
+            "portal_bind_failed"
+        };
+        mark_health_error(health_code, &e.to_string());
         notify_ptt_failure(
             "Global push-to-talk registration failed",
             "Failed to bind configured shortcut. Open Handy diagnostics.",
@@ -341,35 +403,36 @@ async fn run_shortcut_session(active_config: ShortcutConfig) -> Result<()> {
                 };
 
                 match member.as_str() {
-                    "Activated" => {
-                        let (handle, shortcut_id, _timestamp, _options): (
-                            OwnedObjectPath,
-                            String,
-                            u32,
-                            ShortcutOptions,
-                        ) = signal_msg.body().deserialize()?;
-                        if handle == session_handle && shortcut_id == SHORTCUT_ID {
-                            on_global_pressed(&mut ptt_state, &internal_tx);
+                    "Activated" => match parse_shortcut_press_signal(&signal_msg) {
+                        Ok((handle, shortcut_id)) => {
+                            if handle == session_handle && shortcut_id == SHORTCUT_ID {
+                                on_global_pressed(&mut ptt_state, &internal_tx);
+                            }
                         }
-                    }
-                    "Deactivated" => {
-                        let (handle, shortcut_id, _timestamp, _options): (
-                            OwnedObjectPath,
-                            String,
-                            u32,
-                            ShortcutOptions,
-                        ) = signal_msg.body().deserialize()?;
-                        if handle == session_handle && shortcut_id == SHORTCUT_ID {
-                            on_global_released(&mut ptt_state);
+                        Err(e) => {
+                            warn!("Ignoring malformed GlobalShortcuts Activated signal: {}", e);
                         }
-                    }
-                    "ShortcutsChanged" => {
-                        let (handle, shortcuts): (OwnedObjectPath, PortalShortcutList) =
-                            signal_msg.body().deserialize()?;
-                        if handle == session_handle {
-                            log_shortcuts_changed(shortcuts);
+                    },
+                    "Deactivated" => match parse_shortcut_press_signal(&signal_msg) {
+                        Ok((handle, shortcut_id)) => {
+                            if handle == session_handle && shortcut_id == SHORTCUT_ID {
+                                on_global_released(&mut ptt_state);
+                            }
                         }
-                    }
+                        Err(e) => {
+                            warn!("Ignoring malformed GlobalShortcuts Deactivated signal: {}", e);
+                        }
+                    },
+                    "ShortcutsChanged" => match parse_shortcuts_changed_signal(&signal_msg) {
+                        Ok((handle, shortcuts)) => {
+                            if handle == session_handle {
+                                log_shortcuts_changed(shortcuts);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Ignoring malformed GlobalShortcuts ShortcutsChanged signal: {}", e);
+                        }
+                    },
                     _ => {}
                 }
             }
@@ -830,7 +893,8 @@ async fn create_session(
         .remove("session_handle")
         .ok_or_else(|| anyhow!("CreateSession response missing session_handle"))?;
 
-    Ok(session_handle_value.try_into()?)
+    parse_owned_object_path(session_handle_value)
+        .context("CreateSession returned non-object-path session_handle")
 }
 
 async fn bind_shortcut(
@@ -959,9 +1023,10 @@ async fn await_request_response(
         .next()
         .await
         .ok_or_else(|| anyhow!("Portal request response stream ended"))?;
-    Ok(response_msg
+    response_msg
         .body()
-        .deserialize::<(u32, ShortcutOptions)>()?)
+        .deserialize::<(u32, ShortcutOptions)>()
+        .context("Failed to decode portal Request::Response body")
 }
 
 fn ensure_success_response(operation: &str, response_code: u32) -> Result<()> {
@@ -1069,6 +1134,89 @@ fn extract_trigger_description(shortcuts: &PortalShortcutList) -> Option<String>
     None
 }
 
+fn parse_shortcut_press_signal(message: &zbus::Message) -> Result<(OwnedObjectPath, String)> {
+    if let Ok((handle, shortcut_id, _timestamp, _options)) =
+        message
+            .body()
+            .deserialize::<(OwnedObjectPath, String, u32, ShortcutOptions)>()
+    {
+        return Ok((handle, shortcut_id));
+    }
+
+    if let Ok((handle, shortcut_id, _timestamp, _options)) =
+        message
+            .body()
+            .deserialize::<(OwnedObjectPath, String, u64, ShortcutOptions)>()
+    {
+        return Ok((handle, shortcut_id));
+    }
+
+    if let Ok((handle, shortcut_id, _timestamp)) = message
+        .body()
+        .deserialize::<(OwnedObjectPath, String, u32)>()
+    {
+        return Ok((handle, shortcut_id));
+    }
+
+    if let Ok((handle, shortcut_id, _timestamp)) = message
+        .body()
+        .deserialize::<(OwnedObjectPath, String, u64)>()
+    {
+        return Ok((handle, shortcut_id));
+    }
+
+    Err(anyhow!(
+        "unsupported payload for shortcut activation/deactivation signal"
+    ))
+}
+
+fn parse_shortcuts_changed_signal(
+    message: &zbus::Message,
+) -> Result<(OwnedObjectPath, PortalShortcutList)> {
+    if let Ok((handle, shortcuts)) = message
+        .body()
+        .deserialize::<(OwnedObjectPath, PortalShortcutList)>()
+    {
+        return Ok((handle, shortcuts));
+    }
+
+    let (handle, _options): (OwnedObjectPath, ShortcutOptions) = message
+        .body()
+        .deserialize()
+        .context("ShortcutsChanged payload is not supported")?;
+    Ok((handle, Vec::new()))
+}
+
+fn parse_owned_object_path(value: OwnedValue) -> Result<OwnedObjectPath> {
+    parse_owned_object_path_inner(value, 0)
+}
+
+fn parse_owned_object_path_inner(value: OwnedValue, depth: u8) -> Result<OwnedObjectPath> {
+    if depth > 6 {
+        return Err(anyhow!(
+            "session_handle variant nesting exceeded supported depth"
+        ));
+    }
+
+    if let Ok(path) = OwnedObjectPath::try_from(value.try_clone()?) {
+        return Ok(path);
+    }
+
+    if let Ok(path_string) = String::try_from(value.try_clone()?) {
+        return OwnedObjectPath::try_from(path_string)
+            .context("session_handle string is not a valid object path");
+    }
+
+    let inner: Value<'_> = Value::try_from(&value).context("session_handle has invalid value")?;
+    if let Value::Value(nested) = inner {
+        let nested_owned =
+            OwnedValue::try_from(*nested).context("failed to own nested session_handle variant")?;
+        return parse_owned_object_path_inner(nested_owned, depth + 1);
+    }
+
+    Err(anyhow!("session_handle type is not object-path compatible"))
+}
+
 fn normalize_trigger_token(token: &str) -> String {
     let upper = token.trim().to_ascii_uppercase();
     match upper.as_str() {
@@ -1104,4 +1252,27 @@ fn triggers_match(actual_trigger: &str, requested_trigger: &str) -> bool {
     let actual = normalize_trigger(actual_trigger);
     let requested = normalize_trigger(requested_trigger);
     !actual.is_empty() && actual == requested
+}
+
+fn should_override_health_as_session_ended() -> bool {
+    let Ok(health) = health_state().lock() else {
+        return true;
+    };
+
+    matches!(
+        health.code.as_str(),
+        "ok" | "initializing" | "portal_session_ended"
+    )
+}
+
+async fn sleep_until_retry_or_rebind(total_delay_ms: u64) {
+    let mut remaining = total_delay_ms;
+    while remaining > 0 {
+        if FORCE_REBIND_REQUESTED.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let step = remaining.min(200);
+        tokio::time::sleep(Duration::from_millis(step)).await;
+        remaining -= step;
+    }
 }

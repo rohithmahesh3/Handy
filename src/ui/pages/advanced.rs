@@ -8,6 +8,9 @@ use zbus::blocking::Connection;
 
 use super::Page;
 use crate::app::AppState;
+use crate::global_shortcuts::{
+    authorize_shortcut_interactively_from_ui, request_shortcut_listener_rebind,
+};
 use crate::settings::ModelUnloadTimeout;
 
 pub struct AdvancedPage {
@@ -145,6 +148,56 @@ impl AdvancedPage {
             .subtitle("If unhealthy, keep Handy daemon running and re-save push-to-talk shortcut.")
             .build();
         diagnostics_group.add(&help_row);
+
+        let authorize_row = ActionRow::builder()
+            .title("Authorize Global Shortcut")
+            .subtitle("Run interactive portal authorization from this window")
+            .build();
+        let authorize_button = gtk4::Button::with_label("Authorize Now");
+        authorize_button.add_css_class("suggested-action");
+        let status_row_for_auth = status_row.clone();
+        authorize_button.connect_clicked(move |button| {
+            button.set_sensitive(false);
+            button.set_label("Authorizing...");
+            let button_weak = button.downgrade();
+            let status_row = status_row_for_auth.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(authorize_shortcut_interactively_from_ui());
+            });
+            glib::timeout_add_local(Duration::from_millis(120), move || match rx.try_recv() {
+                Ok(result) => {
+                    match result {
+                        Ok(trigger) => {
+                            status_row.set_subtitle(&format!(
+                                "Authorization succeeded for '{}'",
+                                trigger
+                            ));
+                            request_shortcut_listener_rebind();
+                        }
+                        Err(e) => {
+                            status_row.set_subtitle(&format!("Authorization failed: {}", e));
+                        }
+                    }
+                    if let Some(button) = button_weak.upgrade() {
+                        button.set_sensitive(true);
+                        button.set_label("Authorize Now");
+                    }
+                    glib::ControlFlow::Break
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    if let Some(button) = button_weak.upgrade() {
+                        button.set_sensitive(true);
+                        button.set_label("Authorize Now");
+                    }
+                    status_row.set_subtitle("Authorization failed: worker disconnected");
+                    glib::ControlFlow::Break
+                }
+            });
+        });
+        authorize_row.add_suffix(&authorize_button);
+        diagnostics_group.add(&authorize_row);
         main_box.append(&diagnostics_group);
 
         status_row.set_subtitle(&load_ptt_diagnostics_subtitle());
