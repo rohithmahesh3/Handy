@@ -290,8 +290,20 @@ impl Settings {
         self.gio_settings.double("word-correction-threshold")
     }
 
+    pub fn set_word_correction_threshold(&self, value: f64) {
+        self.gio_settings
+            .set_double("word-correction-threshold", value)
+            .ok();
+    }
+
     pub fn always_on_microphone(&self) -> bool {
         self.gio_settings.boolean("always-on-microphone")
+    }
+
+    pub fn set_always_on_microphone(&self, value: bool) {
+        self.gio_settings
+            .set_boolean("always-on-microphone", value)
+            .ok();
     }
 
     pub fn experimental_enabled(&self) -> bool {
@@ -388,6 +400,14 @@ impl Settings {
         self.gio_settings
             .set_string("post-process-selected-prompt-id", value.unwrap_or(""))
             .ok();
+    }
+
+    pub fn connect_changed<F>(&self, key: Option<&str>, callback: F)
+    where
+        F: Fn(&str) + 'static,
+    {
+        self.gio_settings
+            .connect_changed(key, move |_, changed_key| callback(changed_key));
     }
 }
 

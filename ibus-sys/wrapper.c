@@ -196,13 +196,13 @@ int ibus_handy_init(bool ibus_mode) {
             component,
             ibus_engine_desc_new(
                 "handy",
-                "Handy Speech-to-Text",
-                "Voice dictation using Handy",
-                "en",
+                "Handy",
+                "Handy speech-to-text dictation",
+                "other",
                 "MIT",
                 "Handy Team",
                 PKGDATADIR "/icons/handy.svg",
-                "us"
+                "default"
             )
         );
 

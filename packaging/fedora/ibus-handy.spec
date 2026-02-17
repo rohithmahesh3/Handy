@@ -1,6 +1,6 @@
 Name:           ibus-handy
 Version:        0.7.5
-Release:        1%{?dist}
+Release:        5%{?dist}
 Summary:        Speech-to-text for GNOME/Wayland via IBus
 
 License:        MIT
@@ -41,9 +41,14 @@ install -Dm755 target/release/ibus-handy-engine %{buildroot}%{_libexecdir}/ibus-
 install -Dm644 packaging/fedora/handy.desktop %{buildroot}%{_datadir}/applications/handy.desktop
 install -Dm644 resources/icons/handy.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/handy.svg
 install -Dm644 resources/icons/handy.svg %{buildroot}%{_datadir}/handy/icons/handy.svg
+install -Dm644 resources/models/silero_vad_v4.onnx %{buildroot}%{_datadir}/handy/models/silero_vad_v4.onnx
+install -Dm644 resources/marimba_start.wav %{buildroot}%{_datadir}/handy/sounds/marimba_start.wav
+install -Dm644 resources/marimba_stop.wav %{buildroot}%{_datadir}/handy/sounds/marimba_stop.wav
+install -Dm644 resources/pop_start.wav %{buildroot}%{_datadir}/handy/sounds/pop_start.wav
+install -Dm644 resources/pop_stop.wav %{buildroot}%{_datadir}/handy/sounds/pop_stop.wav
 install -Dm644 packaging/fedora/com.handy.Transcription.service %{buildroot}%{_datadir}/dbus-1/services/com.handy.Transcription.service
 install -Dm644 packaging/fedora/handy.service %{buildroot}%{_userunitdir}/handy.service
-install -Dm644 packaging/fedora/handy.xml %{buildroot}%{_datadir}/ibus/component/handy.xml
+install -Dm644 packaging/fedora/handy.xml %{buildroot}%{_datadir}/ibus/component/org.freedesktop.IBus.Handy.xml
 install -Dm644 data/com.handy.Transcription.gschema.xml %{buildroot}%{_datadir}/glib-2.0/schemas/com.handy.Transcription.gschema.xml
 
 %post
@@ -64,7 +69,12 @@ glib-compile-schemas %{_datadir}/glib-2.0/schemas 2>/dev/null || :
 %{_bindir}/handy
 %{_libexecdir}/ibus-handy-engine
 %{_datadir}/handy/icons/handy.svg
-%{_datadir}/ibus/component/handy.xml
+%{_datadir}/handy/models/silero_vad_v4.onnx
+%{_datadir}/handy/sounds/marimba_start.wav
+%{_datadir}/handy/sounds/marimba_stop.wav
+%{_datadir}/handy/sounds/pop_start.wav
+%{_datadir}/handy/sounds/pop_stop.wav
+%{_datadir}/ibus/component/org.freedesktop.IBus.Handy.xml
 %{_datadir}/applications/handy.desktop
 %{_datadir}/icons/hicolor/scalable/apps/handy.svg
 %{_datadir}/dbus-1/services/com.handy.Transcription.service
@@ -72,6 +82,29 @@ glib-compile-schemas %{_datadir}/glib-2.0/schemas 2>/dev/null || :
 %{_userunitdir}/handy.service
 
 %changelog
+* Mon Feb 16 2026 Handy Team <handy@example.com> - 0.7.5-5
+- Classify Handy as a special-purpose IBus source (language=other, layout=default)
+- Improve IBus engine lifecycle handling when enabling/disabling the input source
+- Refresh model list UI state live and show real download progress/cancel action
+- Improve preferences page layout consistency using Adwaita clamps
+
+* Sun Feb 15 2026 Handy Team <handy@example.com> - 0.7.5-4
+- Add daemon mode for D-Bus/service activation (no UI popup on auto-start)
+- Install required runtime assets (Silero VAD model and feedback sounds)
+- Sync runtime managers with GSettings changes
+- Persist selected model and improve model selection consistency
+- Make IBus stop/transcribe path non-blocking
+
+* Sat Feb 14 2026 Handy Team <handy@example.com> - 0.7.5-3
+- Fix over-constrained settings pages by removing extra clamp wrappers
+- Keep full-width adaptive layout for General, Models, and Advanced pages
+
+* Fri Feb 13 2026 Handy Team <handy@example.com> - 0.7.5-2
+- Fix IBus component registration metadata
+- Install IBus component to /usr/share/ibus/component/
+- Improve Libadwaita preferences page layout and sidebar behavior
+- Reduce redundant Cargo dependencies
+
 * Sun Feb 16 2025 Handy Team <handy@example.com> - 0.7.5-1
 - Rewritten as native GTK4/Libadwaita application
 - IBus engine rewritten in Rust (no Python dependency)

@@ -14,6 +14,7 @@ impl Sidebar {
             .css_classes(["navigation-sidebar"])
             .selection_mode(SelectionMode::Single)
             .width_request(180)
+            .focusable(false)
             .vexpand(true)
             .build();
 
@@ -54,6 +55,7 @@ fn add_item(list: &ListBox, name: &str, label: &str, icon: &str) {
         .name(format!("sidebar::{}", name))
         .selectable(true)
         .activatable(true)
+        .focusable(false)
         .build();
 
     let box_ = Box::builder()

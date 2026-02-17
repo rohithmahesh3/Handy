@@ -16,6 +16,7 @@ pub struct HandyContext {
     connection: Option<Connection>,
     is_recording: bool,
     is_focused: bool,
+    is_enabled: bool,
 }
 
 impl HandyContext {
@@ -24,6 +25,7 @@ impl HandyContext {
             connection: None,
             is_recording: false,
             is_focused: false,
+            is_enabled: false,
         }
     }
 
@@ -53,7 +55,7 @@ impl HandyContext {
             return;
         }
 
-        if !self.is_recording {
+        if self.is_enabled && !self.is_recording {
             self.start_recording(engine);
         }
     }
@@ -74,12 +76,22 @@ impl HandyContext {
         }
     }
 
-    pub fn enable(&mut self, _engine: *mut IBusEngine) {
+    pub fn enable(&mut self, engine: *mut IBusEngine) {
         debug!("Engine enabled");
+        self.is_enabled = true;
+
+        if self.connection.is_none() && !self.try_connect() {
+            return;
+        }
+
+        if self.is_focused && !self.is_recording {
+            self.start_recording(engine);
+        }
     }
 
     pub fn disable(&mut self, _engine: *mut IBusEngine) {
         debug!("Engine disabled");
+        self.is_enabled = false;
         self.is_focused = false;
         if self.is_recording {
             self.cancel_recording();
@@ -141,31 +153,46 @@ impl HandyContext {
         info!("Stopping recording");
         self.is_recording = false;
 
-        let Some(conn) = &self.connection else {
+        let Some(conn) = self.connection.as_ref().cloned() else {
             return;
         };
 
-        match conn.call_method(
-            Some(HANDY_BUS_NAME),
-            HANDY_OBJECT_PATH,
-            Some(HANDY_INTERFACE),
-            "StopRecording",
-            &(),
-        ) {
-            Ok(reply) => match reply.body().deserialize::<String>() {
-                Ok(text) => {
-                    if !text.is_empty() {
-                        self.commit_text(engine, &text);
+        // Stop/transcribe can take seconds; do this off the IBus callback thread.
+        let engine_addr = engine as usize;
+        std::thread::spawn(move || {
+            let text = match conn.call_method(
+                Some(HANDY_BUS_NAME),
+                HANDY_OBJECT_PATH,
+                Some(HANDY_INTERFACE),
+                "StopRecording",
+                &(),
+            ) {
+                Ok(reply) => match reply.body().deserialize::<String>() {
+                    Ok(text) => text,
+                    Err(e) => {
+                        error!("Failed to deserialize transcription response: {}", e);
+                        String::new()
                     }
-                }
+                },
                 Err(e) => {
-                    error!("Failed to deserialize transcription response: {}", e);
+                    error!("Failed to stop recording: {}", e);
+                    String::new()
                 }
-            },
-            Err(e) => {
-                error!("Failed to stop recording: {}", e);
+            };
+
+            if text.is_empty() {
+                return;
             }
-        }
+
+            // Commit back on the GLib/IBus main context.
+            glib::MainContext::default().invoke(move || {
+                let engine_ptr = engine_addr as *mut IBusEngine;
+                if engine_ptr.is_null() {
+                    return;
+                }
+                commit_text_to_engine(engine_ptr, &text);
+            });
+        });
     }
 
     fn cancel_recording(&mut self) {
@@ -190,28 +217,25 @@ impl HandyContext {
             error!("Failed to cancel recording: {}", e);
         }
     }
+}
 
-    fn commit_text(&self, engine: *mut IBusEngine, text: &str) {
-        if text.is_empty() || engine.is_null() {
+fn commit_text_to_engine(engine: *mut IBusEngine, text: &str) {
+    let preview: String = text.chars().take(50).collect();
+    info!("Committing text: {}...", preview);
+
+    let c_text = match CString::new(text) {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to create CString: {}", e);
             return;
         }
+    };
 
-        info!("Committing text: {}...", &text[..text.len().min(50)]);
-
-        let c_text = match CString::new(text) {
-            Ok(s) => s,
-            Err(e) => {
-                error!("Failed to create CString: {}", e);
-                return;
-            }
-        };
-
-        unsafe {
-            let ibus_text = ibus_sys::ibus_text_new_from_string(c_text.as_ptr());
-            if !ibus_text.is_null() {
-                ibus_sys::ibus_engine_commit_text(engine, ibus_text);
-                g_object_unref(ibus_text as gpointer);
-            }
+    unsafe {
+        let ibus_text = ibus_sys::ibus_text_new_from_string(c_text.as_ptr());
+        if !ibus_text.is_null() {
+            ibus_sys::ibus_engine_commit_text(engine, ibus_text);
+            g_object_unref(ibus_text as gpointer);
         }
     }
 }

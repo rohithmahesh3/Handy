@@ -1,7 +1,7 @@
 use gtk4::prelude::*;
-use gtk4::{Box, Orientation};
-use libadwaita::prelude::AdwWindowExt;
-use libadwaita::{Application as AdwApplication, HeaderBar, Window, WindowTitle};
+use gtk4::{Box, Orientation, Separator};
+use libadwaita::prelude::AdwApplicationWindowExt;
+use libadwaita::{Application as AdwApplication, ApplicationWindow, HeaderBar, WindowTitle};
 use std::sync::Arc;
 
 use super::pages::Page;
@@ -9,16 +9,16 @@ use super::sidebar::Sidebar;
 use crate::app::AppState;
 
 pub struct MainWindow {
-    window: Window,
+    window: ApplicationWindow,
 }
 
 impl MainWindow {
     pub fn new(app: &AdwApplication, state: Arc<AppState>) -> Self {
-        let window = Window::builder()
+        let window = ApplicationWindow::builder()
             .application(app)
             .title("Handy")
-            .default_width(900)
-            .default_height(650)
+            .default_width(960)
+            .default_height(680)
             .build();
 
         let main_box = Box::builder().orientation(Orientation::Horizontal).build();
@@ -61,7 +61,12 @@ impl MainWindow {
 
         sidebar.connect_stack(&stack);
 
+        let separator = Separator::builder()
+            .orientation(Orientation::Vertical)
+            .build();
+
         main_box.append(sidebar.widget());
+        main_box.append(&separator);
         main_box.append(&content_box);
 
         window.set_content(Some(&main_box));
@@ -73,7 +78,7 @@ impl MainWindow {
         self.window.present();
     }
 
-    pub fn widget(&self) -> &Window {
+    pub fn widget(&self) -> &ApplicationWindow {
         &self.window
     }
 }

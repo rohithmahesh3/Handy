@@ -1,5 +1,6 @@
 use crate::audio_toolkit::{list_input_devices, vad::SmoothedVad, AudioRecorder, SileroVad};
 use log::{debug, error, info};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -119,10 +120,20 @@ impl AudioRecordingManager {
     }
 
     fn create_audio_recorder(&self) -> Result<AudioRecorder, anyhow::Error> {
-        let vad_path = std::path::PathBuf::from("/usr/share/handy/models/silero_vad_v4.onnx");
+        let vad_path = resolve_vad_model_path().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Silero VAD model not found. Expected /usr/share/handy/models/silero_vad_v4.onnx \
+or resources/models/silero_vad_v4.onnx"
+            )
+        })?;
 
-        let silero = SileroVad::new(vad_path.to_str().unwrap(), 0.3)
-            .map_err(|e| anyhow::anyhow!("Failed to create SileroVad: {}", e))?;
+        let silero = SileroVad::new(
+            vad_path
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("Silero VAD model path contains invalid UTF-8"))?,
+            0.3,
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to create SileroVad: {}", e))?;
         let smoothed_vad = SmoothedVad::new(Box::new(silero), 15, 15, 2);
 
         let recorder = AudioRecorder::new()
@@ -209,6 +220,24 @@ impl AudioRecordingManager {
 
         *self.mode.lock().unwrap() = new_mode;
         Ok(())
+    }
+
+    pub fn set_mode_from_settings(&self, always_on_microphone: bool) -> Result<(), anyhow::Error> {
+        let mode = if always_on_microphone {
+            MicrophoneMode::AlwaysOn
+        } else {
+            MicrophoneMode::OnDemand
+        };
+        self.update_mode(mode)
+    }
+
+    pub fn set_mute_while_recording(&self, value: bool) {
+        *self.mute_while_recording.lock().unwrap() = value;
+    }
+
+    pub fn set_selected_microphone(&self, value: Option<String>) -> Result<(), anyhow::Error> {
+        *self.selected_microphone.lock().unwrap() = value;
+        self.update_selected_device()
     }
 
     pub fn try_start_recording(&self, binding_id: &str) -> bool {
@@ -314,4 +343,13 @@ impl AudioRecordingManager {
             }
         }
     }
+}
+
+fn resolve_vad_model_path() -> Option<PathBuf> {
+    let candidates = [
+        PathBuf::from("/usr/share/handy/models/silero_vad_v4.onnx"),
+        PathBuf::from("resources/models/silero_vad_v4.onnx"),
+    ];
+
+    candidates.into_iter().find(|p| p.exists())
 }

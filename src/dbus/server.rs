@@ -17,7 +17,6 @@ use zbus::Connection;
 /// Shared state for the D-Bus server and handlers
 pub struct HandyState {
     pub selected_language: Mutex<String>,
-    pub always_on_microphone: AtomicBool,
     pub recording_manager: Arc<AudioRecordingManager>,
     pub transcription_manager: Arc<TranscriptionManager>,
     pub is_recording: AtomicBool,
@@ -28,11 +27,9 @@ impl HandyState {
         recording_manager: Arc<AudioRecordingManager>,
         transcription_manager: Arc<TranscriptionManager>,
         selected_language: String,
-        always_on_microphone: bool,
     ) -> Self {
         Self {
             selected_language: Mutex::new(selected_language),
-            always_on_microphone: AtomicBool::new(always_on_microphone),
             recording_manager,
             transcription_manager,
             is_recording: AtomicBool::new(false),
@@ -80,19 +77,14 @@ impl HandyTranscription {
 
         self.state.transcription_manager.initiate_model_load();
 
-        let is_always_on = self.state.always_on_microphone.load(Ordering::SeqCst);
-        let recording_started = if is_always_on {
-            self.state.recording_manager.try_start_recording("ibus")
-        } else if self.state.recording_manager.try_start_recording("ibus") {
+        let recording_started = self.state.recording_manager.try_start_recording("ibus");
+        if recording_started {
             let rm = self.state.recording_manager.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
                 rm.apply_mute();
                 glib::ControlFlow::Break
             });
-            true
-        } else {
-            false
-        };
+        }
 
         if recording_started {
             self.state.is_recording.store(true, Ordering::SeqCst);
@@ -183,7 +175,12 @@ impl HandyTranscription {
 
     /// Set the language for transcription
     async fn set_language(&self, language: String) -> fdo::Result<()> {
-        *self.state.selected_language.lock().unwrap() = language;
+        *self.state.selected_language.lock().unwrap() = language.clone();
+        let settings = crate::settings::Settings::new();
+        settings.set_selected_language(&language);
+        self.state
+            .transcription_manager
+            .refresh_config_from_settings(&settings);
         Ok(())
     }
 

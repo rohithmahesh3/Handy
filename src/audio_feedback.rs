@@ -15,19 +15,25 @@ fn get_sound_path(settings: &Settings, sound_type: SoundType) -> PathBuf {
     let filename = match (settings.sound_theme(), sound_type) {
         (SoundTheme::Custom, SoundType::Start) => "custom_start.wav",
         (SoundTheme::Custom, SoundType::Stop) => "custom_stop.wav",
-        (_, SoundType::Start) => "marimba_start.wav",
-        (_, SoundType::Stop) => "marimba_stop.wav",
+        (SoundTheme::Pop, SoundType::Start) => "pop_start.wav",
+        (SoundTheme::Pop, SoundType::Stop) => "pop_stop.wav",
+        (SoundTheme::Marimba, SoundType::Start) => "marimba_start.wav",
+        (SoundTheme::Marimba, SoundType::Stop) => "marimba_stop.wav",
     };
 
-    let data_dir = std::env::var("XDG_DATA_HOME")
-        .map(|p| PathBuf::from(p).join("handy").join("sounds"))
-        .unwrap_or_else(|_| PathBuf::from("/usr/share/handy/sounds"));
-
     if settings.sound_theme() == SoundTheme::Custom {
-        data_dir.join(filename)
-    } else {
-        PathBuf::from("/usr/share/handy/sounds").join(filename)
+        let data_dir = std::env::var("XDG_DATA_HOME")
+            .map(|p| PathBuf::from(p).join("handy").join("sounds"))
+            .unwrap_or_else(|_| PathBuf::from("/usr/share/handy/sounds"));
+        return data_dir.join(filename);
     }
+
+    let system_path = PathBuf::from("/usr/share/handy/sounds").join(filename);
+    if system_path.exists() {
+        return system_path;
+    }
+
+    PathBuf::from("resources").join(filename)
 }
 
 pub fn play_feedback_sound(settings: &Settings, sound_type: SoundType) {

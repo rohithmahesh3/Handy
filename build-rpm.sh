@@ -2,15 +2,18 @@
 set -e
 
 VERSION="0.7.5"
-RELEASE="1"
-DIST="fc40"
+RELEASE="5"
+DIST="$(rpm --eval '%dist' | sed 's/^\.//' | tr -d '\n')"
+if [ -z "$DIST" ]; then
+    DIST="fc40"
+fi
 
 echo "=== Building ibus-handy ${VERSION}-${RELEASE}.${DIST} ==="
 
 # Check for required commands
 command -v cargo >/dev/null 2>&1 || { echo "Error: cargo not found. Please install Rust."; exit 1; }
-command -v meson >/dev/null 2>&1 || { echo "Error: meson not found. Please install meson."; exit 1; }
 command -v rpmbuild >/dev/null 2>&1 || { echo "Error: rpmbuild not found. Please install rpm-build."; exit 1; }
+command -v rsync >/dev/null 2>&1 || { echo "Error: rsync not found. Please install rsync."; exit 1; }
 
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,7 +22,18 @@ cd "$SCRIPT_DIR"
 # Create source tarball
 echo "Creating source tarball..."
 TARBALL="ibus-handy-${VERSION}.tar.gz"
-git archive --format=tar.gz --prefix=ibus-handy-${VERSION}/ HEAD > "$TARBALL"
+STAGE_DIR="$(mktemp -d)"
+mkdir -p "${STAGE_DIR}/ibus-handy-${VERSION}"
+rsync -a \
+    --exclude='.git' \
+    --exclude='target' \
+    --exclude='x86_64' \
+    --exclude='*.rpm' \
+    --exclude='*.src.rpm' \
+    --exclude='ibus-handy-*.tar.gz' \
+    ./ "${STAGE_DIR}/ibus-handy-${VERSION}/"
+tar -C "${STAGE_DIR}" -czf "$TARBALL" "ibus-handy-${VERSION}"
+rm -rf "${STAGE_DIR}"
 echo "Created $TARBALL"
 
 # Build SRPM

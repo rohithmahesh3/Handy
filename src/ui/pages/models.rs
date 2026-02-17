@@ -2,8 +2,8 @@ use gtk4::prelude::*;
 use gtk4::{
     Box, Button, Image, Label, Orientation, PolicyType, ProgressBar, ScrolledWindow, Widget,
 };
-use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt, PreferencesPageExt};
-use libadwaita::{ActionRow, Clamp, PreferencesGroup, PreferencesPage, ToastOverlay};
+use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt};
+use libadwaita::{ActionRow, Clamp, PreferencesGroup, ToastOverlay};
 use std::sync::Arc;
 
 use super::Page;
@@ -18,31 +18,28 @@ impl ModelsPage {
     pub fn new(state: &Arc<AppState>) -> Self {
         let toast_overlay = ToastOverlay::new();
 
-        let page = PreferencesPage::new();
-
-        let clamp = Clamp::builder()
-            .maximum_size(900)
-            .tightening_threshold(700)
+        let main_box = Box::builder()
+            .orientation(Orientation::Vertical)
+            .spacing(12)
+            .hexpand(true)
+            .vexpand(true)
             .build();
-        clamp.set_margin_top(24);
-        clamp.set_margin_bottom(24);
-        clamp.set_margin_start(24);
-        clamp.set_margin_end(24);
+        main_box.set_margin_top(24);
+        main_box.set_margin_bottom(24);
+        main_box.set_margin_start(24);
+        main_box.set_margin_end(24);
 
         let models_group = PreferencesGroup::builder()
             .title("Available Models")
             .description("Download and select transcription models")
             .build();
-
-        let models = state.model_manager.get_available_models();
-        let selected_model = state.settings.selected_model();
-
-        for model in models {
-            let row = create_model_row(&model, &selected_model, state, &toast_overlay);
-            models_group.add(&row);
-        }
-
-        page.add(&models_group);
+        let models_rows = Box::builder()
+            .orientation(Orientation::Vertical)
+            .spacing(0)
+            .build();
+        models_group.add(&models_rows);
+        populate_models_rows(&models_rows, state);
+        main_box.append(&models_group);
 
         let custom_group = PreferencesGroup::builder()
             .title("Custom Models")
@@ -57,26 +54,63 @@ impl ModelsPage {
             .build();
         custom_group.add(&info_label);
 
-        page.add(&custom_group);
+        main_box.append(&custom_group);
+        toast_overlay.set_child(Some(&main_box));
 
-        clamp.set_child(Some(&page));
-        toast_overlay.set_child(Some(&clamp));
+        {
+            let models_rows = models_rows.clone();
+            let state = state.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(700), move || {
+                populate_models_rows(&models_rows, &state);
+                glib::ControlFlow::Continue
+            });
+        }
+
+        let clamp = Clamp::builder()
+            .maximum_size(900)
+            .tightening_threshold(600)
+            .child(&toast_overlay)
+            .build();
 
         let container = ScrolledWindow::builder()
             .hscrollbar_policy(PolicyType::Never)
-            .child(&toast_overlay)
+            .child(&clamp)
             .build();
 
         Self { container }
     }
 }
 
-fn create_model_row(
-    model: &ModelInfo,
-    selected_model: &str,
-    state: &Arc<AppState>,
-    _toast_overlay: &ToastOverlay,
-) -> ActionRow {
+fn clear_rows(rows_box: &Box) {
+    while let Some(child) = rows_box.first_child() {
+        rows_box.remove(&child);
+    }
+}
+
+fn sorted_models(state: &Arc<AppState>) -> Vec<ModelInfo> {
+    let mut models = state.model_manager.get_available_models();
+    models.sort_by(|a, b| {
+        b.is_recommended
+            .cmp(&a.is_recommended)
+            .then_with(|| b.is_downloaded.cmp(&a.is_downloaded))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    models
+}
+
+fn populate_models_rows(rows_box: &Box, state: &Arc<AppState>) {
+    clear_rows(rows_box);
+
+    let models = sorted_models(state);
+    let selected_model = state.model_manager.get_current_model();
+
+    for model in models {
+        let row = create_model_row(&model, &selected_model, state);
+        rows_box.append(&row);
+    }
+}
+
+fn create_model_row(model: &ModelInfo, selected_model: &str, state: &Arc<AppState>) -> ActionRow {
     let row = ActionRow::builder()
         .title(&model.name)
         .subtitle(&model.description)
@@ -136,13 +170,34 @@ fn create_model_row(
             state_box.append(&delete_btn);
         }
     } else if model.is_downloading {
+        let total_bytes = model.size_mb.saturating_mul(1024 * 1024);
+        let fraction = if total_bytes == 0 {
+            0.0
+        } else {
+            (model.partial_size as f64 / total_bytes as f64).clamp(0.0, 1.0)
+        };
+        let progress_text = format!("{:.0}%", fraction * 100.0);
+
         let progress = ProgressBar::builder()
-            .fraction(0.5)
+            .fraction(fraction)
             .show_text(true)
-            .text("Downloading...")
-            .width_request(100)
+            .text(&progress_text)
+            .width_request(120)
             .build();
         state_box.append(&progress);
+
+        let cancel_btn = Button::builder()
+            .label("Cancel")
+            .css_classes(["pill"])
+            .build();
+        let model_id = model.id.clone();
+        let state_clone = state.clone();
+        cancel_btn.connect_clicked(move |_| {
+            if let Err(e) = state_clone.model_manager.cancel_download(&model_id) {
+                log::error!("Failed to cancel download: {}", e);
+            }
+        });
+        state_box.append(&cancel_btn);
     } else if model.url.is_some() {
         let download_btn = Button::builder()
             .label("Download")

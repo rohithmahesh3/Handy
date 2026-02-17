@@ -411,6 +411,12 @@ impl TranscriptionManager {
         Ok(text)
     }
 
+    pub fn refresh_config_from_settings(&self, settings: &Settings) {
+        let updated = TranscriptionConfig::from_settings(settings);
+        let mut config = self.shared.config.lock().unwrap();
+        *config = updated;
+    }
+
     pub fn get_model_load_status(&self) -> (bool, bool, Option<String>) {
         let is_loading = *self.shared.is_loading.lock().unwrap();
         let is_loaded = self.is_model_loaded();

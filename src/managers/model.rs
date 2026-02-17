@@ -291,15 +291,32 @@ impl ModelManager {
 
     fn auto_select_model_if_needed(&self) -> Result<()> {
         let selected = self.selected_model.lock().unwrap().clone();
+        let models = self.available_models.lock().unwrap();
 
-        if selected.is_empty() {
-            let models = self.available_models.lock().unwrap();
-            if let Some(available_model) = models.values().find(|model| model.is_downloaded) {
-                let model_id = available_model.id.clone();
-                info!("Auto-selecting model: {}", model_id);
-                drop(models);
-                *self.selected_model.lock().unwrap() = model_id;
-            }
+        let is_valid_selected = !selected.is_empty()
+            && models
+                .get(&selected)
+                .map(|m| m.is_downloaded)
+                .unwrap_or(false);
+
+        if is_valid_selected {
+            return Ok(());
+        }
+
+        let fallback = models
+            .values()
+            .find(|m| m.is_downloaded && m.is_recommended)
+            .or_else(|| models.values().find(|m| m.is_downloaded))
+            .map(|m| m.id.clone());
+        drop(models);
+
+        if let Some(model_id) = fallback {
+            info!("Auto-selecting model: {}", model_id);
+            *self.selected_model.lock().unwrap() = model_id.clone();
+            crate::settings::Settings::new().set_selected_model(&model_id);
+        } else {
+            *self.selected_model.lock().unwrap() = String::new();
+            crate::settings::Settings::new().set_selected_model("");
         }
 
         Ok(())
@@ -498,6 +515,11 @@ impl ModelManager {
             let chunk = chunk?;
             file.write_all(&chunk)?;
             _downloaded += chunk.len() as u64;
+            if let Ok(mut models) = self.available_models.lock() {
+                if let Some(model) = models.get_mut(model_id) {
+                    model.partial_size = _downloaded;
+                }
+            }
         }
 
         drop(file);
@@ -521,6 +543,8 @@ impl ModelManager {
                 model.partial_size = 0;
             }
         }
+
+        self.auto_select_model_if_needed()?;
 
         info!("Model {} downloaded successfully", model_id);
         Ok(())
@@ -603,6 +627,7 @@ impl ModelManager {
             if *selected == model_id {
                 drop(selected);
                 *self.selected_model.lock().unwrap() = String::new();
+                crate::settings::Settings::new().set_selected_model("");
             }
         }
 
@@ -611,12 +636,40 @@ impl ModelManager {
 
     pub fn set_active_model(&self, model_id: &str) -> Result<()> {
         let models = self.available_models.lock().unwrap();
-        if models.contains_key(model_id) {
+        if let Some(model) = models.get(model_id) {
+            if !model.is_downloaded {
+                return Err(anyhow::anyhow!("Model not downloaded: {}", model_id));
+            }
             drop(models);
             *self.selected_model.lock().unwrap() = model_id.to_string();
+            crate::settings::Settings::new().set_selected_model(model_id);
             info!("Active model set to: {}", model_id);
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Model not found: {}", model_id))
         }
-        Ok(())
+    }
+
+    pub fn sync_selected_model_from_settings(&self) -> Result<()> {
+        let selected = crate::settings::Settings::new().selected_model();
+        let models = self.available_models.lock().unwrap();
+
+        if selected.is_empty() {
+            drop(models);
+            *self.selected_model.lock().unwrap() = String::new();
+            return Ok(());
+        }
+
+        if let Some(model) = models.get(&selected) {
+            if model.is_downloaded {
+                drop(models);
+                *self.selected_model.lock().unwrap() = selected;
+                return Ok(());
+            }
+        }
+
+        drop(models);
+        self.auto_select_model_if_needed()
     }
 
     pub fn get_current_model(&self) -> String {

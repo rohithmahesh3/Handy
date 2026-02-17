@@ -1,7 +1,7 @@
 use gtk4::prelude::*;
-use gtk4::{ComboBoxText, PolicyType, ScrolledWindow, Switch, Widget};
-use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt, PreferencesPageExt};
-use libadwaita::{ActionRow, Clamp, PreferencesGroup, PreferencesPage};
+use gtk4::{Box, ComboBoxText, Orientation, PolicyType, ScrolledWindow, Switch, Widget};
+use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt};
+use libadwaita::{ActionRow, Clamp, PreferencesGroup};
 use std::sync::Arc;
 
 use super::Page;
@@ -14,79 +14,16 @@ pub struct AdvancedPage {
 
 impl AdvancedPage {
     pub fn new(state: &Arc<AppState>) -> Self {
-        let page = PreferencesPage::new();
-
-        let clamp = Clamp::builder()
-            .maximum_size(900)
-            .tightening_threshold(700)
+        let main_box = Box::builder()
+            .orientation(Orientation::Vertical)
+            .spacing(12)
+            .hexpand(true)
+            .vexpand(true)
             .build();
-        clamp.set_margin_top(24);
-        clamp.set_margin_bottom(24);
-        clamp.set_margin_start(24);
-        clamp.set_margin_end(24);
-
-        let language_group = PreferencesGroup::builder().title("Language").build();
-
-        let language_row = ActionRow::builder()
-            .title("Transcription Language")
-            .subtitle("Language for transcription (auto = detect)")
-            .build();
-
-        let language_combo = ComboBoxText::new();
-        let languages = [
-            ("auto", "Auto Detect"),
-            ("en", "English"),
-            ("zh", "Chinese"),
-            ("zh-Hans", "Chinese (Simplified)"),
-            ("zh-Hant", "Chinese (Traditional)"),
-            ("de", "German"),
-            ("es", "Spanish"),
-            ("fr", "French"),
-            ("ja", "Japanese"),
-            ("ko", "Korean"),
-            ("pt", "Portuguese"),
-            ("ru", "Russian"),
-            ("it", "Italian"),
-        ];
-
-        let selected_lang = state.settings.selected_language();
-        let mut selected_index = 0;
-        for (i, (code, name)) in languages.iter().enumerate() {
-            language_combo.append(Some(code), name);
-            if *code == selected_lang {
-                selected_index = i as u32;
-            }
-        }
-        language_combo.set_active(Some(selected_index));
-
-        let state_clone = state.clone();
-        language_combo.connect_changed(move |combo| {
-            if let Some(active) = combo.active_id() {
-                state_clone.settings.set_selected_language(&active);
-            }
-        });
-        language_row.add_suffix(&language_combo);
-        language_group.add(&language_row);
-
-        let translate_row = ActionRow::builder()
-            .title("Translate to English")
-            .subtitle("Translate non-English speech to English")
-            .build();
-
-        let translate_switch = Switch::builder()
-            .active(state.settings.translate_to_english())
-            .build();
-
-        let state_clone = state.clone();
-        translate_switch.connect_active_notify(move |switch| {
-            state_clone
-                .settings
-                .set_translate_to_english(switch.is_active());
-        });
-        translate_row.add_suffix(&translate_switch);
-        language_group.add(&translate_row);
-
-        page.add(&language_group);
+        main_box.set_margin_top(24);
+        main_box.set_margin_bottom(24);
+        main_box.set_margin_start(24);
+        main_box.set_margin_end(24);
 
         let model_group = PreferencesGroup::builder().title("Model").build();
 
@@ -130,9 +67,10 @@ impl AdvancedPage {
             }
         });
         timeout_row.add_suffix(&timeout_combo);
+        timeout_row.set_activatable_widget(Some(&timeout_combo));
         model_group.add(&timeout_row);
 
-        page.add(&model_group);
+        main_box.append(&model_group);
 
         let debug_group = PreferencesGroup::builder().title("Debug").build();
 
@@ -150,6 +88,7 @@ impl AdvancedPage {
             state_clone.settings.set_debug_mode(switch.is_active());
         });
         debug_row.add_suffix(&debug_switch);
+        debug_row.set_activatable_widget(Some(&debug_switch));
         debug_group.add(&debug_row);
 
         let experimental_row = ActionRow::builder()
@@ -168,15 +107,21 @@ impl AdvancedPage {
                 .set_experimental_enabled(switch.is_active());
         });
         experimental_row.add_suffix(&experimental_switch);
+        experimental_row.set_activatable_widget(Some(&experimental_switch));
         debug_group.add(&experimental_row);
 
-        page.add(&debug_group);
+        main_box.append(&debug_group);
+
+        let clamp = Clamp::builder()
+            .maximum_size(900)
+            .tightening_threshold(600)
+            .child(&main_box)
+            .build();
 
         let container = ScrolledWindow::builder()
             .hscrollbar_policy(PolicyType::Never)
             .child(&clamp)
             .build();
-        clamp.set_child(Some(&page));
 
         Self { container }
     }

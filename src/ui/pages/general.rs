@@ -1,7 +1,9 @@
 use gtk4::prelude::*;
-use gtk4::{Adjustment, ComboBoxText, PolicyType, Scale, ScrolledWindow, Switch, Widget};
-use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt, PreferencesPageExt};
-use libadwaita::{ActionRow, Clamp, PreferencesGroup, PreferencesPage};
+use gtk4::{
+    Adjustment, Box, ComboBoxText, Orientation, PolicyType, Scale, ScrolledWindow, Switch, Widget,
+};
+use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt};
+use libadwaita::{ActionRow, Clamp, PreferencesGroup};
 use std::sync::Arc;
 
 use super::Page;
@@ -17,16 +19,16 @@ impl GeneralPage {
             .hscrollbar_policy(PolicyType::Never)
             .build();
 
-        let clamp = Clamp::builder()
-            .maximum_size(900)
-            .tightening_threshold(700)
+        let vbox = Box::builder()
+            .orientation(Orientation::Vertical)
+            .spacing(24)
+            .hexpand(true)
+            .vexpand(true)
             .build();
-        clamp.set_margin_top(24);
-        clamp.set_margin_bottom(24);
-        clamp.set_margin_start(24);
-        clamp.set_margin_end(24);
-
-        let page = PreferencesPage::new();
+        vbox.set_margin_top(24);
+        vbox.set_margin_bottom(24);
+        vbox.set_margin_start(24);
+        vbox.set_margin_end(24);
 
         let recording_group = PreferencesGroup::builder()
             .title("Recording")
@@ -41,6 +43,7 @@ impl GeneralPage {
             .active(state.settings.mute_while_recording())
             .build();
         mute_row.add_suffix(&mute_switch);
+        mute_row.set_activatable_widget(Some(&mute_switch));
         mute_switch.connect_active_notify({
             let settings = state.settings.clone();
             move |switch| {
@@ -49,7 +52,7 @@ impl GeneralPage {
         });
         recording_group.add(&mute_row);
 
-        page.add(&recording_group);
+        vbox.append(&recording_group);
 
         let audio_feedback_group = PreferencesGroup::builder().title("Audio Feedback").build();
 
@@ -61,6 +64,7 @@ impl GeneralPage {
             .active(state.settings.audio_feedback())
             .build();
         feedback_row.add_suffix(&feedback_switch);
+        feedback_row.set_activatable_widget(Some(&feedback_switch));
         feedback_switch.connect_active_notify({
             let settings = state.settings.clone();
             move |switch| {
@@ -81,10 +85,16 @@ impl GeneralPage {
             ))
             .hexpand(true)
             .build();
+        volume_scale.connect_value_changed({
+            let settings = state.settings.clone();
+            move |scale| {
+                settings.set_audio_feedback_volume(scale.value() as f32);
+            }
+        });
         volume_row.add_suffix(&volume_scale);
         audio_feedback_group.add(&volume_row);
 
-        page.add(&audio_feedback_group);
+        vbox.append(&audio_feedback_group);
 
         let language_group = PreferencesGroup::builder().title("Language").build();
 
@@ -126,6 +136,7 @@ impl GeneralPage {
                 state_clone.settings.set_selected_language(&active);
             }
         });
+        lang_row.set_activatable_widget(Some(&language_combo));
         lang_row.add_suffix(&language_combo);
         language_group.add(&lang_row);
 
@@ -137,6 +148,7 @@ impl GeneralPage {
             .active(state.settings.translate_to_english())
             .build();
         translate_row.add_suffix(&translate_switch);
+        translate_row.set_activatable_widget(Some(&translate_switch));
         translate_switch.connect_active_notify({
             let settings = state.settings.clone();
             move |switch| {
@@ -145,9 +157,14 @@ impl GeneralPage {
         });
         language_group.add(&translate_row);
 
-        page.add(&language_group);
+        vbox.append(&language_group);
 
-        clamp.set_child(Some(&page));
+        let clamp = Clamp::builder()
+            .maximum_size(900)
+            .tightening_threshold(600)
+            .build();
+        clamp.set_child(Some(&vbox));
+
         container.set_child(Some(&clamp));
 
         Self { container }

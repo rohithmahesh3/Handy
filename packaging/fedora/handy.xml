@@ -11,15 +11,15 @@
     <engines>
         <engine>
             <name>handy</name>
-            <language>en</language>
+            <language>other</language>
             <license>MIT</license>
             <author>Handy Team</author>
             <icon>/usr/share/handy/icons/handy.svg</icon>
-            <layout>us</layout>
+            <layout>default</layout>
             <symbol>H</symbol>
             <setup>/usr/bin/handy</setup>
-            <longname>Handy Speech-to-Text</longname>
-            <description>Voice dictation using Handy</description>
+            <longname>Handy</longname>
+            <description>Handy speech-to-text dictation</description>
             <rank>80</rank>
         </engine>
     </engines>
