@@ -34,6 +34,11 @@ pub struct HandyState {
     partial_session_id: AtomicU64,
     partial_cancel: Mutex<Option<Arc<AtomicBool>>>,
     session_counter: AtomicU64,
+    /// Cached transcription text from the last StopRecording call.
+    /// When the daemon finishes transcription before the engine process calls
+    /// StopRecording (deferred stop-and-restore pattern), the engine process's
+    /// subsequent StopRecording retrieves this cached text for commit.
+    last_transcription_cache: Mutex<Option<String>>,
 }
 
 impl HandyState {
@@ -52,6 +57,7 @@ impl HandyState {
             partial_session_id: AtomicU64::new(0),
             partial_cancel: Mutex::new(None),
             session_counter: AtomicU64::new(1),
+            last_transcription_cache: Mutex::new(None),
         }
     }
 
@@ -409,6 +415,10 @@ impl HandyTranscription {
                         };
 
                     self.state.clear_partial_state();
+                    // Cache transcription for engine process's subsequent stop_and_commit
+                    if let Ok(mut cache) = self.state.last_transcription_cache.lock() {
+                        *cache = Some(output_text.clone());
+                    }
                     self.emit_transcription_ready(&output_text).await?;
                     Ok(output_text)
                 }
@@ -421,9 +431,19 @@ impl HandyTranscription {
                 }
             }
         } else {
-            warn!("D-Bus: No samples retrieved from recording stop");
+            // Recording already stopped — return cached text from previous stop
+            let cached = self
+                .state
+                .last_transcription_cache
+                .lock()
+                .ok()
+                .and_then(|mut c| c.take())
+                .unwrap_or_default();
+            if !cached.is_empty() {
+                debug!("D-Bus: Returning cached transcription text");
+            }
             self.state.clear_partial_state();
-            Ok(String::new())
+            Ok(cached)
         }
     }
 

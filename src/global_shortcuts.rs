@@ -596,13 +596,7 @@ fn on_global_released(ptt_state: &mut PttState) {
                 "[ptt:{}] Released before recording confirmation",
                 current_session
             );
-            if let Some(engine_name) = restore_engine.as_deref() {
-                if restore_engine_for_session(current_session, engine_name, "pending release")
-                    .is_err()
-                {
-                    spawn_cancel_recording(current_session, "failed restore after early release");
-                }
-            }
+            // Don't restore engine yet — mark early release, handled in on_start_recording_result
             *released_early = true;
         }
         PttState::Recording {
@@ -611,15 +605,11 @@ fn on_global_released(ptt_state: &mut PttState) {
         } => {
             let current_session = *session_id;
             info!("[ptt:{}] Released", current_session);
-            if let Some(engine_name) = restore_engine.as_deref() {
-                if restore_engine_for_session(current_session, engine_name, "release").is_err() {
-                    spawn_cancel_recording(current_session, "failed restore on release");
-                } else {
-                    spawn_release_watchdog(current_session);
-                }
-            } else {
-                spawn_release_watchdog(current_session);
-            }
+            let restore = restore_engine.clone();
+            // Defer engine restore until after StopRecording completes.
+            // This keeps the Handy IBus engine active while the daemon
+            // transcribes audio, so context.rs can still commit text.
+            spawn_deferred_stop_and_restore(current_session, restore);
             *ptt_state = PttState::Idle;
         }
     }
@@ -650,21 +640,9 @@ fn on_start_recording_result(
                         "[ptt:{}] Start completed after key release; cancelling stale recording",
                         session_id
                     );
-                    if let Some(engine_name) = restore_engine.as_deref() {
-                        if restore_engine_for_session(
-                            session_id,
-                            engine_name,
-                            "late start after release",
-                        )
-                        .is_err()
-                        {
-                            warn!(
-                                "[ptt:{}] Source restore still failing after late start",
-                                session_id
-                            );
-                        }
-                    }
-                    spawn_cancel_recording(session_id, "late start after release");
+                    let restore = restore_engine.clone();
+                    // Cancel recording and defer engine restore
+                    spawn_deferred_cancel_and_restore(session_id, restore);
                     *ptt_state = PttState::Idle;
                 } else {
                     info!("[ptt:{}] Recording started", session_id);
@@ -682,12 +660,8 @@ fn on_start_recording_result(
                     "Cannot start recording",
                     "Handy failed to start recording for push-to-talk.",
                 );
-                if let Some(engine_name) = restore_engine.as_deref() {
-                    if restore_engine_for_session(session_id, engine_name, "start failure").is_err()
-                    {
-                        spawn_cancel_recording(session_id, "start failure + restore failure");
-                    }
-                }
+                let restore = restore_engine.clone();
+                spawn_deferred_cancel_and_restore(session_id, restore);
                 *ptt_state = PttState::Idle;
             }
         },
@@ -716,23 +690,17 @@ fn cleanup_state(ptt_state: &mut PttState) {
             restore_engine,
             ..
         } => {
-            if let Some(engine_name) = restore_engine.as_deref() {
-                if restore_engine_for_session(*session_id, engine_name, "session cleanup").is_err()
-                {
-                    spawn_cancel_recording(*session_id, "cleanup restore failure");
-                }
-            }
+            let sid = *session_id;
+            let restore = restore_engine.clone();
+            spawn_deferred_cancel_and_restore(sid, restore);
         }
         PttState::Recording {
             session_id,
             restore_engine,
         } => {
-            if let Some(engine_name) = restore_engine.as_deref() {
-                if restore_engine_for_session(*session_id, engine_name, "session cleanup").is_err()
-                {
-                    spawn_cancel_recording(*session_id, "cleanup restore failure");
-                }
-            }
+            let sid = *session_id;
+            let restore = restore_engine.clone();
+            spawn_deferred_stop_and_restore(sid, restore);
         }
     }
 
@@ -809,6 +777,76 @@ fn spawn_release_watchdog(session_id: u64) {
                 debug!(
                     "[ptt:{}] Failed to read recording state during release watchdog: {}",
                     session_id, e
+                );
+            }
+        }
+    });
+}
+
+/// Stop recording via D-Bus (blocks until transcription completes), then restore
+/// the previous engine. This keeps the Handy IBus engine active during the full
+/// transcription cycle so `context.rs:disable()` can still commit text.
+fn spawn_deferred_stop_and_restore(session_id: u64, restore_engine: Option<String>) {
+    std::thread::spawn(move || {
+        // 1. Stop recording — blocks while the daemon transcribes
+        match call_handy_method_no_args("StopRecording") {
+            Ok(()) => {
+                info!(
+                    "[ptt:{}] StopRecording completed, proceeding to restore",
+                    session_id
+                );
+                mark_health_success();
+            }
+            Err(e) => {
+                warn!("[ptt:{}] StopRecording failed: {}", session_id, e);
+            }
+        }
+
+        // 2. NOW restore the engine — triggers disable() in the engine process.
+        //    By this point the daemon has finished transcription and cached the
+        //    result, so context.rs:stop_and_commit() can retrieve and commit it.
+        if let Some(engine_name) = restore_engine.as_deref() {
+            if let Err(e) = set_global_engine(engine_name) {
+                warn!(
+                    "[ptt:{}] Failed to restore engine '{}': {}",
+                    session_id, engine_name, e
+                );
+                mark_health_error("ibus_restore_engine_failed", &e.to_string());
+            } else {
+                info!(
+                    "[ptt:{}] Restored engine '{}'",
+                    session_id, engine_name
+                );
+            }
+        }
+    });
+}
+
+/// Cancel recording, then restore the previous engine (deferred, non-blocking).
+fn spawn_deferred_cancel_and_restore(session_id: u64, restore_engine: Option<String>) {
+    std::thread::spawn(move || {
+        match call_handy_method_no_args("CancelRecording") {
+            Ok(()) => {
+                info!("[ptt:{}] Cancelled recording (deferred)", session_id);
+            }
+            Err(e) => {
+                warn!(
+                    "[ptt:{}] Failed to cancel recording (deferred): {}",
+                    session_id, e
+                );
+            }
+        }
+
+        if let Some(engine_name) = restore_engine.as_deref() {
+            if let Err(e) = set_global_engine(engine_name) {
+                warn!(
+                    "[ptt:{}] Failed to restore engine '{}' after cancel: {}",
+                    session_id, engine_name, e
+                );
+            } else {
+                info!(
+                    "[ptt:{}] Restored engine '{}' after cancel",
+                    session_id, engine_name
                 );
             }
         }

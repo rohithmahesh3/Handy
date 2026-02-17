@@ -292,7 +292,8 @@ impl HandyContext {
     pub fn disable(&mut self, engine: *mut IBusEngine) {
         debug!("Engine disabled");
         self.stop_live_partial_listener();
-        self.stop_and_commit(engine, None, true);
+        let restore = self.last_non_handy_engine.clone();
+        self.stop_and_commit(engine, restore, true);
         self.is_enabled = false;
         self.is_focused = false;
         self.ptt_pressed = false;
