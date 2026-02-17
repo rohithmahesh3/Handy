@@ -102,8 +102,8 @@ impl TranscriptionManager {
                     let timeout_seconds = timeout.to_seconds();
 
                     if let Some(limit_seconds) = timeout_seconds {
-                        if timeout == ModelUnloadTimeout::Immediately {
-                            continue;
+                        if limit_seconds == 0 {
+                            continue; // Handled by maybe_unload_immediately()
                         }
 
                         let last = shared_clone.last_activity.load(Ordering::Relaxed);
@@ -113,12 +113,11 @@ impl TranscriptionManager {
                             .as_millis() as u64;
 
                         if now_ms.saturating_sub(last) > limit_seconds * 1000 {
-                            let engine = shared_clone.engine.lock().unwrap();
+                            let mut engine = shared_clone.engine.lock().unwrap();
                             if engine.is_some() {
-                                drop(engine);
                                 debug!("Unloading model due to inactivity");
-                                let mut engine = shared_clone.engine.lock().unwrap();
                                 *engine = None;
+                                drop(engine);
                                 *shared_clone.current_model_id.lock().unwrap() = None;
                             }
                         }

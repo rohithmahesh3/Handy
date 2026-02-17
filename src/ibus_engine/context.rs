@@ -216,6 +216,12 @@ impl HandyContext {
             return;
         };
 
+        // Prevent use-after-free: ref the GObject so IBus can't destroy it
+        // while our background thread is working.
+        unsafe {
+            ibus_sys::g_object_ref(engine as gpointer);
+        }
+
         // Stop/transcribe can take seconds; do this off the IBus callback thread.
         let engine_addr = engine as usize;
         std::thread::spawn(move || {
@@ -240,16 +246,19 @@ impl HandyContext {
             };
 
             if text.is_empty() {
+                unsafe {
+                    g_object_unref(engine_addr as gpointer);
+                }
                 return;
             }
 
             // Commit back on the GLib/IBus main context.
             glib::MainContext::default().invoke(move || {
                 let engine_ptr = engine_addr as *mut IBusEngine;
-                if engine_ptr.is_null() {
-                    return;
-                }
                 commit_text_to_engine(engine_ptr, &text);
+                unsafe {
+                    g_object_unref(engine_ptr as gpointer);
+                }
             });
         });
     }

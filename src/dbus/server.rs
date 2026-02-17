@@ -150,7 +150,6 @@ impl HandyTranscription {
     async fn cancel_recording(&self) -> fdo::Result<()> {
         debug!("D-Bus: CancelRecording called");
 
-        self.state.recording_manager.remove_mute();
         self.state.recording_manager.cancel_recording();
 
         self.state.is_recording.store(false, Ordering::SeqCst);

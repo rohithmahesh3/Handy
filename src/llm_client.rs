@@ -128,48 +128,96 @@ pub async fn send_chat_completion(
     prompt: String,
 ) -> Result<Option<String>, String> {
     let base_url = provider.base_url.trim_end_matches('/');
-    let url = format!("{}/chat/completions", base_url);
-
-    debug!("Sending chat completion request to: {}", url);
-
     let client = create_client(provider, &api_key)?;
 
-    let request_body = ChatCompletionRequest {
-        model: model.to_string(),
-        messages: vec![ChatMessage {
-            role: "user".to_string(),
-            content: prompt,
-        }],
-    };
+    if provider.id == "anthropic" {
+        // Anthropic uses /v1/messages with a different request/response format
+        let url = format!("{}/messages", base_url);
+        debug!("Sending Anthropic messages request to: {}", url);
 
-    let response = client
-        .post(&url)
-        .json(&request_body)
-        .send()
-        .await
-        .map_err(|e| format!("HTTP request failed: {}", e))?;
+        let request_body = serde_json::json!({
+            "model": model,
+            "max_tokens": 4096,
+            "messages": [{
+                "role": "user",
+                "content": prompt
+            }]
+        });
 
-    let status = response.status();
-    if !status.is_success() {
-        let error_text = response
-            .text()
+        let response = client
+            .post(&url)
+            .json(&request_body)
+            .send()
             .await
-            .unwrap_or_else(|_| "Failed to read error response".to_string());
-        return Err(format!(
-            "API request failed with status {}: {}",
-            status, error_text
-        ));
+            .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Failed to read error response".to_string());
+            return Err(format!(
+                "API request failed with status {}: {}",
+                status, error_text
+            ));
+        }
+
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse API response: {}", e))?;
+
+        // Anthropic response: { "content": [{ "type": "text", "text": "..." }] }
+        let text = body["content"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|block| block["text"].as_str())
+            .map(|s| s.to_string());
+
+        Ok(text)
+    } else {
+        // OpenAI-compatible endpoint
+        let url = format!("{}/chat/completions", base_url);
+        debug!("Sending chat completion request to: {}", url);
+
+        let request_body = ChatCompletionRequest {
+            model: model.to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: prompt,
+            }],
+        };
+
+        let response = client
+            .post(&url)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Failed to read error response".to_string());
+            return Err(format!(
+                "API request failed with status {}: {}",
+                status, error_text
+            ));
+        }
+
+        let completion: ChatCompletionResponse = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse API response: {}", e))?;
+
+        Ok(completion
+            .choices
+            .first()
+            .and_then(|choice| choice.message.content.clone()))
     }
-
-    let completion: ChatCompletionResponse = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse API response: {}", e))?;
-
-    Ok(completion
-        .choices
-        .first()
-        .and_then(|choice| choice.message.content.clone()))
 }
 
 pub async fn fetch_models(settings: &Settings) -> Result<Vec<String>, String> {

@@ -25,7 +25,6 @@ pub struct AudioRecordingManager {
     mute_while_recording: Arc<Mutex<bool>>,
     recorder: Arc<Mutex<Option<AudioRecorder>>>,
     is_open: Arc<Mutex<bool>>,
-    is_recording: Arc<Mutex<bool>>,
     did_mute: Arc<Mutex<bool>>,
 }
 
@@ -74,7 +73,6 @@ impl AudioRecordingManager {
             mute_while_recording: Arc::new(Mutex::new(settings.mute_while_recording())),
             recorder: Arc::new(Mutex::new(None)),
             is_open: Arc::new(Mutex::new(false)),
-            is_recording: Arc::new(Mutex::new(false)),
             did_mute: Arc::new(Mutex::new(false)),
         };
 
@@ -196,9 +194,9 @@ or resources/models/silero_vad_v4.onnx"
         *did_mute_guard = false;
 
         if let Some(rec) = self.recorder.lock().unwrap().as_mut() {
-            if *self.is_recording.lock().unwrap() {
+            if matches!(*self.state.lock().unwrap(), RecordingState::Recording { .. }) {
                 let _ = rec.stop();
-                *self.is_recording.lock().unwrap() = false;
+                *self.state.lock().unwrap() = RecordingState::Idle;
             }
             let _ = rec.close();
         }
@@ -208,18 +206,15 @@ or resources/models/silero_vad_v4.onnx"
     }
 
     pub fn update_mode(&self, new_mode: MicrophoneMode) -> Result<(), anyhow::Error> {
-        let mode_guard = self.mode.lock().unwrap();
-        let cur_mode = mode_guard.clone();
+        let cur_mode = self.mode.lock().unwrap().clone();
 
         match (cur_mode, &new_mode) {
             (MicrophoneMode::AlwaysOn, MicrophoneMode::OnDemand) => {
                 if matches!(*self.state.lock().unwrap(), RecordingState::Idle) {
-                    drop(mode_guard);
                     self.stop_microphone_stream();
                 }
             }
             (MicrophoneMode::OnDemand, MicrophoneMode::AlwaysOn) => {
-                drop(mode_guard);
                 self.start_microphone_stream()?;
             }
             _ => {}
@@ -260,7 +255,6 @@ or resources/models/silero_vad_v4.onnx"
 
             if let Some(rec) = self.recorder.lock().unwrap().as_ref() {
                 if rec.start().is_ok() {
-                    *self.is_recording.lock().unwrap() = true;
                     *state = RecordingState::Recording {
                         binding_id: binding_id.to_string(),
                     };
@@ -306,8 +300,6 @@ or resources/models/silero_vad_v4.onnx"
                     Vec::new()
                 };
 
-                *self.is_recording.lock().unwrap() = false;
-
                 if matches!(*self.mode.lock().unwrap(), MicrophoneMode::OnDemand) {
                     self.stop_microphone_stream();
                 }
@@ -339,11 +331,11 @@ or resources/models/silero_vad_v4.onnx"
             *state = RecordingState::Idle;
             drop(state);
 
+            self.remove_mute();
+
             if let Some(rec) = self.recorder.lock().unwrap().as_ref() {
                 let _ = rec.stop();
             }
-
-            *self.is_recording.lock().unwrap() = false;
 
             if matches!(*self.mode.lock().unwrap(), MicrophoneMode::OnDemand) {
                 self.stop_microphone_stream();

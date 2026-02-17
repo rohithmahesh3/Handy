@@ -43,7 +43,6 @@ pub async fn perform_transcription(
         None
     };
 
-    transcription_manager.maybe_unload_immediately("transcription");
 
     Ok(TranscriptionResult {
         text: final_text,

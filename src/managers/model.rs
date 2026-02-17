@@ -648,9 +648,11 @@ impl ModelManager {
 
         drop(file);
 
-        fs::rename(&partial_path, &model_path)?;
-
         if model_info.is_directory {
+            // For directory-based models, rename to .tar.gz for extraction
+            let tar_path = self.models_dir.join(format!("{}.tar.gz", &model_info.filename));
+            fs::rename(&partial_path, &tar_path)?;
+
             // Notify extraction state
             self.notify_state_change(
                 model_id,
@@ -659,7 +661,7 @@ impl ModelManager {
                 },
             );
 
-            if let Err(e) = self.extract_model(model_id, &model_path).await {
+            if let Err(e) = self.extract_model(model_id, &tar_path, &model_path).await {
                 // Extraction failed
                 {
                     let mut flags = self.cancel_flags.lock().unwrap();
@@ -682,6 +684,9 @@ impl ModelManager {
 
                 return Err(e);
             }
+        } else {
+            // For single-file models, just rename the partial file
+            fs::rename(&partial_path, &model_path)?;
         }
 
         {
@@ -707,13 +712,13 @@ impl ModelManager {
         Ok(())
     }
 
-    async fn extract_model(&self, model_id: &str, tar_path: &Path) -> Result<()> {
+    async fn extract_model(&self, model_id: &str, tar_path: &Path, final_dir: &Path) -> Result<()> {
         {
             let mut extracting = self.extracting_models.lock().unwrap();
             extracting.insert(model_id.to_string());
         }
 
-        let result = self.do_extract(tar_path).await;
+        let result = self.do_extract(tar_path, final_dir).await;
 
         {
             let mut extracting = self.extracting_models.lock().unwrap();
@@ -723,7 +728,7 @@ impl ModelManager {
         result
     }
 
-    async fn do_extract(&self, tar_path: &Path) -> Result<()> {
+    async fn do_extract(&self, tar_path: &Path, final_dir: &Path) -> Result<()> {
         let file = File::open(tar_path)?;
         let decoder = GzDecoder::new(&file);
         let mut archive = Archive::new(decoder);
@@ -733,16 +738,10 @@ impl ModelManager {
 
         archive.unpack(&extracting_dir)?;
 
-        let extracted_name = tar_path.file_stem().unwrap().to_str().unwrap();
-        let final_dir = tar_path
-            .parent()
-            .unwrap()
-            .join(extracted_name.trim_end_matches(".tar"));
-
         if final_dir.exists() {
-            fs::remove_dir_all(&final_dir)?;
+            fs::remove_dir_all(final_dir)?;
         }
-        fs::rename(&extracting_dir, &final_dir)?;
+        fs::rename(&extracting_dir, final_dir)?;
         fs::remove_file(tar_path)?;
 
         Ok(())
