@@ -20,6 +20,10 @@ enum Cmd {
     Start,
     Stop(mpsc::Sender<Vec<f32>>),
     Snapshot(mpsc::Sender<Vec<f32>>),
+    SnapshotWindow {
+        max_samples: usize,
+        reply_tx: mpsc::Sender<Vec<f32>>,
+    },
     Shutdown,
 }
 
@@ -220,6 +224,31 @@ impl AudioRecorder {
             })?)
     }
 
+    pub fn snapshot_window(
+        &self,
+        max_samples: usize,
+    ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+        let (resp_tx, resp_rx) = mpsc::channel();
+        let tx = self.cmd_tx.as_ref().ok_or_else(|| {
+            Error::new(
+                ErrorKind::NotConnected,
+                "Recorder is not open; cannot snapshot recording window",
+            )
+        })?;
+        tx.send(Cmd::SnapshotWindow {
+            max_samples,
+            reply_tx: resp_tx,
+        })?;
+        Ok(resp_rx
+            .recv_timeout(Duration::from_millis(800))
+            .map_err(|e| {
+                Error::new(
+                    ErrorKind::TimedOut,
+                    format!("Timed out waiting for recorder snapshot window: {}", e),
+                )
+            })?)
+    }
+
     pub fn close(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(tx) = self.cmd_tx.take() {
             let _ = tx.send(Cmd::Shutdown);
@@ -391,6 +420,18 @@ fn run_consumer(
             }
             Cmd::Snapshot(reply_tx) => {
                 let _ = reply_tx.send(processed_samples.clone());
+                false
+            }
+            Cmd::SnapshotWindow {
+                max_samples,
+                reply_tx,
+            } => {
+                if max_samples == 0 || processed_samples.len() <= max_samples {
+                    let _ = reply_tx.send(processed_samples.clone());
+                } else {
+                    let start = processed_samples.len().saturating_sub(max_samples);
+                    let _ = reply_tx.send(processed_samples[start..].to_vec());
+                }
                 false
             }
             Cmd::Shutdown => true,

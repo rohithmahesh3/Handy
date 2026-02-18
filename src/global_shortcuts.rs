@@ -32,46 +32,58 @@ const FOCUSED_ENGINE_VERIFY_POLL_MS: u64 = 20;
 const TOGGLE_PRESS_DEBOUNCE_MS: u64 = 90;
 const SETTINGS_POLL_INTERVAL_MS: u64 = 350;
 const FAILURE_NOTIFICATION_COOLDOWN_MS: u64 = 8_000;
-const PTT_EVENT_HISTORY_LIMIT: usize = 60;
+const TOGGLE_EVENT_HISTORY_LIMIT: usize = 60;
 
-static PTT_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
-static HEALTH_STATE: OnceLock<Mutex<PttRuntimeHealth>> = OnceLock::new();
-static PTT_RECENT_EVENTS: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
+static TOGGLE_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
+static HEALTH_STATE: OnceLock<Mutex<ToggleRuntimeHealth>> = OnceLock::new();
+static TOGGLE_RECENT_EVENTS: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
 static FORCE_REBIND_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-// ── PTT state machine ──────────────────────────────────────────────────
+// ── TOGGLE state machine ──────────────────────────────────────────────────
 
 #[derive(Debug)]
-enum PttState {
+enum ToggleState {
     Idle,
     Pending {
-        ptt_session_id: u64,
+        toggle_session_id: u64,
     },
     Recording {
-        ptt_session_id: u64,
+        toggle_session_id: u64,
         daemon_session_id: u64,
     },
     Stopping {
-        ptt_session_id: u64,
+        toggle_session_id: u64,
         daemon_session_id: u64,
     },
 }
 
 enum InternalEvent {
     StartRecording {
-        ptt_session_id: u64,
+        toggle_session_id: u64,
         result: std::result::Result<u64, String>,
     },
     StopRecording {
-        ptt_session_id: u64,
-        result: std::result::Result<String, String>,
+        toggle_session_id: u64,
+        result: StopRecordingOutcome,
     },
+}
+
+enum StopRecordingOutcome {
+    Completed(String),
+    Finalizing { reason: String, timed_out: bool },
+    Failed(String),
+}
+
+enum StopRecordingCallError {
+    TimedOut,
+    Disconnected,
+    Failed(String),
 }
 
 // ── Health diagnostics ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
-struct PttRuntimeHealth {
+struct ToggleRuntimeHealth {
     healthy: bool,
     component: String,
     code: String,
@@ -101,7 +113,7 @@ struct PttRuntimeHealth {
     last_dbus_error_ms: u64,
 }
 
-impl Default for PttRuntimeHealth {
+impl Default for ToggleRuntimeHealth {
     fn default() -> Self {
         Self {
             healthy: false,
@@ -135,12 +147,13 @@ impl Default for PttRuntimeHealth {
     }
 }
 
-fn health_state() -> &'static Mutex<PttRuntimeHealth> {
-    HEALTH_STATE.get_or_init(|| Mutex::new(PttRuntimeHealth::default()))
+fn health_state() -> &'static Mutex<ToggleRuntimeHealth> {
+    HEALTH_STATE.get_or_init(|| Mutex::new(ToggleRuntimeHealth::default()))
 }
 
-fn ptt_recent_events_state() -> &'static Mutex<VecDeque<String>> {
-    PTT_RECENT_EVENTS.get_or_init(|| Mutex::new(VecDeque::with_capacity(PTT_EVENT_HISTORY_LIMIT)))
+fn toggle_recent_events_state() -> &'static Mutex<VecDeque<String>> {
+    TOGGLE_RECENT_EVENTS
+        .get_or_init(|| Mutex::new(VecDeque::with_capacity(TOGGLE_EVENT_HISTORY_LIMIT)))
 }
 
 fn now_millis() -> u64 {
@@ -150,18 +163,18 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
-fn push_ptt_event(event: impl Into<String>) {
+fn push_toggle_event(event: impl Into<String>) {
     let line = format!("{} {}", now_millis(), event.into());
-    if let Ok(mut events) = ptt_recent_events_state().lock() {
+    if let Ok(mut events) = toggle_recent_events_state().lock() {
         events.push_back(line);
-        while events.len() > PTT_EVENT_HISTORY_LIMIT {
+        while events.len() > TOGGLE_EVENT_HISTORY_LIMIT {
             let _ = events.pop_front();
         }
     }
 }
 
-pub fn ptt_recent_events() -> Vec<String> {
-    ptt_recent_events_state()
+pub fn toggle_recent_events() -> Vec<String> {
+    toggle_recent_events_state()
         .lock()
         .map(|events| events.iter().cloned().collect())
         .unwrap_or_default()
@@ -179,7 +192,7 @@ fn mark_health_success(message: &str) {
     }
 }
 
-fn mark_ptt_state(state: &str) {
+fn mark_toggle_state(state: &str) {
     if let Ok(mut health) = health_state().lock() {
         health.current_state = state.to_string();
     }
@@ -296,7 +309,8 @@ fn bump_stop_timeout_fallback() {
     }
 }
 
-pub fn ptt_diagnostics_tuple() -> (bool, String, String, String, u64, bool, bool, u64, u64, u64) {
+pub fn toggle_diagnostics_tuple() -> (bool, String, String, String, u64, bool, bool, u64, u64, u64)
+{
     if let Ok(health) = health_state().lock() {
         (
             health.healthy,
@@ -315,7 +329,7 @@ pub fn ptt_diagnostics_tuple() -> (bool, String, String, String, u64, bool, bool
             false,
             "global_shortcuts".to_string(),
             "lock_poisoned".to_string(),
-            "Failed to read PTT diagnostics".to_string(),
+            "Failed to read TOGGLE diagnostics".to_string(),
             0,
             false,
             false,
@@ -326,7 +340,7 @@ pub fn ptt_diagnostics_tuple() -> (bool, String, String, String, u64, bool, bool
     }
 }
 
-pub fn ptt_diagnostics_verbose_json() -> String {
+pub fn toggle_diagnostics_verbose_json() -> String {
     if let Ok(health) = health_state().lock() {
         let pending_commit_age_ms = if health.pending_commit_session_id == 0 {
             0
@@ -361,7 +375,7 @@ pub fn ptt_diagnostics_verbose_json() -> String {
             "last_switch_failure_message": health.last_switch_failure_message,
             "last_dbus_error": health.last_dbus_error,
             "last_dbus_error_ms": health.last_dbus_error_ms,
-            "recent_event_count": ptt_recent_events().len(),
+            "recent_event_count": toggle_recent_events().len(),
         })
         .to_string()
     } else {
@@ -369,7 +383,7 @@ pub fn ptt_diagnostics_verbose_json() -> String {
             "healthy": false,
             "component": "global_shortcuts",
             "code": "lock_poisoned",
-            "message": "Failed to read PTT diagnostics",
+            "message": "Failed to read TOGGLE diagnostics",
             "last_success_ms": 0,
             "listener_session_ok": false,
             "shortcut_bound": false,
@@ -379,7 +393,7 @@ pub fn ptt_diagnostics_verbose_json() -> String {
             "current_state": "unknown",
             "shortcut_description": "",
             "last_start_failure_code": "",
-            "last_start_failure_message": "Failed to read PTT diagnostics",
+            "last_start_failure_message": "Failed to read TOGGLE diagnostics",
             "last_start_failure_ms": 0,
             "last_stop_failure_message": "",
             "last_stop_failure_ms": 0,
@@ -407,8 +421,8 @@ pub fn start_global_shortcuts_listener() {
         "initializing",
         "Starting global dictation shortcut listener",
     );
-    mark_ptt_state("initializing");
-    push_ptt_event("listener: initializing");
+    mark_toggle_state("initializing");
+    push_toggle_event("listener: initializing");
 
     std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -422,7 +436,7 @@ pub fn start_global_shortcuts_listener() {
                     "runtime_init_failed",
                     &format!("Failed to create runtime for global shortcuts: {}", e),
                 );
-                push_ptt_event(format!("listener: runtime init failed: {}", e));
+                push_toggle_event(format!("listener: runtime init failed: {}", e));
                 return;
             }
         };
@@ -479,7 +493,7 @@ async fn run_evdev_listener_loop(mut active_config: ShortcutConfig) {
                     active_config.keyval
                 );
                 mark_health_error("invalid_shortcut", &msg);
-                notify_ptt_failure(
+                notify_toggle_failure(
                     "Invalid dictation shortcut",
                     "Set a supported shortcut in Handy preferences.",
                 );
@@ -505,7 +519,7 @@ async fn run_evdev_listener_loop(mut active_config: ShortcutConfig) {
                     "evdev_session_error"
                 };
                 mark_health_error(code, &e.to_string());
-                notify_ptt_failure(
+                notify_toggle_failure(
                     "Global dictation shortcut is unavailable",
                     &format!("Keyboard input error: {}", e),
                 );
@@ -535,9 +549,9 @@ async fn run_evdev_session(
         "Listening on {} keyboard(s) for {}",
         n_devices, description
     ));
-    mark_ptt_state("idle");
+    mark_toggle_state("idle");
     info!(
-        "evdev: listening on {} keyboard device(s) for PTT shortcut {}",
+        "evdev: listening on {} keyboard device(s) for TOGGLE shortcut {}",
         n_devices, description
     );
 
@@ -559,7 +573,7 @@ async fn run_evdev_session(
     // Drop the original sender so the channel closes when all reader tasks end
     drop(key_tx);
 
-    let mut ptt_state = PttState::Idle;
+    let mut toggle_state = ToggleState::Idle;
     let mut config_poll = tokio::time::interval(Duration::from_millis(SETTINGS_POLL_INTERVAL_MS));
     let mut held_modifiers: HashSet<u16> = HashSet::new();
     let mut last_shortcut_press_ms = 0_u64;
@@ -569,7 +583,7 @@ async fn run_evdev_session(
             _ = config_poll.tick() => {
                 let new_config = ShortcutConfig::from_settings(&Settings::new());
                 if new_config != *active_config {
-                    info!("Push-to-talk settings changed, restarting evdev session");
+                    info!("Toggle dictation settings changed, restarting evdev session");
                     break Ok(());
                 }
                 if FORCE_REBIND_REQUESTED.swap(false, Ordering::SeqCst) {
@@ -596,14 +610,14 @@ async fn run_evdev_session(
                                 if now_ms.saturating_sub(last_shortcut_press_ms)
                                     < TOGGLE_PRESS_DEBOUNCE_MS
                                 {
-                                    push_ptt_event(format!(
-                                        "ptt:shortcut press ignored by debounce ({} ms)",
+                                    push_toggle_event(format!(
+                                        "toggle:shortcut press ignored by debounce ({} ms)",
                                         TOGGLE_PRESS_DEBOUNCE_MS
                                     ));
                                     continue;
                                 }
                                 last_shortcut_press_ms = now_ms;
-                                on_global_pressed(&mut ptt_state, &internal_tx);
+                                on_global_pressed(&mut toggle_state, &internal_tx);
                             }
                         }
                     }
@@ -618,12 +632,12 @@ async fn run_evdev_session(
                 let Some(internal) = maybe_internal else {
                     break Err(anyhow!("Internal global shortcut channel closed"));
                 };
-                handle_internal_event(&mut ptt_state, internal);
+                handle_internal_event(&mut toggle_state, internal);
             }
         }
     };
 
-    cleanup_state(&mut ptt_state);
+    cleanup_state(&mut toggle_state);
 
     // Cancel all reader tasks
     for handle in reader_handles {
@@ -719,7 +733,7 @@ async fn read_device_events(path: PathBuf, tx: mpsc::UnboundedSender<KeyEvent>) 
                     }
                 }
                 2 => {
-                    // Key repeat — ignore for PTT
+                    // Key repeat — ignore for TOGGLE
                 }
                 _ => {}
             }
@@ -729,93 +743,104 @@ async fn read_device_events(path: PathBuf, tx: mpsc::UnboundedSender<KeyEvent>) 
     Ok(())
 }
 
-// ── PTT toggle handlers ─────────────────────────────────────────────────
+// ── TOGGLE toggle handlers ─────────────────────────────────────────────────
 
-fn on_global_pressed(ptt_state: &mut PttState, internal_tx: &mpsc::UnboundedSender<InternalEvent>) {
-    match ptt_state {
-        PttState::Idle => start_toggle_recording(ptt_state, internal_tx),
-        PttState::Pending { ptt_session_id } => {
-            push_ptt_event(format!(
-                "ptt:{} toggle ignored while start transition is pending",
-                ptt_session_id
+fn on_global_pressed(
+    toggle_state: &mut ToggleState,
+    internal_tx: &mpsc::UnboundedSender<InternalEvent>,
+) {
+    match toggle_state {
+        ToggleState::Idle => start_toggle_recording(toggle_state, internal_tx),
+        ToggleState::Pending { toggle_session_id } => {
+            push_toggle_event(format!(
+                "toggle:{} toggle ignored while start transition is pending",
+                toggle_session_id
             ));
             debug!(
-                "[ptt:{}] Ignoring toggle while start is pending",
-                ptt_session_id
+                "[toggle:{}] Ignoring toggle while start is pending",
+                toggle_session_id
             );
         }
-        PttState::Recording {
-            ptt_session_id,
+        ToggleState::Recording {
+            toggle_session_id,
             daemon_session_id,
         } => {
-            let current_session = *ptt_session_id;
+            let current_session = *toggle_session_id;
             let daemon_session = *daemon_session_id;
             info!(
-                "[ptt:{}] Toggle pressed; waiting for StopRecordingSession({})",
+                "[toggle:{}] Toggle pressed; waiting for StopRecordingSession({})",
                 current_session, daemon_session
             );
-            push_ptt_event(format!(
-                "ptt:{} toggle stop requested; stopping daemon session {}",
+            push_toggle_event(format!(
+                "toggle:{} toggle stop requested; stopping daemon session {}",
                 current_session, daemon_session
             ));
             spawn_stop_recording(current_session, daemon_session, internal_tx.clone());
-            *ptt_state = PttState::Stopping {
-                ptt_session_id: current_session,
+            *toggle_state = ToggleState::Stopping {
+                toggle_session_id: current_session,
                 daemon_session_id: daemon_session,
             };
-            mark_ptt_state("stopping");
+            mark_toggle_state("stopping");
         }
-        PttState::Stopping { ptt_session_id, .. } => {
-            push_ptt_event(format!(
-                "ptt:{} toggle ignored while stop transition is pending",
-                ptt_session_id
+        ToggleState::Stopping {
+            toggle_session_id, ..
+        } => {
+            push_toggle_event(format!(
+                "toggle:{} toggle ignored while stop transition is pending",
+                toggle_session_id
             ));
             debug!(
-                "[ptt:{}] Ignoring toggle while stop is pending",
-                ptt_session_id
+                "[toggle:{}] Ignoring toggle while stop is pending",
+                toggle_session_id
             );
         }
     }
 }
 
 fn start_toggle_recording(
-    ptt_state: &mut PttState,
+    toggle_state: &mut ToggleState,
     internal_tx: &mpsc::UnboundedSender<InternalEvent>,
 ) {
-    debug_assert!(matches!(ptt_state, PttState::Idle));
+    debug_assert!(matches!(toggle_state, ToggleState::Idle));
 
     let current_engine = match get_current_engine() {
         Ok(engine) => Some(engine),
         Err(e) => {
             warn!(
-                "Global PTT press could not read IBus engine (continuing with verified switch): {}",
+                "Global TOGGLE press could not read IBus engine (continuing with verified switch): {}",
                 e
             );
-            push_ptt_event(format!("ptt:read-current-engine failed (non-fatal): {}", e));
+            push_toggle_event(format!(
+                "toggle:read-current-engine failed (non-fatal): {}",
+                e
+            ));
             None
         }
     };
 
-    let ptt_session_id = next_ptt_session_id();
-    push_ptt_event(format!("ptt:{} pressed", ptt_session_id));
+    let toggle_session_id = next_toggle_session_id();
+    push_toggle_event(format!("toggle:{} pressed", toggle_session_id));
 
     if current_engine
         .as_ref()
         .is_some_and(|engine| is_handy_engine(engine))
     {
         mark_switch_confirm(0);
-        push_ptt_event(format!("ptt:{} already on handy source", ptt_session_id));
+        push_toggle_event(format!(
+            "toggle:{} already on handy source",
+            toggle_session_id
+        ));
         bump_press_while_handy();
-        push_ptt_event(format!(
-            "ptt:{} pressed while handy already active",
-            ptt_session_id
+        push_toggle_event(format!(
+            "toggle:{} pressed while handy already active",
+            toggle_session_id
         ));
     } else {
         mark_switch_attempt();
         let current_engine_label = current_engine.as_deref().unwrap_or("<unknown>");
-        push_ptt_event(format!(
-            "ptt:{} switch requested from {}",
-            ptt_session_id, current_engine_label
+        push_toggle_event(format!(
+            "toggle:{} switch requested from {}",
+            toggle_session_id, current_engine_label
         ));
         let switch_started = Instant::now();
         let switched_engine = match switch_to_handy_engine_verified(ENGINE_SWITCH_VERIFY_TIMEOUT_MS)
@@ -823,32 +848,32 @@ fn start_toggle_recording(
             Ok(engine) => engine,
             Err(e) => {
                 warn!(
-                    "[ptt:{}] Failed to switch input source to Handy on press: {}",
-                    ptt_session_id, e
+                    "[toggle:{}] Failed to switch input source to Handy on press: {}",
+                    toggle_session_id, e
                 );
                 mark_switch_failure(&e.to_string());
                 mark_health_error("ibus_switch_to_handy_failed", &e.to_string());
-                notify_ptt_failure(
+                notify_toggle_failure(
                     "Cannot start recording",
                     "Failed to switch input source to Handy (not confirmed active).",
                 );
-                push_ptt_event(format!(
-                    "ptt:{} failed to switch to handy engine: {}",
-                    ptt_session_id, e
+                push_toggle_event(format!(
+                    "toggle:{} failed to switch to handy engine: {}",
+                    toggle_session_id, e
                 ));
                 return;
             }
         };
         mark_switch_confirm(switch_started.elapsed().as_millis() as u64);
-        push_ptt_event(format!(
-            "ptt:{} switch confirmed to {} ({} ms)",
-            ptt_session_id,
+        push_toggle_event(format!(
+            "toggle:{} switch confirmed to {} ({} ms)",
+            toggle_session_id,
             switched_engine,
             switch_started.elapsed().as_millis()
         ));
         info!(
-            "[ptt:{}] Pressed; switched to Handy source '{}' from '{}'",
-            ptt_session_id, switched_engine, current_engine_label
+            "[toggle:{}] Pressed; switched to Handy source '{}' from '{}'",
+            toggle_session_id, switched_engine, current_engine_label
         );
     }
 
@@ -857,121 +882,124 @@ fn start_toggle_recording(
         Duration::from_millis(FOCUSED_ENGINE_VERIFY_POLL_MS),
     ) {
         Ok((engine_id, last_change_ms)) => {
-            push_ptt_event(format!(
-                "ptt:{} focused engine confirmed id={} (last_change_ms={})",
-                ptt_session_id, engine_id, last_change_ms
+            push_toggle_event(format!(
+                "toggle:{} focused engine confirmed id={} (last_change_ms={})",
+                toggle_session_id, engine_id, last_change_ms
             ));
             engine_id
         }
         Err(e) => {
             warn!(
-                "[ptt:{}] Handy engine did not become focused in the target context: {}",
-                ptt_session_id, e
+                "[toggle:{}] Handy engine did not become focused in the target context: {}",
+                toggle_session_id, e
             );
             mark_start_failure("focused_engine_unavailable", &e);
             mark_health_error("focused_engine_unavailable", &e);
-            notify_ptt_failure(
+            notify_toggle_failure(
                 "Cannot start recording",
                 "Handy input source is not focused in the target text field.",
             );
-            push_ptt_event(format!(
-                "ptt:{} blocked start because focused engine is unavailable: {}",
-                ptt_session_id, e
+            push_toggle_event(format!(
+                "toggle:{} blocked start because focused engine is unavailable: {}",
+                toggle_session_id, e
             ));
             return;
         }
     };
 
-    spawn_start_recording(ptt_session_id, target_engine_id, internal_tx.clone());
-    *ptt_state = PttState::Pending { ptt_session_id };
-    mark_ptt_state("pending");
+    spawn_start_recording(toggle_session_id, target_engine_id, internal_tx.clone());
+    *toggle_state = ToggleState::Pending { toggle_session_id };
+    mark_toggle_state("pending");
     clear_pending_commit();
 }
 
-fn handle_internal_event(ptt_state: &mut PttState, internal: InternalEvent) {
+fn handle_internal_event(toggle_state: &mut ToggleState, internal: InternalEvent) {
     match internal {
         InternalEvent::StartRecording {
-            ptt_session_id,
+            toggle_session_id,
             result,
         } => {
-            on_start_recording_result(ptt_state, ptt_session_id, result);
+            on_start_recording_result(toggle_state, toggle_session_id, result);
         }
         InternalEvent::StopRecording {
-            ptt_session_id,
+            toggle_session_id,
             result,
         } => {
-            on_stop_recording_result(ptt_state, ptt_session_id, result);
+            on_stop_recording_result(toggle_state, toggle_session_id, result);
         }
     }
 }
 
 fn on_start_recording_result(
-    ptt_state: &mut PttState,
-    ptt_session_id: u64,
+    toggle_state: &mut ToggleState,
+    toggle_session_id: u64,
     result: std::result::Result<u64, String>,
 ) {
-    match ptt_state {
-        PttState::Pending {
-            ptt_session_id: active_session,
-        } if *active_session == ptt_session_id => match result {
+    match toggle_state {
+        ToggleState::Pending {
+            toggle_session_id: active_session,
+        } if *active_session == toggle_session_id => match result {
             Ok(daemon_session_id) => {
                 clear_start_failure();
                 clear_stop_failure();
                 info!(
-                    "[ptt:{}] Recording started with daemon session {}",
-                    ptt_session_id, daemon_session_id
+                    "[toggle:{}] Recording started with daemon session {}",
+                    toggle_session_id, daemon_session_id
                 );
-                *ptt_state = PttState::Recording {
-                    ptt_session_id,
+                *toggle_state = ToggleState::Recording {
+                    toggle_session_id,
                     daemon_session_id,
                 };
-                mark_ptt_state("recording");
-                push_ptt_event(format!(
-                    "ptt:{} started daemon session {}",
-                    ptt_session_id, daemon_session_id
+                mark_toggle_state("recording");
+                push_toggle_event(format!(
+                    "toggle:{} started daemon session {}",
+                    toggle_session_id, daemon_session_id
                 ));
             }
             Err(err) => {
                 warn!(
-                    "[ptt:{}] Failed to start recording: {}",
-                    ptt_session_id, err
+                    "[toggle:{}] Failed to start recording: {}",
+                    toggle_session_id, err
                 );
                 let failure_code = extract_start_failure_code(&err);
                 mark_start_failure(&failure_code, &err);
                 mark_health_error("start_recording_failed", &err);
-                notify_ptt_failure(
+                notify_toggle_failure(
                     "Cannot start recording",
                     &format!(
-                        "Push-to-talk start failed ({})",
+                        "Toggle dictation start failed ({})",
                         extract_start_failure_code(&err)
                     ),
                 );
-                push_ptt_event(format!("ptt:{} start failed: {}", ptt_session_id, err));
-                spawn_cancel_recording(ptt_session_id, "start failed");
-                *ptt_state = PttState::Idle;
-                mark_ptt_state("idle");
+                push_toggle_event(format!(
+                    "toggle:{} start failed: {}",
+                    toggle_session_id, err
+                ));
+                spawn_cancel_recording(toggle_session_id, "start failed");
+                *toggle_state = ToggleState::Idle;
+                mark_toggle_state("idle");
                 clear_pending_commit();
             }
         },
         _ => {
             if result.is_ok() {
                 warn!(
-                    "[ptt:{}] Received stale start success, cancelling recording to avoid orphan state",
-                    ptt_session_id
+                    "[toggle:{}] Received stale start success, cancelling recording to avoid orphan state",
+                    toggle_session_id
                 );
-                spawn_cancel_recording(ptt_session_id, "stale start success");
-                push_ptt_event(format!(
-                    "ptt:{} stale start success cancelled",
-                    ptt_session_id
+                spawn_cancel_recording(toggle_session_id, "stale start success");
+                push_toggle_event(format!(
+                    "toggle:{} stale start success cancelled",
+                    toggle_session_id
                 ));
             } else {
                 debug!(
-                    "[ptt:{}] Ignoring stale start failure for inactive session",
-                    ptt_session_id
+                    "[toggle:{}] Ignoring stale start failure for inactive session",
+                    toggle_session_id
                 );
-                push_ptt_event(format!(
-                    "ptt:{} stale start failure ignored",
-                    ptt_session_id
+                push_toggle_event(format!(
+                    "toggle:{} stale start failure ignored",
+                    toggle_session_id
                 ));
             }
         }
@@ -979,103 +1007,121 @@ fn on_start_recording_result(
 }
 
 fn on_stop_recording_result(
-    ptt_state: &mut PttState,
-    ptt_session_id: u64,
-    result: std::result::Result<String, String>,
+    toggle_state: &mut ToggleState,
+    toggle_session_id: u64,
+    result: StopRecordingOutcome,
 ) {
-    match ptt_state {
-        PttState::Stopping {
-            ptt_session_id: active_session,
+    match toggle_state {
+        ToggleState::Stopping {
+            toggle_session_id: active_session,
             daemon_session_id,
-        } if *active_session == ptt_session_id => {
+        } if *active_session == toggle_session_id => {
             match result {
-                Ok(text) => {
+                StopRecordingOutcome::Completed(text) => {
                     info!(
-                        "[ptt:{}] StopRecordingSession({}) completed",
-                        ptt_session_id, daemon_session_id
+                        "[toggle:{}] StopRecordingSession({}) completed",
+                        toggle_session_id, daemon_session_id
                     );
                     clear_stop_failure();
                     mark_pending_commit(*daemon_session_id);
-                    push_ptt_event(format!(
-                        "ptt:{} stopped daemon session {} (text_len={})",
-                        ptt_session_id,
+                    push_toggle_event(format!(
+                        "toggle:{} stopped daemon session {} (text_len={})",
+                        toggle_session_id,
                         daemon_session_id,
                         text.chars().count()
                     ));
-                    push_ptt_event(format!(
-                        "ptt:{} stop-complete for session {}; commit is delivered by engine-side pending commit listener",
-                        ptt_session_id, daemon_session_id
+                    push_toggle_event(format!(
+                        "toggle:{} stop-complete for session {}; commit is delivered by engine-side pending commit listener",
+                        toggle_session_id, daemon_session_id
                     ));
-                    *ptt_state = PttState::Idle;
-                    mark_ptt_state("idle");
+                    *toggle_state = ToggleState::Idle;
+                    mark_toggle_state("idle");
                     return;
                 }
-                Err(err) => {
-                    warn!(
-                        "[ptt:{}] StopRecordingSession({}) failed: {}",
-                        ptt_session_id, daemon_session_id, err
-                    );
-                    if err.contains("timed out") {
+                StopRecordingOutcome::Finalizing { reason, timed_out } => {
+                    if timed_out {
                         bump_stop_timeout_fallback();
                     }
+                    clear_stop_failure();
+                    mark_pending_commit(*daemon_session_id);
+                    info!(
+                        "[toggle:{}] StopRecordingSession({}) finalizing asynchronously: {}",
+                        toggle_session_id, daemon_session_id, reason
+                    );
+                    push_toggle_event(format!(
+                        "toggle:{} stop finalized asynchronously for daemon session {}: {}",
+                        toggle_session_id, daemon_session_id, reason
+                    ));
+                    *toggle_state = ToggleState::Idle;
+                    mark_toggle_state("idle");
+                    return;
+                }
+                StopRecordingOutcome::Failed(err) => {
+                    warn!(
+                        "[toggle:{}] StopRecordingSession({}) failed: {}",
+                        toggle_session_id, daemon_session_id, err
+                    );
                     mark_health_error("stop_recording_failed", &err);
                     mark_stop_failure(&err);
-                    push_ptt_event(format!(
-                        "ptt:{} stop failed for daemon session {}: {}",
-                        ptt_session_id, daemon_session_id, err
+                    push_toggle_event(format!(
+                        "toggle:{} stop failed for daemon session {}: {}",
+                        toggle_session_id, daemon_session_id, err
                     ));
                 }
             }
 
             clear_pending_commit();
-            *ptt_state = PttState::Idle;
-            mark_ptt_state("idle");
-            push_ptt_event(format!(
-                "ptt:{} stop result handled (failure path)",
-                ptt_session_id
+            *toggle_state = ToggleState::Idle;
+            mark_toggle_state("idle");
+            push_toggle_event(format!(
+                "toggle:{} stop result handled (failure path)",
+                toggle_session_id
             ));
         }
         _ => {
             debug!(
-                "[ptt:{}] Ignoring stale stop result for inactive session",
-                ptt_session_id
+                "[toggle:{}] Ignoring stale stop result for inactive session",
+                toggle_session_id
             );
-            push_ptt_event(format!("ptt:{} stale stop result ignored", ptt_session_id));
+            push_toggle_event(format!(
+                "toggle:{} stale stop result ignored",
+                toggle_session_id
+            ));
         }
     }
 }
 
-fn cleanup_state(ptt_state: &mut PttState) {
-    match ptt_state {
-        PttState::Idle => {}
-        PttState::Pending { ptt_session_id } => {
-            let sid = *ptt_session_id;
+fn cleanup_state(toggle_state: &mut ToggleState) {
+    match toggle_state {
+        ToggleState::Idle => {}
+        ToggleState::Pending { toggle_session_id } => {
+            let sid = *toggle_session_id;
             spawn_cancel_recording(sid, "cleanup");
         }
-        PttState::Recording {
-            ptt_session_id,
+        ToggleState::Recording {
+            toggle_session_id,
             daemon_session_id: _,
         } => {
-            let sid = *ptt_session_id;
+            let sid = *toggle_session_id;
             spawn_cancel_recording(sid, "cleanup");
         }
-        PttState::Stopping {
-            ptt_session_id,
+        ToggleState::Stopping {
+            toggle_session_id,
             daemon_session_id: _,
         } => {
-            let sid = *ptt_session_id;
+            let sid = *toggle_session_id;
             spawn_cancel_recording(sid, "cleanup after stop pending");
         }
     }
 
-    *ptt_state = PttState::Idle;
-    mark_ptt_state("idle");
+    *toggle_state = ToggleState::Idle;
+    mark_toggle_state("idle");
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 fn spawn_start_recording(
-    ptt_session_id: u64,
+    toggle_session_id: u64,
     target_engine_id: u64,
     tx: mpsc::UnboundedSender<InternalEvent>,
 ) {
@@ -1083,14 +1129,14 @@ fn spawn_start_recording(
         std::thread::sleep(Duration::from_millis(START_RECORDING_ARM_DELAY_MS));
         let result = call_handy_start_recording_session_for_target(target_engine_id);
         let _ = tx.send(InternalEvent::StartRecording {
-            ptt_session_id,
+            toggle_session_id,
             result,
         });
     });
 }
 
 fn spawn_stop_recording(
-    ptt_session_id: u64,
+    toggle_session_id: u64,
     daemon_session_id: u64,
     tx: mpsc::UnboundedSender<InternalEvent>,
 ) {
@@ -1099,22 +1145,55 @@ fn spawn_stop_recording(
             daemon_session_id,
             Duration::from_millis(STOP_RECORDING_TIMEOUT_MS),
         ) {
-            Ok(text) => Ok(text),
+            Ok(text) => StopRecordingOutcome::Completed(text),
             Err(stop_err) => {
-                let cancel_result = call_handy_method_no_args("CancelRecording");
-                Err(match cancel_result {
-                    Ok(()) => format!("{}; fallback CancelRecording succeeded", stop_err),
-                    Err(cancel_err) => {
-                        format!(
-                            "{}; fallback CancelRecording failed: {}",
-                            stop_err, cancel_err
-                        )
-                    }
-                })
+                let is_recording = call_handy_get_state()
+                    .map(|(active, _)| active)
+                    .unwrap_or(true);
+
+                if !is_recording {
+                    let timed_out = matches!(stop_err, StopRecordingCallError::TimedOut);
+                    let reason = match stop_err {
+                        StopRecordingCallError::TimedOut => format!(
+                            "Stop call timed out after {} ms, daemon reports recording stopped; waiting for final commit",
+                            STOP_RECORDING_TIMEOUT_MS
+                        ),
+                        StopRecordingCallError::Disconnected => "Stop call worker disconnected, daemon reports recording stopped; waiting for final commit".to_string(),
+                        StopRecordingCallError::Failed(err) => format!(
+                            "Stop call returned error ('{}'), daemon reports recording stopped; waiting for final commit",
+                            err
+                        ),
+                    };
+                    StopRecordingOutcome::Finalizing { reason, timed_out }
+                } else {
+                    let stop_detail = match stop_err {
+                        StopRecordingCallError::TimedOut => format!(
+                            "StopRecordingSession call timed out after {} ms",
+                            STOP_RECORDING_TIMEOUT_MS
+                        ),
+                        StopRecordingCallError::Disconnected => {
+                            "StopRecordingSession call worker disconnected before returning"
+                                .to_string()
+                        }
+                        StopRecordingCallError::Failed(err) => err,
+                    };
+                    let cancel_result = call_handy_method_no_args("CancelRecording");
+                    StopRecordingOutcome::Failed(match cancel_result {
+                        Ok(()) => {
+                            format!("{}; fallback CancelRecording succeeded", stop_detail)
+                        }
+                        Err(cancel_err) => {
+                            format!(
+                                "{}; fallback CancelRecording failed: {}",
+                                stop_detail, cancel_err
+                            )
+                        }
+                    })
+                }
             }
         };
         let _ = tx.send(InternalEvent::StopRecording {
-            ptt_session_id,
+            toggle_session_id,
             result,
         });
     });
@@ -1123,11 +1202,11 @@ fn spawn_stop_recording(
 fn spawn_cancel_recording(session_id: u64, reason: &'static str) {
     std::thread::spawn(move || match call_handy_method_no_args("CancelRecording") {
         Ok(()) => {
-            info!("[ptt:{}] Cancelled recording ({})", session_id, reason);
+            info!("[toggle:{}] Cancelled recording ({})", session_id, reason);
         }
         Err(e) => {
             warn!(
-                "[ptt:{}] Failed to cancel recording ({}): {}",
+                "[toggle:{}] Failed to cancel recording ({}): {}",
                 session_id, reason, e
             );
         }
@@ -1209,6 +1288,32 @@ fn call_handy_get_focused_engine() -> std::result::Result<(u64, u64), String> {
     })
 }
 
+fn call_handy_get_state() -> std::result::Result<(bool, bool), String> {
+    let conn = zbus::blocking::Connection::session().map_err(|e| {
+        let msg = format!("Failed to open session bus: {}", e);
+        mark_dbus_error("GetState", &msg);
+        msg
+    })?;
+    let reply = conn
+        .call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "GetState",
+            &(),
+        )
+        .map_err(|e| {
+            let msg = format!("GetState call failed: {}", e);
+            mark_dbus_error("GetState", &msg);
+            msg
+        })?;
+    reply.body().deserialize::<(bool, bool)>().map_err(|e| {
+        let msg = format!("GetState decode failed: {}", e);
+        mark_dbus_error("GetState", &msg);
+        msg
+    })
+}
+
 fn wait_for_focused_engine(
     timeout: Duration,
     poll_interval: Duration,
@@ -1278,26 +1383,26 @@ fn call_handy_stop_recording_session(session_id: u64) -> std::result::Result<Str
 fn call_handy_stop_recording_session_with_timeout(
     session_id: u64,
     timeout: Duration,
-) -> std::result::Result<String, String> {
+) -> std::result::Result<String, StopRecordingCallError> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(call_handy_stop_recording_session(session_id));
     });
 
     match rx.recv_timeout(timeout) {
-        Ok(result) => result,
+        Ok(result) => result.map_err(StopRecordingCallError::Failed),
         Err(RecvTimeoutError::Timeout) => {
             let msg = format!(
                 "StopRecordingSession call timed out after {} ms",
                 timeout.as_millis()
             );
             mark_dbus_error("StopRecordingSession", &msg);
-            Err(msg)
+            Err(StopRecordingCallError::TimedOut)
         }
         Err(RecvTimeoutError::Disconnected) => {
             let msg = "StopRecordingSession call worker disconnected before returning".to_string();
             mark_dbus_error("StopRecordingSession", &msg);
-            Err(msg)
+            Err(StopRecordingCallError::Disconnected)
         }
     }
 }
@@ -1313,7 +1418,7 @@ fn extract_start_failure_code(err: &str) -> String {
     "start_recording_failed".to_string()
 }
 
-fn notify_ptt_failure(summary: &str, body: &str) {
+fn notify_toggle_failure(summary: &str, body: &str) {
     let now = now_millis();
     if let Ok(mut health) = health_state().lock() {
         if now.saturating_sub(health.last_notification_ms) < FAILURE_NOTIFICATION_COOLDOWN_MS {
@@ -1342,8 +1447,8 @@ fn notify_ptt_failure(summary: &str, body: &str) {
     });
 }
 
-fn next_ptt_session_id() -> u64 {
-    PTT_SESSION_COUNTER.fetch_add(1, Ordering::Relaxed)
+fn next_toggle_session_id() -> u64 {
+    TOGGLE_SESSION_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 // ── Shortcut config ────────────────────────────────────────────────────

@@ -375,13 +375,13 @@ fn refresh_debug_view(
 ) {
     let ui_logs = read_recent_logs(ui_log_buffer, MAX_LOG_LINES);
     let daemon_logs = fetch_daemon_logs(MAX_LOG_LINES);
-    let ptt_diagnostics = fetch_ptt_diagnostics_summary();
-    let ptt_recent_events = fetch_ptt_recent_events();
+    let toggle_diagnostics = fetch_toggle_diagnostics_summary();
+    let toggle_recent_events = fetch_toggle_recent_events();
     let rendered = render_debug_text(
         &ui_logs,
         daemon_logs.as_ref(),
-        ptt_diagnostics.as_ref(),
-        ptt_recent_events.as_ref(),
+        toggle_diagnostics.as_ref(),
+        toggle_recent_events.as_ref(),
     );
     text_buffer.set_text(&rendered);
 }
@@ -408,7 +408,7 @@ fn fetch_daemon_logs(limit: usize) -> Result<Vec<String>, String> {
     Ok(logs.into_iter().skip(start).collect())
 }
 
-fn fetch_ptt_diagnostics_summary() -> Result<String, String> {
+fn fetch_toggle_diagnostics_summary() -> Result<String, String> {
     let conn =
         Connection::session().map_err(|e| format!("Cannot connect to session bus: {}", e))?;
     let reply = conn
@@ -416,17 +416,17 @@ fn fetch_ptt_diagnostics_summary() -> Result<String, String> {
             Some(HANDY_BUS_NAME),
             HANDY_OBJECT_PATH,
             Some(HANDY_INTERFACE),
-            "GetPttDiagnosticsVerbose",
+            "GetToggleDiagnosticsVerbose",
             &(),
         )
-        .map_err(|e| format!("PTT diagnostics query failed: {}", e))?;
+        .map_err(|e| format!("TOGGLE diagnostics query failed: {}", e))?;
 
     let payload = reply
         .body()
         .deserialize::<String>()
-        .map_err(|e| format!("Invalid PTT diagnostics payload: {}", e))?;
+        .map_err(|e| format!("Invalid TOGGLE diagnostics payload: {}", e))?;
     let diagnostics: serde_json::Value = serde_json::from_str(&payload)
-        .map_err(|e| format!("Invalid PTT diagnostics JSON: {}", e))?;
+        .map_err(|e| format!("Invalid TOGGLE diagnostics JSON: {}", e))?;
 
     let healthy = diagnostics
         .get("healthy")
@@ -550,7 +550,7 @@ fn fetch_ptt_diagnostics_summary() -> Result<String, String> {
     ))
 }
 
-fn fetch_ptt_recent_events() -> Result<Vec<String>, String> {
+fn fetch_toggle_recent_events() -> Result<Vec<String>, String> {
     let conn =
         Connection::session().map_err(|e| format!("Cannot connect to session bus: {}", e))?;
     let reply = conn
@@ -558,34 +558,34 @@ fn fetch_ptt_recent_events() -> Result<Vec<String>, String> {
             Some(HANDY_BUS_NAME),
             HANDY_OBJECT_PATH,
             Some(HANDY_INTERFACE),
-            "GetPttRecentEvents",
+            "GetToggleRecentEvents",
             &(),
         )
-        .map_err(|e| format!("PTT recent events query failed: {}", e))?;
+        .map_err(|e| format!("TOGGLE recent events query failed: {}", e))?;
 
     reply
         .body()
         .deserialize::<Vec<String>>()
-        .map_err(|e| format!("Invalid PTT recent events payload: {}", e))
+        .map_err(|e| format!("Invalid TOGGLE recent events payload: {}", e))
 }
 
 fn render_debug_text(
     ui_logs: &[String],
     daemon_logs: Result<&Vec<String>, &String>,
-    ptt_diagnostics: Result<&String, &String>,
-    ptt_recent_events: Result<&Vec<String>, &String>,
+    toggle_diagnostics: Result<&String, &String>,
+    toggle_recent_events: Result<&Vec<String>, &String>,
 ) -> String {
     let mut out = String::new();
 
     out.push_str("=== Shortcut Diagnostics ===\n");
-    match ptt_diagnostics {
+    match toggle_diagnostics {
         Ok(summary) => {
-            out.push_str("[ptt] ");
+            out.push_str("[toggle] ");
             out.push_str(summary);
             out.push('\n');
         }
         Err(err) => {
-            out.push_str("[ptt] unavailable: ");
+            out.push_str("[toggle] unavailable: ");
             out.push_str(err);
             out.push('\n');
         }
@@ -593,17 +593,17 @@ fn render_debug_text(
 
     out.push('\n');
     out.push_str("=== Shortcut Recent Events ===\n");
-    match ptt_recent_events {
-        Ok(events) if events.is_empty() => out.push_str("[ptt-events] <no events yet>\n"),
+    match toggle_recent_events {
+        Ok(events) if events.is_empty() => out.push_str("[toggle-events] <no events yet>\n"),
         Ok(events) => {
             for line in events {
-                out.push_str("[ptt-events] ");
+                out.push_str("[toggle-events] ");
                 out.push_str(line);
                 out.push('\n');
             }
         }
         Err(err) => {
-            out.push_str("[ptt-events] unavailable: ");
+            out.push_str("[toggle-events] unavailable: ");
             out.push_str(err);
             out.push('\n');
         }

@@ -4,7 +4,7 @@
 //! to control Handy's transcription functionality.
 
 use crate::global_shortcuts::{
-    ptt_diagnostics_tuple, ptt_diagnostics_verbose_json, ptt_recent_events,
+    toggle_diagnostics_tuple, toggle_diagnostics_verbose_json, toggle_recent_events,
 };
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::transcription::TranscriptionManager;
@@ -14,7 +14,7 @@ use crate::utils::logging::read_recent_logs;
 use crate::{audio_feedback::play_feedback_sound, audio_feedback::SoundType};
 use log::{debug, error, info};
 use serde_json::json;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -156,6 +156,13 @@ impl LivePreeditStore {
             }
         }
 
+        info!(
+            "set_live_preedit: engine={}, session={}, rev={}, text_len={}",
+            target_engine_id,
+            session_id,
+            revision,
+            text.len()
+        );
         entries.insert(
             target_engine_id,
             LivePreeditEntry {
@@ -181,6 +188,10 @@ impl LivePreeditStore {
             }
         }
 
+        info!(
+            "clear_live_preedit: engine={}, session={}, rev={}",
+            target_engine_id, session_id, revision
+        );
         entries.insert(
             target_engine_id,
             LivePreeditEntry {
@@ -217,9 +228,10 @@ pub struct HandyState {
     pub recording_manager: Arc<AudioRecordingManager>,
     pub transcription_manager: Arc<TranscriptionManager>,
     pub is_recording: AtomicBool,
+    stopping_sessions: Mutex<HashSet<u64>>,
     session_counter: AtomicU64,
     /// Compatibility cache for legacy StopRecording callers.
-    /// Push-to-talk commit handoff now uses `pending_commit`.
+    /// Toggle dictation commit handoff now uses `pending_commit`.
     last_transcription_cache: Mutex<Option<String>>,
     pending_commit: PendingCommitStore,
     live_preedit: LivePreeditStore,
@@ -227,6 +239,7 @@ pub struct HandyState {
     focused_engine_id: AtomicU64,
     focused_engine_last_change_ms: AtomicU64,
     session_targets: Mutex<HashMap<u64, u64>>,
+    compat_session_id: Mutex<Option<u64>>,
     log_buffer: Arc<Mutex<VecDeque<String>>>,
 }
 
@@ -242,6 +255,7 @@ impl HandyState {
             recording_manager,
             transcription_manager,
             is_recording: AtomicBool::new(false),
+            stopping_sessions: Mutex::new(HashSet::new()),
             session_counter: AtomicU64::new(1),
             last_transcription_cache: Mutex::new(None),
             pending_commit: PendingCommitStore::default(),
@@ -250,6 +264,7 @@ impl HandyState {
             focused_engine_id: AtomicU64::new(0),
             focused_engine_last_change_ms: AtomicU64::new(now_millis()),
             session_targets: Mutex::new(HashMap::new()),
+            compat_session_id: Mutex::new(None),
             log_buffer,
         }
     }
@@ -330,23 +345,42 @@ impl HandyState {
 
     fn register_session_target(&self, session_id: u64, target_engine_id: u64) {
         if let Ok(mut targets) = self.session_targets.lock() {
+            info!(
+                "register_session_target: session {} -> engine {}",
+                session_id, target_engine_id
+            );
             targets.insert(session_id, target_engine_id);
         }
     }
 
     fn session_target(&self, session_id: u64) -> Option<u64> {
-        self.session_targets
+        let result = self
+            .session_targets
             .lock()
             .ok()
-            .and_then(|targets| targets.get(&session_id).copied())
+            .and_then(|targets| targets.get(&session_id).copied());
+        debug!(
+            "session_target lookup: session {} -> {:?}",
+            session_id, result
+        );
+        result
     }
 
     fn take_session_target(&self, session_id: u64) -> u64 {
-        self.session_targets
+        let result = self
+            .session_targets
             .lock()
             .ok()
-            .and_then(|mut targets| targets.remove(&session_id))
-            .unwrap_or(0)
+            .and_then(|mut targets| {
+                let val = targets.remove(&session_id);
+                info!(
+                    "take_session_target: session {} removed, value={:?}",
+                    session_id, val
+                );
+                val
+            })
+            .unwrap_or(0);
+        result
     }
 
     fn session_targets_snapshot(&self) -> Vec<(u64, u64)> {
@@ -357,9 +391,65 @@ impl HandyState {
     }
 
     fn clear_session_targets(&self) {
+        info!("clear_session_targets: clearing ALL session targets");
         if let Ok(mut targets) = self.session_targets.lock() {
             targets.clear();
         }
+    }
+
+    fn set_compat_session(&self, session_id: Option<u64>) {
+        if let Ok(mut compat) = self.compat_session_id.lock() {
+            *compat = session_id;
+        }
+    }
+
+    fn take_compat_session(&self) -> Option<u64> {
+        self.compat_session_id
+            .lock()
+            .ok()
+            .and_then(|mut compat| compat.take())
+    }
+
+    fn clear_compat_session_if(&self, session_id: u64) {
+        if let Ok(mut compat) = self.compat_session_id.lock() {
+            if compat.as_ref().copied() == Some(session_id) {
+                *compat = None;
+            }
+        }
+    }
+
+    fn mark_session_stopping(&self, session_id: u64) {
+        if session_id == 0 {
+            return;
+        }
+        if let Ok(mut sessions) = self.stopping_sessions.lock() {
+            sessions.insert(session_id);
+        }
+    }
+
+    fn clear_session_stopping(&self, session_id: u64) {
+        if session_id == 0 {
+            return;
+        }
+        if let Ok(mut sessions) = self.stopping_sessions.lock() {
+            sessions.remove(&session_id);
+        }
+    }
+
+    fn clear_all_session_stopping(&self) {
+        if let Ok(mut sessions) = self.stopping_sessions.lock() {
+            sessions.clear();
+        }
+    }
+
+    fn session_is_stopping(&self, session_id: u64) -> bool {
+        if session_id == 0 {
+            return false;
+        }
+        self.stopping_sessions
+            .lock()
+            .map(|sessions| sessions.contains(&session_id))
+            .unwrap_or(false)
     }
 }
 
@@ -398,13 +488,45 @@ struct HandyTranscription {
 impl HandyTranscription {
     /// Start recording audio (compatibility method)
     async fn start_recording(&self) -> fdo::Result<()> {
-        self.start_recording_internal(DEFAULT_BINDING_ID, None)
+        let session_id = self.state.next_session_id();
+        let (target_engine_id, _) = self.state.focused_engine_status();
+        self.state
+            .register_session_target(session_id, target_engine_id);
+        let binding_id = binding_id_for_session(session_id);
+        match self
+            .start_recording_internal(&binding_id, Some(session_id))
             .await
+        {
+            Ok(()) => {
+                self.state.set_compat_session(Some(session_id));
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.state.take_session_target(session_id);
+                self.state.set_compat_session(None);
+                Err(e)
+            }
+        }
     }
 
     /// Stop recording and return transcribed text (compatibility method)
     async fn stop_recording(&self) -> fdo::Result<String> {
-        self.stop_recording_internal(DEFAULT_BINDING_ID, None).await
+        let Some(session_id) = self.state.take_compat_session() else {
+            return self.stop_recording_internal(DEFAULT_BINDING_ID, None).await;
+        };
+        let binding_id = binding_id_for_session(session_id);
+        match self
+            .stop_recording_internal(&binding_id, Some(session_id))
+            .await
+        {
+            Ok(text) => Ok(text),
+            Err(e) => {
+                if self.state.is_recording.load(Ordering::SeqCst) {
+                    self.state.set_compat_session(Some(session_id));
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Start a recording session and return session id
@@ -448,8 +570,13 @@ impl HandyTranscription {
     /// Stop a specific recording session and return final text
     async fn stop_recording_session(&self, session_id: u64) -> fdo::Result<String> {
         let binding_id = binding_id_for_session(session_id);
-        self.stop_recording_internal(&binding_id, Some(session_id))
-            .await
+        let result = self
+            .stop_recording_internal(&binding_id, Some(session_id))
+            .await;
+        if result.is_ok() || !self.state.is_recording.load(Ordering::SeqCst) {
+            self.state.clear_compat_session_if(session_id);
+        }
+        result
     }
 
     /// Cancel current recording without transcription
@@ -466,6 +593,8 @@ impl HandyTranscription {
 
         self.state.recording_manager.cancel_recording();
         self.state.clear_session_targets();
+        self.state.clear_all_session_stopping();
+        self.state.set_compat_session(None);
 
         self.state.is_recording.store(false, Ordering::SeqCst);
         self.emit_recording_state_changed(false).await?;
@@ -483,20 +612,20 @@ impl HandyTranscription {
     }
 
     /// Get global shortcut diagnostics tuple
-    async fn get_ptt_diagnostics(
+    async fn get_toggle_diagnostics(
         &self,
     ) -> fdo::Result<(bool, String, String, String, u64, bool, bool, u64, u64, u64)> {
-        Ok(ptt_diagnostics_tuple())
+        Ok(toggle_diagnostics_tuple())
     }
 
     /// Get global shortcut diagnostics with verbose runtime fields.
-    async fn get_ptt_diagnostics_verbose(&self) -> fdo::Result<String> {
-        Ok(ptt_diagnostics_verbose_json())
+    async fn get_toggle_diagnostics_verbose(&self) -> fdo::Result<String> {
+        Ok(toggle_diagnostics_verbose_json())
     }
 
     /// Get recent global shortcut event lines.
-    async fn get_ptt_recent_events(&self) -> fdo::Result<Vec<String>> {
-        Ok(ptt_recent_events())
+    async fn get_toggle_recent_events(&self) -> fdo::Result<Vec<String>> {
+        Ok(toggle_recent_events())
     }
 
     /// Atomically consume pending final text for a specific engine id.
@@ -654,6 +783,9 @@ impl HandyTranscription {
         session_id: Option<u64>,
     ) -> fdo::Result<()> {
         let session_id_value = session_id.unwrap_or(0);
+        if session_id_value != 0 {
+            self.state.clear_session_stopping(session_id_value);
+        }
         debug!(
             "D-Bus: StartRecording called (binding='{}', session={})",
             binding_id, session_id_value
@@ -672,6 +804,10 @@ impl HandyTranscription {
 
         match self.state.recording_manager.try_start_recording(binding_id) {
             Ok(()) => {
+                // Set is_recording BEFORE spawning worker to prevent race condition
+                // where worker checks is_recording before it's set and exits immediately
+                self.state.is_recording.store(true, Ordering::SeqCst);
+
                 let rm = self.state.recording_manager.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_millis(100));
@@ -699,7 +835,6 @@ impl HandyTranscription {
                     }
                 }
 
-                self.state.is_recording.store(true, Ordering::SeqCst);
                 self.emit_recording_state_changed(true).await?;
                 play_feedback_sound(&Settings::new(), SoundType::Start);
                 info!("D-Bus: Recording started in {:?}", start_time.elapsed());
@@ -726,13 +861,22 @@ impl HandyTranscription {
         debug!("D-Bus: StopRecording called for binding '{}'", binding_id);
         let stop_time = Instant::now();
         let live_session_id = session_id.unwrap_or(0);
+        if live_session_id != 0 {
+            // Mark only this session as stopping so live-preedit worker does
+            // not clear preview while graceful stop/transcription is in progress.
+            self.state.mark_session_stopping(live_session_id);
+        }
+
         let target_engine_id = session_id
             .map(|sid| self.state.take_session_target(sid))
             .unwrap_or(0);
 
         let was_recording = self.state.is_recording.swap(false, Ordering::SeqCst);
         if was_recording {
-            self.emit_recording_state_changed(false).await?;
+            if let Err(e) = self.emit_recording_state_changed(false).await {
+                self.state.clear_session_stopping(live_session_id);
+                return Err(e);
+            }
         }
 
         play_feedback_sound(&Settings::new(), SoundType::Stop);
@@ -780,7 +924,11 @@ impl HandyTranscription {
                         self.state
                             .clear_live_preedit(target_engine_id, live_session_id, revision);
                     }
-                    self.emit_transcription_ready(&output_text).await?;
+                    if let Err(e) = self.emit_transcription_ready(&output_text).await {
+                        self.state.clear_session_stopping(live_session_id);
+                        return Err(e);
+                    }
+                    self.state.clear_session_stopping(live_session_id);
                     Ok(output_text)
                 }
                 Err(err) => {
@@ -790,8 +938,14 @@ impl HandyTranscription {
                             .clear_live_preedit(target_engine_id, live_session_id, revision);
                     }
                     error!("D-Bus: Transcription error: {}", err);
-                    self.emit_error(&format!("Transcription failed: {}", err))
-                        .await?;
+                    if let Err(e) = self
+                        .emit_error(&format!("Transcription failed: {}", err))
+                        .await
+                    {
+                        self.state.clear_session_stopping(live_session_id);
+                        return Err(e);
+                    }
+                    self.state.clear_session_stopping(live_session_id);
                     Err(fdo::Error::Failed(format!("Transcription failed: {}", err)))
                 }
             }
@@ -821,6 +975,7 @@ impl HandyTranscription {
                 self.state
                     .clear_live_preedit(target_engine_id, live_session_id, revision);
             }
+            self.state.clear_session_stopping(live_session_id);
             Ok(cached)
         }
     }
@@ -905,21 +1060,60 @@ fn spawn_live_preedit_worker(
         let mut accumulated_text = String::new();
 
         loop {
-            if state.session_target(session_id) != Some(target_engine_id) {
+            if !Settings::new().experimental_enabled() {
+                if !published_text.is_empty() {
+                    let revision = state.next_live_preedit_revision();
+                    state.clear_live_preedit(target_engine_id, session_id, revision);
+                    published_text.clear();
+                }
+                info!(
+                    "Live preedit worker exiting: experimental features disabled during session {}",
+                    session_id
+                );
                 break;
             }
-            if !state.is_recording.load(Ordering::SeqCst) {
+
+            // During graceful stop for this session, keep polling until
+            // stop_recording_internal clears preview and unmarks the session.
+            let session_stopping = state.session_is_stopping(session_id);
+            if !state.is_recording.load(Ordering::SeqCst) && !session_stopping {
+                // Cancel path (not graceful stop) - exit and clear preview.
+                info!(
+                    "Live preedit worker exiting: cancel path (is_recording={}, session_stopping={})",
+                    state.is_recording.load(Ordering::SeqCst),
+                    session_stopping
+                );
+                break;
+            }
+
+            // During graceful stop, keep looping even after session-target removal.
+            let current_target = state.session_target(session_id);
+            if !session_stopping && current_target != Some(target_engine_id) {
+                info!(
+                    "Live preedit worker exiting: session_target mismatch (session_id={}, expected={}, got={:?})",
+                    session_id, target_engine_id, current_target
+                );
                 break;
             }
 
             std::thread::sleep(Duration::from_millis(LIVE_PREEDIT_POLL_MS));
 
-            let Some(samples) = state.recording_manager.snapshot_recording(&binding_id) else {
+            let Some(samples) = state
+                .recording_manager
+                .snapshot_recording_window(&binding_id, LIVE_PREEDIT_MAX_WINDOW_SAMPLES)
+            else {
                 // Snapshot failures can be transient under load; keep the last preview visible
                 // and continue retrying while this session is still active.
-                if state.session_target(session_id) != Some(target_engine_id)
-                    || !state.is_recording.load(Ordering::SeqCst)
+                // Only break if NOT in graceful stop mode.
+                if !state.session_is_stopping(session_id)
+                    && (state.session_target(session_id) != Some(target_engine_id)
+                        || !state.is_recording.load(Ordering::SeqCst))
                 {
+                    info!(
+                        "Live preedit worker exiting: snapshot failure path (is_recording={}, session_target={:?})",
+                        state.is_recording.load(Ordering::SeqCst),
+                        state.session_target(session_id)
+                    );
                     break;
                 }
                 snapshot_failure_streak = snapshot_failure_streak.saturating_add(1);
@@ -953,13 +1147,7 @@ fn spawn_live_preedit_worker(
             }
             last_snapshot_len = samples.len();
 
-            let live_window = if samples.len() > LIVE_PREEDIT_MAX_WINDOW_SAMPLES {
-                samples[samples.len() - LIVE_PREEDIT_MAX_WINDOW_SAMPLES..].to_vec()
-            } else {
-                samples
-            };
-
-            let transcription = match state.transcription_manager.transcribe_for_live(live_window) {
+            let transcription = match state.transcription_manager.transcribe_for_live(samples) {
                 Ok(text) => text,
                 Err(err) => {
                     debug!(
@@ -975,7 +1163,15 @@ fn spawn_live_preedit_worker(
                 .trim()
                 .to_string();
 
-            if state.session_target(session_id) != Some(target_engine_id) {
+            // During graceful stop, stop_recording_internal handles the clear.
+            let post_transcribe_target = state.session_target(session_id);
+            if !state.session_is_stopping(session_id)
+                && post_transcribe_target != Some(target_engine_id)
+            {
+                info!(
+                    "Live preedit worker exiting: post-transcribe session_target mismatch (session_id={}, expected={}, got={:?})",
+                    session_id, target_engine_id, post_transcribe_target
+                );
                 break;
             }
 
@@ -1003,7 +1199,8 @@ fn spawn_live_preedit_worker(
             }
         }
 
-        if !published_text.is_empty() {
+        // Only clear preview if NOT in graceful stop mode (i.e. cancelled).
+        if !published_text.is_empty() && !state.session_is_stopping(session_id) {
             let revision = state.next_live_preedit_revision();
             state.clear_live_preedit(target_engine_id, session_id, revision);
         }

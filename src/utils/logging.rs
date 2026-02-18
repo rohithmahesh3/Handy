@@ -45,18 +45,25 @@ impl Log for RingBufferLogger {
     }
 
     fn log(&self, record: &Record) {
-        if self.enabled(record.metadata()) {
+        // Always capture info+ level logs to buffer for GUI debug window
+        let should_buffer = record.level() <= log::Level::Info;
+
+        if self.enabled(record.metadata()) || should_buffer {
             let msg = format!("[{}] {}", record.level(), record.args());
 
-            // Console output via env_logger
-            self.inner.log(record);
+            // Console output via env_logger (respects RUST_LOG)
+            if self.enabled(record.metadata()) {
+                self.inner.log(record);
+            }
 
-            // Buffer output
-            if let Ok(mut buffer) = self.buffer.lock() {
-                if buffer.len() >= self.capacity {
-                    buffer.pop_front();
+            // Buffer output (always captures info+)
+            if should_buffer {
+                if let Ok(mut buffer) = self.buffer.lock() {
+                    if buffer.len() >= self.capacity {
+                        buffer.pop_front();
+                    }
+                    buffer.push_back(msg);
                 }
-                buffer.push_back(msg);
             }
         }
     }

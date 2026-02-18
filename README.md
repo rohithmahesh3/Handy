@@ -93,7 +93,7 @@ ibus write-cache
 ibus restart
 ```
 
-### Push-to-talk does not trigger
+### Toggle dictation does not trigger
 
 ```bash
 systemctl --user status handy.service

@@ -25,7 +25,7 @@ Supplements:    (gnome-shell and fedora-release-workstation)
 
 %description
 Handy provides speech-to-text dictation integrated with IBus
-for GNOME on Wayland. Dictation is push-to-talk based and
+for GNOME on Wayland. Dictation uses a global toggle shortcut and
 works through Handy's configurable global shortcut.
 
 %prep

@@ -26,8 +26,6 @@ struct RuntimeState {
     recording_manager: Arc<AudioRecordingManager>,
     model_manager: Arc<ModelManager>,
     transcription_manager: Arc<TranscriptionManager>,
-    #[allow(dead_code)]
-    log_buffer: Arc<Mutex<VecDeque<String>>>,
 }
 
 fn level_filter_from_settings(settings: &Settings) -> log::LevelFilter {
@@ -48,20 +46,8 @@ fn init_logging(settings: &Settings) -> Arc<Mutex<VecDeque<String>>> {
     let logger = RingBufferLogger::new(200);
     let buffer = logger.get_buffer_handle();
 
-    // Only initialize once. If called multiple times (e.g. tests), reuse buffer?
-    // But LOGGER_INIT handles synchronization.
-    // However, set_boxed_logger fails if called twice.
-    // We'll wrap in check.
-
-    // We can't easily retrieve the buffer if already initialized.
-    // But init_logging is called once per process usually.
-    // We'll assume fresh start.
-
-    // We use a static check before setting logger
+    // Process-global logger can already be initialized in test or multi-start flows.
     if let Err(e) = logger.init_globally() {
-        // If already initialized, we can't get the buffer handle of the EXISTING logger easily without unsafe or global static.
-        // For now, returning a new disconnected buffer is safe-ish for avoiding crashes,
-        // though UI won't show startup logs if re-initialized.
         eprintln!("Logger already initialized: {}", e);
     }
 
@@ -101,7 +87,6 @@ fn init_runtime() -> (Arc<RuntimeState>, Arc<HandyState>) {
         recording_manager: recording_manager.clone(),
         model_manager: model_manager.clone(),
         transcription_manager: transcription_manager.clone(),
-        log_buffer: log_buffer.clone(),
     });
 
     let handy_state = Arc::new(HandyState::new(
@@ -269,7 +254,7 @@ fn wire_settings_sync(state: &Arc<RuntimeState>, handy_state: &Arc<HandyState>) 
         .connect_changed(Some("experimental-enabled"), {
             move |_| {
                 log::info!(
-                    "Experimental features setting changed - restart required for full effect"
+                    "Experimental features setting changed - applies immediately to new recording sessions"
                 );
             }
         });

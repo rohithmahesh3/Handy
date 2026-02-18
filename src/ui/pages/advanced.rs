@@ -138,7 +138,7 @@ impl AdvancedPage {
         refresh_button.add_css_class("flat");
         let status_row_for_click = status_row.clone();
         refresh_button.connect_clicked(move |_| {
-            status_row_for_click.set_subtitle(&load_ptt_diagnostics_subtitle());
+            status_row_for_click.set_subtitle(&load_toggle_diagnostics_subtitle());
         });
         status_row.add_suffix(&refresh_button);
         diagnostics_group.add(&status_row);
@@ -197,10 +197,10 @@ impl AdvancedPage {
         diagnostics_group.add(&authorize_row);
         main_box.append(&diagnostics_group);
 
-        status_row.set_subtitle(&load_ptt_diagnostics_subtitle());
+        status_row.set_subtitle(&load_toggle_diagnostics_subtitle());
         let status_row_for_timer = status_row.clone();
         glib::timeout_add_local(Duration::from_secs(4), move || {
-            status_row_for_timer.set_subtitle(&load_ptt_diagnostics_subtitle());
+            status_row_for_timer.set_subtitle(&load_toggle_diagnostics_subtitle());
             glib::ControlFlow::Continue
         });
 
@@ -225,7 +225,7 @@ impl Page for AdvancedPage {
     }
 }
 
-fn load_ptt_diagnostics_subtitle() -> String {
+fn load_toggle_diagnostics_subtitle() -> String {
     let conn = match Connection::session() {
         Ok(conn) => conn,
         Err(e) => return format!("Unavailable: cannot connect to session bus ({})", e),
@@ -235,7 +235,7 @@ fn load_ptt_diagnostics_subtitle() -> String {
         Some(HANDY_BUS_NAME),
         HANDY_OBJECT_PATH,
         Some(HANDY_INTERFACE),
-        "GetPttDiagnosticsVerbose",
+        "GetToggleDiagnosticsVerbose",
         &(),
     );
     if let Ok(reply) = verbose_reply {
@@ -453,7 +453,7 @@ fn load_ptt_diagnostics_subtitle() -> String {
         Some(HANDY_BUS_NAME),
         HANDY_OBJECT_PATH,
         Some(HANDY_INTERFACE),
-        "GetPttDiagnostics",
+        "GetToggleDiagnostics",
         &(),
     ) {
         Ok(reply) => reply,

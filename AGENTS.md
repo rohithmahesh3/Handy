@@ -83,7 +83,7 @@ Generated files are not intended to be committed.
 ### Process model
 
 - `handy`: preferences UI only.
-- `handy --daemon`: owns recording state, transcription, D-Bus API, global PTT registration, evdev keyboard monitoring.
+- `handy --daemon`: owns recording state, transcription, D-Bus API, global toggle shortcut runtime, evdev keyboard monitoring.
 - `ibus-handy-engine`: IBus callbacks and commit path to focused app.
 
 ### D-Bus contract
@@ -101,11 +101,12 @@ Methods:
 - `StopRecordingSession(u64) -> string`
 - `CancelRecording()`
 - `GetState() -> (bool is_recording, bool has_model_selected)`
-- `GetPttDiagnostics() -> (bool, string, string, string, u64, bool, bool, u64, u64, u64)`
-- `GetPttDiagnosticsVerbose() -> string` (JSON)
-- `GetPttRecentEvents() -> array<string>`
+- `GetToggleDiagnostics() -> (bool, string, string, string, u64, bool, bool, u64, u64, u64)`
+- `GetToggleDiagnosticsVerbose() -> string` (JSON)
+- `GetToggleRecentEvents() -> array<string>`
 - `TakePendingCommitForEngine(u64 engine_id) -> (u64, string)`
 - `GetPendingCommitStats() -> string` (JSON)
+- `GetLivePreeditForEngine(u64 engine_id) -> (u64 session_id, u64 revision, bool visible, string text)`
 - `SetFocusedEngine(u64 engine_id, bool focused)`
 - `GetFocusedEngine() -> (u64 focused_engine_id, u64 last_change_ms)`
 - `GetRecentLogs() -> array<string>`
@@ -128,9 +129,9 @@ Important behavior:
 - `CancelRecording` does **not** clear pending commit.
 - `pending_commit` stores `(session_id, target_engine_id, text)` and keeps up to 32 items, dropping oldest when full.
 - Debug transcription testing does **not** drain pending commits.
-- PTT does **not** block on pending queue drain before starting a new session.
+- Toggle recording does **not** block on pending queue drain before starting a new session.
 
-## Shortcut Behavior
+### Shortcut behavior
 
 Handy uses a global press-to-toggle dictation shortcut.
 
@@ -138,7 +139,7 @@ Settings keys used for the global shortcut:
 - `dictation-shortcut-keyval` (GDK keyval stored in GSettings)
 - `dictation-shortcut-modifiers` (GDK modifier bitmask)
 
-Global PTT uses **evdev** (`src/global_shortcuts.rs`):
+Global toggle flow uses **evdev** (`src/global_shortcuts.rs`):
 1. Discover keyboard devices in `/dev/input/event*`, open event streams.
 2. Resolve GDK keyval+modifiers to evdev keycodes (`src/key_mapping.rs`).
 3. On press while idle:
@@ -147,11 +148,11 @@ Global PTT uses **evdev** (`src/global_shortcuts.rs`):
    - call `StartRecordingSessionForTarget(focused_engine_id)`.
 4. On next press while recording:
    - call `StopRecordingSession` and wait for result,
-   - do **not** auto-restore input source in PTT path.
+   - do **not** auto-restore input source in toggle flow.
 5. Final text delivery:
    - engine-side pending commit listener (`src/ibus_engine/context.rs`) polls `TakePendingCommitForEngine(engine_id)`,
-   - commits via `ibus_engine_commit_text` on GTK main context while engine is active.
-6. `disable()` still performs a final `TakePendingCommitForEngine(engine_id)` consume as fallback.
+   - commits via `ibus_engine_commit_text` while engine is active.
+6. `disable()` still performs a final bounded `TakePendingCommitForEngine(engine_id)` fallback consume.
 
 This architecture intentionally avoids autoswitch restore races.
 
@@ -164,10 +165,10 @@ This approach requires read access to `/dev/input/event*` devices. A udev rule
    Use FFI-backed helpers (`src/ibus_control.rs`, `ibus-sys/wrapper.c`).
 
 2. Do not block IBus callback threads with long operations.
-   Stop/transcribe work stays in daemon; engine commit listener runs in worker thread and invokes GTK main context for UI/IBus operations.
+   Stop/transcribe work stays in daemon; engine-side workers enqueue UI/IBus commands that are applied on main-thread callbacks.
 
 3. Preserve GObject lifetime safety in async commit paths.
-   Keep ref/unref pattern intact in `src/ibus_engine/context.rs`.
+   Keep the command-queue + timer callback pattern intact in `src/ibus_engine/context.rs`.
 
 4. Keep evdev device lifecycle clean.
    Close device streams on session restart; abort reader tasks on config change.
@@ -175,7 +176,7 @@ This approach requires read access to `/dev/input/event*` devices. A udev rule
 5. Keep daemon state transitions consistent.
    `RecordingStateChanged(false)` should happen immediately when stop starts, not after long transcription.
 
-6. Keep commit delivery single-path in PTT flow.
+6. Keep commit delivery single-path in toggle flow.
    Do not reintroduce direct restore/commit in `global_shortcuts.rs`.
 
 ## Settings and Feature Notes
@@ -183,7 +184,7 @@ This approach requires read access to `/dev/input/event*` devices. A udev rule
 Schema file: `data/com.handy.Transcription.gschema.xml`.
 
 Current active behavior:
-- Push-to-talk recording
+- Toggle dictation recording
 - Optional audio feedback sounds
 - Optional LLM post-processing on final transcript
 
@@ -198,7 +199,7 @@ Core:
 - `src/dbus/server.rs`
 - `src/settings.rs`
 
-IBus and PTT:
+IBus and toggle path:
 - `src/global_shortcuts.rs`
 - `src/key_mapping.rs`
 - `src/ibus_engine/context.rs`

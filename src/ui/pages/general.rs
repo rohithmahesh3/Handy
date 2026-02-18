@@ -46,18 +46,18 @@ impl GeneralPage {
             .description("Press shortcut once to start recording, and press it again to stop.")
             .build();
 
-        let ptt_row = ActionRow::builder()
+        let toggle_row = ActionRow::builder()
             .title("Dictation Shortcut")
             .subtitle("Click the button, then press a shortcut. Press Esc to cancel capture.")
             .build();
-        let ptt_button = Button::with_label(&format_shortcut_label(
+        let toggle_button = Button::with_label(&format_shortcut_label(
             state.settings.dictation_shortcut_keyval(),
             state.settings.dictation_shortcut_modifiers(),
         ));
-        ptt_button.add_css_class("flat");
-        ptt_button.set_can_focus(true);
-        ptt_row.add_suffix(&ptt_button);
-        recording_group.add(&ptt_row);
+        toggle_button.add_css_class("flat");
+        toggle_button.set_can_focus(true);
+        toggle_row.add_suffix(&toggle_button);
+        recording_group.add(&toggle_row);
 
         let mute_row = ActionRow::builder()
             .title("Mute While Recording")
@@ -80,8 +80,8 @@ impl GeneralPage {
         recording_group.add(&mute_row);
 
         let is_capturing = Rc::new(Cell::new(false));
-        ptt_button.connect_clicked({
-            let button = ptt_button.clone();
+        toggle_button.connect_clicked({
+            let button = toggle_button.clone();
             let is_capturing = is_capturing.clone();
             move |_| {
                 is_capturing.set(true);
@@ -93,7 +93,7 @@ impl GeneralPage {
         let key_controller = EventControllerKey::new();
         key_controller.connect_key_pressed({
             let settings = state.settings.clone();
-            let button = ptt_button.clone();
+            let button = toggle_button.clone();
             let is_capturing = is_capturing.clone();
             move |_, keyval, _, state| {
                 if !is_capturing.get() {
@@ -125,7 +125,7 @@ impl GeneralPage {
                 Propagation::Stop
             }
         });
-        ptt_button.add_controller(key_controller);
+        toggle_button.add_controller(key_controller);
 
         vbox.append(&recording_group);
 

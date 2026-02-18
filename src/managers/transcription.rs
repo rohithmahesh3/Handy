@@ -67,7 +67,6 @@ pub struct TranscriptionManager {
     shared: Arc<SharedState>,
     model_manager: Arc<ModelManager>,
     shutdown_signal: Arc<AtomicBool>,
-    #[allow(dead_code)]
     watcher_handle: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
@@ -547,5 +546,10 @@ impl TranscriptionManager {
 impl Drop for TranscriptionManager {
     fn drop(&mut self) {
         self.shutdown_signal.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.watcher_handle.lock().unwrap().take() {
+            if let Err(err) = handle.join() {
+                warn!("Transcription watcher thread join failed: {:?}", err);
+            }
+        }
     }
 }

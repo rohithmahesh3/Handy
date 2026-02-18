@@ -1,15 +1,20 @@
 use std::ffi::{c_void, CString};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use ibus_sys::{g_object_unref, gboolean, gpointer, guint, IBusEngine};
 use log::{debug, error, info, warn};
 use notify_rust::Notification;
 use zbus::blocking::Connection;
 
-use crate::settings::Settings;
 use crate::utils::launch::open_handy_ui;
-use ibus_sys::{g_object_unref, gboolean, gpointer, guint, IBusEngine};
+
+/// Wrapper to make *mut IBusEngine Send-safe.
+/// This is safe because we ONLY access the pointer from the main thread
+/// via the timer callback, never from background threads.
+struct EnginePtr(*mut IBusEngine);
+unsafe impl Send for EnginePtr {}
 
 const HANDY_BUS_NAME: &str = "com.handy.Transcription";
 const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
@@ -18,6 +23,190 @@ const PENDING_COMMIT_POLL_MS: u64 = 60;
 const PENDING_COMMIT_FAILURE_RECONNECT_THRESHOLD: u64 = 5;
 const LIVE_PREEDIT_POLL_TICKS: u64 = 4;
 const LIVE_PREEDIT_REFRESH_TICKS: u64 = 5;
+const COMMAND_POLL_INTERVAL_MS: u32 = 60;
+const DISABLE_PENDING_COMMIT_TIMEOUT_MS: u64 = 80;
+
+/// Commands that can be sent from background threads to be processed on the main thread.
+/// Engine pointers never cross thread boundaries - only engine IDs are used.
+#[derive(Debug, Clone)]
+enum EngineCommand {
+    UpdatePreedit {
+        engine_id: u64,
+        text: String,
+        cursor_pos: u32,
+    },
+    HidePreedit {
+        engine_id: u64,
+    },
+    CommitText {
+        engine_id: u64,
+        text: String,
+    },
+}
+
+/// Shared command queue accessible from both threads.
+/// Background thread pushes commands, timer callback on main thread processes them.
+struct CommandQueue {
+    commands: Vec<EngineCommand>,
+}
+
+static COMMAND_QUEUE: OnceLock<Mutex<CommandQueue>> = OnceLock::new();
+
+fn get_command_queue() -> &'static Mutex<CommandQueue> {
+    COMMAND_QUEUE.get_or_init(|| {
+        Mutex::new(CommandQueue {
+            commands: Vec::new(),
+        })
+    })
+}
+
+/// Current engine pointer and ID, only accessed from main thread via timer callback.
+/// Set in enable(), cleared in disable().
+static CURRENT_ENGINE: Mutex<Option<(EnginePtr, u64)>> = Mutex::new(None);
+
+/// Ensures timer is only started once.
+static TIMER_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Timer callback that processes pending commands on the main thread.
+/// This is a simple extern "C" function - no Rust closure trampoline that could crash.
+unsafe extern "C" fn process_commands_callback(_data: gpointer) -> gboolean {
+    // Get commands from queue
+    let commands: Vec<EngineCommand> = {
+        let mut queue = match get_command_queue().lock() {
+            Ok(q) => q,
+            Err(_) => return 1, // G_SOURCE_CONTINUE
+        };
+        std::mem::take(&mut queue.commands)
+    };
+
+    // Get current engine
+    let engine_guard = match CURRENT_ENGINE.lock() {
+        Ok(g) => g,
+        Err(_) => return 1, // G_SOURCE_CONTINUE
+    };
+
+    if let Some((EnginePtr(engine_ptr), current_engine_id)) = *engine_guard {
+        for cmd in commands {
+            match cmd {
+                EngineCommand::UpdatePreedit {
+                    engine_id,
+                    text,
+                    cursor_pos,
+                } => {
+                    if engine_id == current_engine_id && !engine_ptr.is_null() {
+                        debug!(
+                            "Timer: UpdatePreedit engine_id={}, text_len={}",
+                            engine_id,
+                            text.len()
+                        );
+                        update_preedit_text(engine_ptr, &text, cursor_pos);
+                    }
+                }
+                EngineCommand::HidePreedit { engine_id } => {
+                    if engine_id == current_engine_id && !engine_ptr.is_null() {
+                        debug!("Timer: HidePreedit engine_id={}", engine_id);
+                        hide_preedit_text(engine_ptr);
+                    }
+                }
+                EngineCommand::CommitText { engine_id, text } => {
+                    if engine_id == current_engine_id && !engine_ptr.is_null() {
+                        debug!(
+                            "Timer: CommitText engine_id={}, text_len={}",
+                            engine_id,
+                            text.len()
+                        );
+                        hide_preedit_text(engine_ptr);
+                        commit_text_to_engine(engine_ptr, &text);
+                    }
+                }
+            }
+        }
+    }
+
+    1 // G_SOURCE_CONTINUE - keep timer running
+}
+
+/// Start the command processing timer. Only starts once per process lifetime.
+fn ensure_timer_started() {
+    if !TIMER_STARTED.swap(true, Ordering::SeqCst) {
+        unsafe {
+            glib::ffi::g_timeout_add(
+                COMMAND_POLL_INTERVAL_MS,
+                Some(process_commands_callback),
+                std::ptr::null_mut(),
+            );
+        }
+        info!(
+            "Command processing timer started ({}ms interval)",
+            COMMAND_POLL_INTERVAL_MS
+        );
+    }
+}
+
+/// Helper to send a command from background thread
+fn send_command(cmd: EngineCommand) {
+    if let Ok(mut queue) = get_command_queue().lock() {
+        queue.commands.push(cmd);
+    }
+}
+
+fn drain_engine_commands_for_disable(engine: *mut IBusEngine, engine_id: u64) -> usize {
+    if engine.is_null() {
+        return 0;
+    }
+
+    let pending = match get_command_queue().lock() {
+        Ok(mut queue) => std::mem::take(&mut queue.commands),
+        Err(_) => return 0,
+    };
+
+    let mut remaining = Vec::new();
+    let mut commits = Vec::new();
+    let mut hide_requested = false;
+
+    for cmd in pending {
+        match cmd {
+            EngineCommand::UpdatePreedit {
+                engine_id: cmd_engine_id,
+                ..
+            } if cmd_engine_id == engine_id => {
+                // Disable path intentionally drops stale preedit updates.
+            }
+            EngineCommand::HidePreedit {
+                engine_id: cmd_engine_id,
+            } if cmd_engine_id == engine_id => {
+                hide_requested = true;
+            }
+            EngineCommand::CommitText {
+                engine_id: cmd_engine_id,
+                text,
+            } if cmd_engine_id == engine_id => {
+                commits.push(text);
+                hide_requested = true;
+            }
+            _ => remaining.push(cmd),
+        }
+    }
+
+    if let Ok(mut queue) = get_command_queue().lock() {
+        if queue.commands.is_empty() {
+            queue.commands = remaining;
+        } else {
+            remaining.append(&mut queue.commands);
+            queue.commands = remaining;
+        }
+    }
+
+    if hide_requested {
+        hide_preedit_text(engine);
+    }
+
+    for text in &commits {
+        commit_text_to_engine(engine, text);
+    }
+
+    commits.len()
+}
 
 pub struct HandyContext {
     connection: Option<Connection>,
@@ -25,8 +214,7 @@ pub struct HandyContext {
     is_enabled: bool,
     notification_shown: bool,
     pending_commit_cancel: Option<Arc<AtomicBool>>,
-    pending_commit_engine_addr: Option<usize>,
-    pending_commit_live_preedit_enabled: bool,
+    current_engine_id: Option<u64>,
 }
 
 impl HandyContext {
@@ -37,8 +225,7 @@ impl HandyContext {
             is_enabled: false,
             notification_shown: false,
             pending_commit_cancel: None,
-            pending_commit_engine_addr: None,
-            pending_commit_live_preedit_enabled: false,
+            current_engine_id: None,
         }
     }
 
@@ -61,17 +248,13 @@ impl HandyContext {
     }
 
     pub fn focus_in(&mut self, _engine: *mut IBusEngine) {
-        debug!("Focus in");
+        info!("IBus focus_in: engine={:?}", _engine);
         self.is_focused = true;
-
-        if self.connection.is_none() {
-            let _ = self.try_connect();
-        }
         self.set_focused_engine_state(_engine, true);
     }
 
     pub fn focus_out(&mut self, engine: *mut IBusEngine) {
-        debug!("Focus out");
+        info!("IBus focus_out: engine={:?}", engine);
         self.is_focused = false;
         hide_preedit_text(engine);
         self.set_focused_engine_state(engine, false);
@@ -85,15 +268,36 @@ impl HandyContext {
         debug!("Engine enabled");
         self.is_enabled = true;
 
+        let engine_id = engine as u64;
+        self.current_engine_id = Some(engine_id);
+
+        // Store current engine in static for timer callback access
+        if let Ok(mut current) = CURRENT_ENGINE.lock() {
+            *current = Some((EnginePtr(engine), engine_id));
+        }
+
+        // Ensure command processing timer is running
+        ensure_timer_started();
+
         if self.connection.is_none() && !self.try_connect() {
             return;
         }
 
         self.set_focused_engine_state(engine, self.is_focused);
-        self.ensure_pending_commit_listener(engine, Settings::new().experimental_enabled());
+        self.ensure_pending_commit_listener(engine_id);
 
         if !self.notification_shown {
-            if let Some(conn) = &self.connection {
+            self.notification_shown = true;
+            std::thread::spawn(|| {
+                let conn = match Connection::session() {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        warn!("Failed to open D-Bus session for GetState: {}", e);
+                        HandyContext::show_service_notification();
+                        return;
+                    }
+                };
+
                 match conn.call_method(
                     Some(HANDY_BUS_NAME),
                     HANDY_OBJECT_PATH,
@@ -104,59 +308,47 @@ impl HandyContext {
                     Ok(reply) => {
                         if let Ok((_, has_model)) = reply.body().deserialize::<(bool, bool)>() {
                             if !has_model {
-                                self.show_model_notification();
-                                self.notification_shown = true;
+                                HandyContext::show_model_notification();
                             }
                         }
                     }
                     Err(e) => {
                         warn!("Failed to get state from daemon: {}", e);
-                        self.show_service_notification();
-                        self.notification_shown = true;
+                        HandyContext::show_service_notification();
                     }
                 }
-            }
+            });
         }
     }
 
-    fn ensure_pending_commit_listener(
-        &mut self,
-        engine: *mut IBusEngine,
-        live_preedit_enabled: bool,
-    ) {
-        let engine_addr = engine as usize;
+    fn ensure_pending_commit_listener(&mut self, engine_id: u64) {
         if self.pending_commit_cancel.is_some() {
-            if self.pending_commit_engine_addr == Some(engine_addr)
-                && self.pending_commit_live_preedit_enabled == live_preedit_enabled
-            {
+            if self.current_engine_id == Some(engine_id) {
                 return;
             }
             self.stop_pending_commit_listener();
         }
 
         let cancel = Arc::new(AtomicBool::new(false));
-        self.pending_commit_cancel = Some(cancel.clone());
-        self.pending_commit_engine_addr = Some(engine_addr);
-        self.pending_commit_live_preedit_enabled = live_preedit_enabled;
 
-        unsafe {
-            ibus_sys::g_object_ref(engine as gpointer);
-        }
+        self.pending_commit_cancel = Some(cancel.clone());
+
+        // Note: Engine pointer NEVER crosses thread boundaries.
+        // We only pass the engine_id, and commands are sent via the command queue.
+        // The main thread processes commands via the timer callback and safely
+        // accesses the engine pointer there.
 
         std::thread::spawn(move || {
             let mut conn = match Connection::session() {
                 Ok(conn) => conn,
                 Err(e) => {
                     error!("Failed to create pending commit DBus connection: {}", e);
-                    glib::MainContext::default().invoke(move || unsafe {
-                        g_object_unref(engine_addr as gpointer);
-                    });
                     return;
                 }
             };
             let mut failure_streak: u64 = 0;
             let mut poll_tick: u64 = 0;
-            let mut live_preedit_supported = live_preedit_enabled;
+            let mut live_preedit_supported = true;
             let mut last_live_revision: u64 = 0;
             let mut last_live_visible = false;
             let mut last_live_text = String::new();
@@ -167,8 +359,6 @@ impl HandyContext {
                 if cancel.load(Ordering::SeqCst) {
                     break;
                 }
-
-                let engine_id = engine_addr as u64;
 
                 poll_tick = poll_tick.wrapping_add(1);
 
@@ -193,20 +383,25 @@ impl HandyContext {
                                     let should_hide = !should_show
                                         && (last_live_visible || revision > last_live_revision);
 
-                                    if should_apply || should_hide {
-                                        let preedit_text_for_ui = preedit_text.clone();
-                                        glib::MainContext::default().invoke(move || {
-                                            let engine_ptr = engine_addr as *mut IBusEngine;
-                                            if should_show {
-                                                update_preedit_text(
-                                                    engine_ptr,
-                                                    &preedit_text_for_ui,
-                                                );
-                                            } else {
-                                                hide_preedit_text(engine_ptr);
-                                            }
-                                        });
+                                    debug!(
+                                        "IBus poll: engine={}, rev={}, visible={}, text_len={}, should_show={}, should_hide={}",
+                                        engine_id, revision, visible, preedit_text.len(), should_show, should_hide
+                                    );
 
+                                    if cancel.load(Ordering::SeqCst) {
+                                        break;
+                                    }
+
+                                    if should_apply {
+                                        let text_len = preedit_text.chars().count() as u32;
+                                        send_command(EngineCommand::UpdatePreedit {
+                                            engine_id,
+                                            text: preedit_text.clone(),
+                                            cursor_pos: text_len,
+                                        });
+                                        live_refresh_tick = 0;
+                                    } else if should_hide {
+                                        send_command(EngineCommand::HidePreedit { engine_id });
                                         live_refresh_tick = 0;
                                     } else {
                                         live_refresh_tick = live_refresh_tick.saturating_add(1);
@@ -294,22 +489,23 @@ impl HandyContext {
                 if session_id == 0 || final_text.is_empty() {
                     continue;
                 }
-                let commit_success_ms = now_millis();
 
-                glib::MainContext::default().invoke(move || {
-                    let engine_ptr = engine_addr as *mut IBusEngine;
-                    info!(
-                        "Committed pending transcription from session {} while engine stayed active (last_success_ms={})",
-                        session_id, commit_success_ms
-                    );
-                    hide_preedit_text(engine_ptr);
-                    commit_text_to_engine(engine_ptr, &final_text);
+                if cancel.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                info!(
+                    "Pending commit ready: session={}, text_len={}",
+                    session_id,
+                    final_text.len()
+                );
+
+                // Send commit command via queue - main thread will process it
+                send_command(EngineCommand::CommitText {
+                    engine_id,
+                    text: final_text,
                 });
             }
-
-            glib::MainContext::default().invoke(move || unsafe {
-                g_object_unref(engine_addr as gpointer);
-            });
         });
     }
 
@@ -317,37 +513,41 @@ impl HandyContext {
         if let Some(cancel) = self.pending_commit_cancel.take() {
             cancel.store(true, Ordering::SeqCst);
         }
-        self.pending_commit_engine_addr = None;
-        self.pending_commit_live_preedit_enabled = false;
     }
 
     fn set_focused_engine_state(&mut self, engine: *mut IBusEngine, focused: bool) {
         if engine.is_null() {
             return;
         }
-        if self.connection.is_none() && !self.try_connect() {
-            return;
-        }
-        let Some(conn) = self.connection.clone() else {
-            return;
-        };
         let engine_id = engine as usize as u64;
-        if let Err(e) = conn.call_method(
-            Some(HANDY_BUS_NAME),
-            HANDY_OBJECT_PATH,
-            Some(HANDY_INTERFACE),
-            "SetFocusedEngine",
-            &(engine_id, focused),
-        ) {
-            warn!(
-                "SetFocusedEngine(engine_id={}, focused={}) failed: {}",
-                engine_id, focused, e
-            );
-            self.connection = None;
-        }
+        std::thread::spawn(move || {
+            let conn = match Connection::session() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    warn!(
+                        "SetFocusedEngine(engine_id={}, focused={}) failed to open session bus: {}",
+                        engine_id, focused, e
+                    );
+                    return;
+                }
+            };
+
+            if let Err(e) = conn.call_method(
+                Some(HANDY_BUS_NAME),
+                HANDY_OBJECT_PATH,
+                Some(HANDY_INTERFACE),
+                "SetFocusedEngine",
+                &(engine_id, focused),
+            ) {
+                warn!(
+                    "SetFocusedEngine(engine_id={}, focused={}) failed: {}",
+                    engine_id, focused, e
+                );
+            }
+        });
     }
 
-    fn show_model_notification(&self) {
+    fn show_model_notification() {
         debug!("Showing model notification");
 
         std::thread::spawn(|| {
@@ -376,7 +576,7 @@ impl HandyContext {
         });
     }
 
-    fn show_service_notification(&self) {
+    fn show_service_notification() {
         debug!("Showing service notification");
 
         std::thread::spawn(|| {
@@ -407,13 +607,32 @@ impl HandyContext {
 
     pub fn disable(&mut self, engine: *mut IBusEngine) {
         debug!("Engine disabled");
+
+        let engine_id = engine as usize as u64;
+
         self.set_focused_engine_state(engine, false);
         self.stop_pending_commit_listener();
-        hide_preedit_text(engine);
+        let queued_commits = drain_engine_commands_for_disable(engine, engine_id);
         self.commit_pending_transcription(engine);
+        let queued_commits = queued_commits + drain_engine_commands_for_disable(engine, engine_id);
+
+        if queued_commits > 0 {
+            debug!(
+                "Disable path committed {} queued pending transcript(s) before teardown",
+                queued_commits
+            );
+        }
+
+        // Clear current engine in static after draining pending commands.
+        if let Ok(mut current) = CURRENT_ENGINE.lock() {
+            *current = None;
+        }
+
+        hide_preedit_text(engine);
         self.is_enabled = false;
         self.is_focused = false;
         self.notification_shown = false;
+        self.current_engine_id = None;
     }
 
     pub fn process_key_event(
@@ -427,32 +646,37 @@ impl HandyContext {
     }
 
     fn commit_pending_transcription(&mut self, engine: *mut IBusEngine) {
-        if self.connection.is_none() && !self.try_connect() {
-            return;
-        }
+        let engine_id = engine as usize as u64;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = Connection::session()
+                .ok()
+                .and_then(|conn| {
+                    conn.call_method(
+                        Some(HANDY_BUS_NAME),
+                        HANDY_OBJECT_PATH,
+                        Some(HANDY_INTERFACE),
+                        "TakePendingCommitForEngine",
+                        &(engine_id,),
+                    )
+                    .ok()
+                })
+                .and_then(|reply| reply.body().deserialize::<(u64, String)>().ok())
+                .unwrap_or((0, String::new()));
+            let _ = tx.send(result);
+        });
 
-        let Some(conn) = self.connection.as_ref() else {
-            return;
-        };
-
-        let reply = conn.call_method(
-            Some(HANDY_BUS_NAME),
-            HANDY_OBJECT_PATH,
-            Some(HANDY_INTERFACE),
-            "TakePendingCommitForEngine",
-            &(engine as usize as u64,),
-        );
-
-        let (session_id, text) = match reply {
-            Ok(reply) => reply
-                .body()
-                .deserialize::<(u64, String)>()
-                .unwrap_or((0, String::new())),
-            Err(e) => {
-                debug!("TakePendingCommitForEngine unavailable on disable: {}", e);
-                (0, String::new())
-            }
-        };
+        let (session_id, text) =
+            match rx.recv_timeout(Duration::from_millis(DISABLE_PENDING_COMMIT_TIMEOUT_MS)) {
+                Ok(value) => value,
+                Err(_) => {
+                    debug!(
+                        "TakePendingCommitForEngine timed out on disable after {} ms",
+                        DISABLE_PENDING_COMMIT_TIMEOUT_MS
+                    );
+                    return;
+                }
+            };
 
         let trimmed = text.trim();
         if trimmed.is_empty() {
@@ -470,14 +694,7 @@ impl HandyContext {
     }
 }
 
-fn now_millis() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-fn update_preedit_text(engine: *mut IBusEngine, text: &str) {
+fn update_preedit_text(engine: *mut IBusEngine, text: &str, cursor_pos: u32) {
     if engine.is_null() {
         return;
     }
@@ -496,7 +713,7 @@ fn update_preedit_text(engine: *mut IBusEngine, text: &str) {
             ibus_sys::ibus_engine_update_preedit_text(
                 engine,
                 ibus_text,
-                text.chars().count() as guint,
+                cursor_pos as guint,
                 1 as gboolean,
             );
             ibus_sys::ibus_engine_show_preedit_text(engine);
