@@ -743,18 +743,14 @@ fn on_global_pressed(ptt_state: &mut PttState, internal_tx: &mpsc::UnboundedSend
     }
 
     let current_engine = match get_current_engine() {
-        Ok(engine) => engine,
+        Ok(engine) => Some(engine),
         Err(e) => {
             warn!(
-                "Global PTT press ignored: failed to read IBus engine: {}",
+                "Global PTT press could not read IBus engine (continuing with verified switch): {}",
                 e
             );
-            mark_health_error("ibus_get_engine_failed", &e.to_string());
-            notify_ptt_failure(
-                "Cannot start push-to-talk",
-                "Failed to read current input source from IBus.",
-            );
-            return;
+            push_ptt_event(format!("ptt:read-current-engine failed (non-fatal): {}", e));
+            None
         }
     };
 
@@ -794,7 +790,10 @@ fn on_global_pressed(ptt_state: &mut PttState, internal_tx: &mpsc::UnboundedSend
             return;
         }
     }
-    if is_handy_engine(&current_engine) {
+    if current_engine
+        .as_ref()
+        .is_some_and(|engine| is_handy_engine(engine))
+    {
         mark_switch_confirm(0);
         push_ptt_event(format!("ptt:{} already on handy source", ptt_session_id));
         bump_press_while_handy();
@@ -804,9 +803,10 @@ fn on_global_pressed(ptt_state: &mut PttState, internal_tx: &mpsc::UnboundedSend
         ));
     } else {
         mark_switch_attempt();
+        let current_engine_label = current_engine.as_deref().unwrap_or("<unknown>");
         push_ptt_event(format!(
             "ptt:{} switch requested from {}",
-            ptt_session_id, current_engine
+            ptt_session_id, current_engine_label
         ));
         let switch_started = Instant::now();
         let switched_engine = match switch_to_handy_engine_verified(ENGINE_SWITCH_VERIFY_TIMEOUT_MS)
@@ -839,7 +839,7 @@ fn on_global_pressed(ptt_state: &mut PttState, internal_tx: &mpsc::UnboundedSend
         ));
         info!(
             "[ptt:{}] Pressed; switched to Handy source '{}' from '{}'",
-            ptt_session_id, switched_engine, current_engine
+            ptt_session_id, switched_engine, current_engine_label
         );
     }
 
