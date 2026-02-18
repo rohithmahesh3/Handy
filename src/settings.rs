@@ -211,46 +211,6 @@ impl Settings {
             .ok();
     }
 
-    pub fn live_partial_enabled(&self) -> bool {
-        self.gio_settings.boolean("live-partial-enabled")
-    }
-
-    pub fn set_live_partial_enabled(&self, value: bool) {
-        self.gio_settings
-            .set_boolean("live-partial-enabled", value)
-            .ok();
-    }
-
-    pub fn live_partial_interval_ms(&self) -> u32 {
-        self.gio_settings.uint("live-partial-interval-ms")
-    }
-
-    pub fn set_live_partial_interval_ms(&self, value: u32) {
-        self.gio_settings
-            .set_uint("live-partial-interval-ms", value)
-            .ok();
-    }
-
-    pub fn live_partial_min_chars_delta(&self) -> u32 {
-        self.gio_settings.uint("live-partial-min-chars-delta")
-    }
-
-    pub fn set_live_partial_min_chars_delta(&self, value: u32) {
-        self.gio_settings
-            .set_uint("live-partial-min-chars-delta", value)
-            .ok();
-    }
-
-    pub fn live_partial_max_history_ms(&self) -> u32 {
-        self.gio_settings.uint("live-partial-max-history-ms")
-    }
-
-    pub fn set_live_partial_max_history_ms(&self, value: u32) {
-        self.gio_settings
-            .set_uint("live-partial-max-history-ms", value)
-            .ok();
-    }
-
     // Model Settings
     pub fn selected_model(&self) -> String {
         self.gio_settings.string("selected-model").to_string()

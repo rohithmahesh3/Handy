@@ -195,7 +195,7 @@ impl DebugPage {
                 let (tx, rx) = std::sync::mpsc::channel();
                 std::thread::spawn(move || {
                     let result = match session_id {
-                        Some(id) => call_stop_recording_and_drain(id),
+                        Some(id) => call_stop_recording_and_finalize(id),
                         None => Err("No active session id for stop".to_string()),
                     };
                     let _ = tx.send(result);
@@ -217,19 +217,14 @@ impl DebugPage {
                                 *guard = None;
                             }
                             match result {
-                                Ok((text, drain_warning)) => {
+                                Ok(text) => {
                                     let final_text = if text.trim().is_empty() {
                                         "No speech detected.".to_string()
                                     } else {
                                         text
                                     };
                                     output_buffer.set_text(&final_text);
-                                    if let Some(warning) = drain_warning {
-                                        status_label
-                                            .set_text(&format!("Idle with warning: {}", warning));
-                                    } else {
-                                        status_label.set_text("Idle");
-                                    }
+                                    status_label.set_text("Idle");
                                 }
                                 Err(e) => {
                                     status_label.set_text(&format!("Error: {}", e));
@@ -489,14 +484,12 @@ fn fetch_ptt_diagnostics_summary() -> Result<String, String> {
         .get("last_dbus_error")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let mut pending_commit_session_id = diagnostics
-        .get("pending_commit_session_id")
+    let focused_engine_id = diagnostics
+        .get("focused_engine_id")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    let mut pending_commit_age_ms = diagnostics
-        .get("pending_commit_age_ms")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    let mut pending_queue_len = 0_u64;
+    let mut pending_oldest_age_ms = 0_u64;
     let last_switch_confirm_latency_ms = diagnostics
         .get("last_switch_confirm_latency_ms")
         .and_then(|v| v.as_u64())
@@ -513,47 +506,26 @@ fn fetch_ptt_diagnostics_summary() -> Result<String, String> {
         .get("engine_last_change_ms")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    let pending_force_clear_count = diagnostics
-        .get("pending_force_clear_count")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let last_force_cleared_session_id = diagnostics
-        .get("last_force_cleared_session_id")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let last_force_cleared_age_ms = diagnostics
-        .get("last_force_cleared_age_ms")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let last_force_clear_reason = diagnostics
-        .get("last_force_clear_reason")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
     if let Ok(reply) = conn.call_method(
         Some(HANDY_BUS_NAME),
         HANDY_OBJECT_PATH,
         Some(HANDY_INTERFACE),
-        "PeekPendingCommitSession",
+        "GetPendingCommitStats",
         &(),
     ) {
-        if let Ok(value) = reply.body().deserialize::<u64>() {
-            pending_commit_session_id = value;
-        }
-    }
-    if let Ok(reply) = conn.call_method(
-        Some(HANDY_BUS_NAME),
-        HANDY_OBJECT_PATH,
-        Some(HANDY_INTERFACE),
-        "GetPendingCommitAgeMs",
-        &(),
-    ) {
-        if let Ok(value) = reply.body().deserialize::<u64>() {
-            pending_commit_age_ms = value;
+        if let Ok(payload) = reply.body().deserialize::<String>() {
+            if let Ok(stats) = serde_json::from_str::<serde_json::Value>(&payload) {
+                pending_queue_len = stats.get("queue_len").and_then(|v| v.as_u64()).unwrap_or(0);
+                pending_oldest_age_ms = stats
+                    .get("oldest_age_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+            }
         }
     }
 
     Ok(format!(
-        "healthy={} code={} message={} state={} shortcut='{}' listener_ok={} shortcut_bound={} bind_failures={} press_while_handy={} stop_timeouts={} start_failure_code={} start_failure_message={} stop_failure_message={} switch_confirm_latency_ms={} switch_failure_message={} engine_active={} engine_last_change_ms={} pending_commit_session={} pending_commit_age_ms={} pending_force_clear_count={} last_force_cleared_session={} last_force_cleared_age_ms={} last_force_clear_reason={} last_dbus_error={}",
+        "healthy={} code={} message={} state={} shortcut='{}' listener_ok={} shortcut_bound={} bind_failures={} press_while_handy={} stop_timeouts={} start_failure_code={} start_failure_message={} stop_failure_message={} switch_confirm_latency_ms={} switch_failure_message={} engine_active={} focused_engine_id={} engine_last_change_ms={} pending_queue_len={} pending_oldest_age_ms={} last_dbus_error={}",
         healthy,
         code,
         message,
@@ -570,13 +542,10 @@ fn fetch_ptt_diagnostics_summary() -> Result<String, String> {
         last_switch_confirm_latency_ms,
         last_switch_failure_message,
         engine_active,
+        focused_engine_id,
         engine_last_change_ms,
-        pending_commit_session_id,
-        pending_commit_age_ms,
-        pending_force_clear_count,
-        last_force_cleared_session_id,
-        last_force_cleared_age_ms,
-        last_force_clear_reason,
+        pending_queue_len,
+        pending_oldest_age_ms,
         last_dbus_error
     ))
 }
@@ -708,35 +677,8 @@ fn call_stop_recording(session_id: u64) -> Result<String, String> {
         .map_err(|e| format!("Failed to decode StopRecordingSession response: {}", e))
 }
 
-fn call_take_pending_commit() -> Result<(u64, String), String> {
-    let conn = Connection::session().map_err(|e| format!("Session bus unavailable: {}", e))?;
-    let reply = conn
-        .call_method(
-            Some(HANDY_BUS_NAME),
-            HANDY_OBJECT_PATH,
-            Some(HANDY_INTERFACE),
-            "TakePendingCommit",
-            &(),
-        )
-        .map_err(|e| format!("TakePendingCommit failed: {}", e))?;
-    reply
-        .body()
-        .deserialize::<(u64, String)>()
-        .map_err(|e| format!("Failed to decode TakePendingCommit response: {}", e))
-}
-
-fn call_stop_recording_and_drain(session_id: u64) -> Result<(String, Option<String>), String> {
-    let text = call_stop_recording(session_id)?;
-    let drain_warning = match call_take_pending_commit() {
-        Ok((0, _)) => None,
-        Ok((drained_session_id, _)) if drained_session_id == session_id => None,
-        Ok((drained_session_id, _)) => Some(format!(
-            "Drained pending session {} while expected {}",
-            drained_session_id, session_id
-        )),
-        Err(err) => Some(format!("Failed to drain pending commit: {}", err)),
-    };
-    Ok((text, drain_warning))
+fn call_stop_recording_and_finalize(session_id: u64) -> Result<String, String> {
+    call_stop_recording(session_id)
 }
 
 fn call_cancel_recording() -> Result<(), String> {

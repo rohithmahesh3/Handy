@@ -81,29 +81,6 @@
       <summary>Dictation shortcut modifier bitmask (IBus modifiers)</summary>
     </key>
 
-    <key name="live-partial-enabled" type="b">
-      <default>true</default>
-      <summary>Enable live partial transcription while recording is active</summary>
-    </key>
-
-    <key name="live-partial-interval-ms" type="u">
-      <default>900</default>
-      <range min="500" max="2000"/>
-      <summary>Update interval for live partial transcription in milliseconds</summary>
-    </key>
-
-    <key name="live-partial-min-chars-delta" type="u">
-      <default>2</default>
-      <range min="1" max="8"/>
-      <summary>Minimum character delta before emitting a new live partial</summary>
-    </key>
-
-    <key name="live-partial-max-history-ms" type="u">
-      <default>7000</default>
-      <range min="3000" max="12000"/>
-      <summary>Maximum audio window used for live partial transcription in milliseconds</summary>
-    </key>
-
     <!-- Model Settings -->
     <key name="selected-model" type="s">
       <default>''</default>

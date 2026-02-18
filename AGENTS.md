@@ -97,18 +97,17 @@ Methods:
 - `StartRecording()`
 - `StopRecording() -> string`
 - `StartRecordingSession() -> u64`
+- `StartRecordingSessionForTarget(u64 target_engine_id) -> u64`
 - `StopRecordingSession(u64) -> string`
 - `CancelRecording()`
 - `GetState() -> (bool is_recording, bool has_model_selected)`
-- `SetEngineActive(bool)`
-- `GetEngineActive() -> (bool active, u64 last_change_ms)`
-- `GetLatestPartial() -> (u64 session_id, u64 sequence_id, string text)`
 - `GetPttDiagnostics() -> (bool, string, string, string, u64, bool, bool, u64, u64, u64)`
 - `GetPttDiagnosticsVerbose() -> string` (JSON)
 - `GetPttRecentEvents() -> array<string>`
-- `TakePendingCommit() -> (u64, string)`
-- `PeekPendingCommitSession() -> u64`
-- `GetPendingCommitAgeMs() -> u64`
+- `TakePendingCommitForEngine(u64 engine_id) -> (u64, string)`
+- `GetPendingCommitStats() -> string` (JSON)
+- `SetFocusedEngine(u64 engine_id, bool focused)`
+- `GetFocusedEngine() -> (u64 focused_engine_id, u64 last_change_ms)`
 - `GetRecentLogs() -> array<string>`
 - `GetLanguage() -> string`
 - `SetLanguage(string)`
@@ -116,21 +115,20 @@ Methods:
 Signals:
 - `TranscriptionReady(string)`
 - `RecordingStateChanged(bool)`
-- `PartialTranscriptionReady(u64 session_id, u64 sequence_id, string text)`
 - `Error(string)`
 
 ### Pending commit handoff
 
 `HandyState` stores final transcripts in:
 - `last_transcription_cache` (compatibility fallback)
-- `pending_commit` (single-slot handoff consumed by engine via `TakePendingCommit`)
+- `pending_commit` (bounded queue handoff consumed by engine via `TakePendingCommitForEngine`)
 
 Important behavior:
 - Start recording does **not** clear pending commit.
 - `CancelRecording` does **not** clear pending commit.
-- `pending_commit` is overwritten on new store.
-- Debug transcription testing drains its own session payload via `TakePendingCommit` after `StopRecordingSession`.
-- PTT waits briefly for pending drain before starting a new session, then force-clears stuck pending payloads to avoid blocked starts.
+- `pending_commit` stores `(session_id, target_engine_id, text)` and keeps up to 32 items, dropping oldest when full.
+- Debug transcription testing does **not** drain pending commits.
+- PTT does **not** block on pending queue drain before starting a new session.
 
 ## Shortcut Behavior
 
@@ -143,19 +141,17 @@ Settings keys used for the global shortcut:
 Global PTT uses **evdev** (`src/global_shortcuts.rs`):
 1. Discover keyboard devices in `/dev/input/event*`, open event streams.
 2. Resolve GDK keyval+modifiers to evdev keycodes (`src/key_mapping.rs`).
-3. On press:
-   - wait briefly for prior pending commit to drain,
-   - if pending remains, clear it via `TakePendingCommit` and continue,
+3. On press while idle:
    - switch to Handy engine (verified),
-   - verify focused-context activation via daemon `GetEngineActive`,
-   - call `StartRecordingSession`.
+   - verify focused-context activation via daemon `GetFocusedEngine`,
+   - call `StartRecordingSessionForTarget(focused_engine_id)`.
 4. On next press while recording:
    - call `StopRecordingSession` and wait for result,
    - do **not** auto-restore input source in PTT path.
 5. Final text delivery:
-   - engine-side pending commit listener (`src/ibus_engine/context.rs`) polls `TakePendingCommit`,
+   - engine-side pending commit listener (`src/ibus_engine/context.rs`) polls `TakePendingCommitForEngine(engine_id)`,
    - commits via `ibus_engine_commit_text` on GTK main context while engine is active.
-6. `disable()` still performs a final `TakePendingCommit` consume as fallback.
+6. `disable()` still performs a final `TakePendingCommitForEngine(engine_id)` consume as fallback.
 
 This architecture intentionally avoids autoswitch restore races.
 
@@ -190,7 +186,6 @@ Current active behavior:
 - Push-to-talk recording
 - Optional audio feedback sounds
 - Optional LLM post-processing on final transcript
-- Live partial transcription (configurable interval, minimum delta, max history)
 
 Removed/obsolete paths should not be reintroduced without product decision:
 - `recording-mode` auto mode

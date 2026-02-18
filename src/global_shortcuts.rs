@@ -27,10 +27,8 @@ const HANDY_INTERFACE: &str = "com.handy.Transcription";
 const START_RECORDING_ARM_DELAY_MS: u64 = 120;
 const STOP_RECORDING_TIMEOUT_MS: u64 = 20_000;
 const ENGINE_SWITCH_VERIFY_TIMEOUT_MS: u64 = 350;
-const ENGINE_ACTIVE_VERIFY_TIMEOUT_MS: u64 = 700;
-const ENGINE_ACTIVE_VERIFY_POLL_MS: u64 = 20;
-const PENDING_COMMIT_DRAIN_TIMEOUT_MS: u64 = 180;
-const PENDING_COMMIT_DRAIN_POLL_MS: u64 = 20;
+const FOCUSED_ENGINE_VERIFY_TIMEOUT_MS: u64 = 700;
+const FOCUSED_ENGINE_VERIFY_POLL_MS: u64 = 20;
 const TOGGLE_PRESS_DEBOUNCE_MS: u64 = 90;
 const SETTINGS_POLL_INTERVAL_MS: u64 = 350;
 const FAILURE_NOTIFICATION_COOLDOWN_MS: u64 = 8_000;
@@ -79,9 +77,9 @@ struct PttRuntimeHealth {
     code: String,
     message: String,
     last_success_ms: u64,
-    portal_session_ok: bool,
+    listener_session_ok: bool,
     shortcut_bound: bool,
-    portal_bind_fail_count: u64,
+    bind_fail_count: u64,
     press_while_handy_count: u64,
     stop_timeout_fallback_count: u64,
     last_notification_ms: u64,
@@ -94,15 +92,7 @@ struct PttRuntimeHealth {
     last_stop_failure_ms: u64,
     pending_commit_session_id: u64,
     pending_commit_mark_ms: u64,
-    stale_pending_clear_count: u64,
-    pending_force_clear_count: u64,
-    last_force_cleared_session_id: u64,
-    last_force_cleared_age_ms: u64,
-    last_force_clear_reason: String,
-    last_stale_pending_session_id: u64,
-    last_stale_pending_age_ms: u64,
-    last_stale_pending_clear_ms: u64,
-    engine_active: bool,
+    focused_engine_id: u64,
     engine_last_change_ms: u64,
     last_switch_attempt_ms: u64,
     last_switch_confirm_latency_ms: u64,
@@ -119,9 +109,9 @@ impl Default for PttRuntimeHealth {
             code: "not_initialized".to_string(),
             message: "Global dictation shortcut listener not initialized yet".to_string(),
             last_success_ms: 0,
-            portal_session_ok: false,
+            listener_session_ok: false,
             shortcut_bound: false,
-            portal_bind_fail_count: 0,
+            bind_fail_count: 0,
             press_while_handy_count: 0,
             stop_timeout_fallback_count: 0,
             last_notification_ms: 0,
@@ -134,15 +124,7 @@ impl Default for PttRuntimeHealth {
             last_stop_failure_ms: 0,
             pending_commit_session_id: 0,
             pending_commit_mark_ms: 0,
-            stale_pending_clear_count: 0,
-            pending_force_clear_count: 0,
-            last_force_cleared_session_id: 0,
-            last_force_cleared_age_ms: 0,
-            last_force_clear_reason: String::new(),
-            last_stale_pending_session_id: 0,
-            last_stale_pending_age_ms: 0,
-            last_stale_pending_clear_ms: 0,
-            engine_active: false,
+            focused_engine_id: 0,
             engine_last_change_ms: 0,
             last_switch_attempt_ms: 0,
             last_switch_confirm_latency_ms: 0,
@@ -192,7 +174,7 @@ fn mark_health_success(message: &str) {
         health.code = "ok".to_string();
         health.message = message.to_string();
         health.last_success_ms = now_millis();
-        health.portal_session_ok = true;
+        health.listener_session_ok = true;
         health.shortcut_bound = true;
     }
 }
@@ -209,11 +191,11 @@ fn mark_health_error(code: &str, message: &str) {
         health.component = "global_shortcuts".to_string();
         health.code = code.to_string();
         health.message = message.to_string();
-        if code.starts_with("portal_") || code.starts_with("evdev_") {
-            health.portal_session_ok = false;
+        if code.starts_with("evdev_") {
+            health.listener_session_ok = false;
             if code.contains("bind") || code.contains("permission") {
                 health.shortcut_bound = false;
-                health.portal_bind_fail_count = health.portal_bind_fail_count.saturating_add(1);
+                health.bind_fail_count = health.bind_fail_count.saturating_add(1);
             }
         }
     }
@@ -269,24 +251,9 @@ fn clear_pending_commit() {
     }
 }
 
-fn mark_pending_force_cleared(session_id: u64, age_ms: u64, reason: &str) {
+fn mark_focused_engine_status(engine_id: u64, last_change_ms: u64) {
     if let Ok(mut health) = health_state().lock() {
-        health.pending_force_clear_count = health.pending_force_clear_count.saturating_add(1);
-        health.last_force_cleared_session_id = session_id;
-        health.last_force_cleared_age_ms = age_ms;
-        health.last_force_clear_reason = reason.to_string();
-        health.stale_pending_clear_count = health.stale_pending_clear_count.saturating_add(1);
-        health.last_stale_pending_session_id = session_id;
-        health.last_stale_pending_age_ms = age_ms;
-        health.last_stale_pending_clear_ms = now_millis();
-        health.pending_commit_session_id = 0;
-        health.pending_commit_mark_ms = 0;
-    }
-}
-
-fn mark_engine_active_status(active: bool, last_change_ms: u64) {
-    if let Ok(mut health) = health_state().lock() {
-        health.engine_active = active;
+        health.focused_engine_id = engine_id;
         health.engine_last_change_ms = last_change_ms;
     }
 }
@@ -337,9 +304,9 @@ pub fn ptt_diagnostics_tuple() -> (bool, String, String, String, u64, bool, bool
             health.code.clone(),
             health.message.clone(),
             health.last_success_ms,
-            health.portal_session_ok,
+            health.listener_session_ok,
             health.shortcut_bound,
-            health.portal_bind_fail_count,
+            health.bind_fail_count,
             health.press_while_handy_count,
             health.stop_timeout_fallback_count,
         )
@@ -372,9 +339,9 @@ pub fn ptt_diagnostics_verbose_json() -> String {
             "code": health.code,
             "message": health.message,
             "last_success_ms": health.last_success_ms,
-            "listener_session_ok": health.portal_session_ok,
+            "listener_session_ok": health.listener_session_ok,
             "shortcut_bound": health.shortcut_bound,
-            "bind_fail_count": health.portal_bind_fail_count,
+            "bind_fail_count": health.bind_fail_count,
             "press_while_handy_count": health.press_while_handy_count,
             "stop_timeout_fallback_count": health.stop_timeout_fallback_count,
             "current_state": health.current_state,
@@ -386,15 +353,8 @@ pub fn ptt_diagnostics_verbose_json() -> String {
             "last_stop_failure_ms": health.last_stop_failure_ms,
             "pending_commit_session_id": health.pending_commit_session_id,
             "pending_commit_age_ms": pending_commit_age_ms,
-            "stale_pending_clear_count": health.stale_pending_clear_count,
-            "pending_force_clear_count": health.pending_force_clear_count,
-            "last_force_cleared_session_id": health.last_force_cleared_session_id,
-            "last_force_cleared_age_ms": health.last_force_cleared_age_ms,
-            "last_force_clear_reason": health.last_force_clear_reason,
-            "last_stale_pending_session_id": health.last_stale_pending_session_id,
-            "last_stale_pending_age_ms": health.last_stale_pending_age_ms,
-            "last_stale_pending_clear_ms": health.last_stale_pending_clear_ms,
-            "engine_active": health.engine_active,
+            "engine_active": health.focused_engine_id != 0,
+            "focused_engine_id": health.focused_engine_id,
             "engine_last_change_ms": health.engine_last_change_ms,
             "last_switch_attempt_ms": health.last_switch_attempt_ms,
             "last_switch_confirm_latency_ms": health.last_switch_confirm_latency_ms,
@@ -425,15 +385,8 @@ pub fn ptt_diagnostics_verbose_json() -> String {
             "last_stop_failure_ms": 0,
             "pending_commit_session_id": 0,
             "pending_commit_age_ms": 0,
-            "stale_pending_clear_count": 0,
-            "pending_force_clear_count": 0,
-            "last_force_cleared_session_id": 0,
-            "last_force_cleared_age_ms": 0,
-            "last_force_clear_reason": "",
-            "last_stale_pending_session_id": 0,
-            "last_stale_pending_age_ms": 0,
-            "last_stale_pending_clear_ms": 0,
             "engine_active": false,
+            "focused_engine_id": 0,
             "engine_last_change_ms": 0,
             "last_switch_attempt_ms": 0,
             "last_switch_confirm_latency_ms": 0,
@@ -845,7 +798,6 @@ fn start_toggle_recording(
 
     let ptt_session_id = next_ptt_session_id();
     push_ptt_event(format!("ptt:{} pressed", ptt_session_id));
-    reconcile_pending_commit_before_start(ptt_session_id);
 
     if current_engine
         .as_ref()
@@ -900,36 +852,37 @@ fn start_toggle_recording(
         );
     }
 
-    match wait_for_engine_active(
-        Duration::from_millis(ENGINE_ACTIVE_VERIFY_TIMEOUT_MS),
-        Duration::from_millis(ENGINE_ACTIVE_VERIFY_POLL_MS),
+    let target_engine_id = match wait_for_focused_engine(
+        Duration::from_millis(FOCUSED_ENGINE_VERIFY_TIMEOUT_MS),
+        Duration::from_millis(FOCUSED_ENGINE_VERIFY_POLL_MS),
     ) {
-        Ok(last_change_ms) => {
+        Ok((engine_id, last_change_ms)) => {
             push_ptt_event(format!(
-                "ptt:{} engine active confirmed (last_change_ms={})",
-                ptt_session_id, last_change_ms
+                "ptt:{} focused engine confirmed id={} (last_change_ms={})",
+                ptt_session_id, engine_id, last_change_ms
             ));
+            engine_id
         }
         Err(e) => {
             warn!(
-                "[ptt:{}] Handy engine was not active in the focused context: {}",
+                "[ptt:{}] Handy engine did not become focused in the target context: {}",
                 ptt_session_id, e
             );
-            mark_start_failure("engine_not_active", &e);
-            mark_health_error("engine_not_active", &e);
+            mark_start_failure("focused_engine_unavailable", &e);
+            mark_health_error("focused_engine_unavailable", &e);
             notify_ptt_failure(
                 "Cannot start recording",
-                "Handy input source is not active in the focused text field.",
+                "Handy input source is not focused in the target text field.",
             );
             push_ptt_event(format!(
-                "ptt:{} blocked start because engine is inactive: {}",
+                "ptt:{} blocked start because focused engine is unavailable: {}",
                 ptt_session_id, e
             ));
             return;
         }
-    }
+    };
 
-    spawn_start_recording(ptt_session_id, internal_tx.clone());
+    spawn_start_recording(ptt_session_id, target_engine_id, internal_tx.clone());
     *ptt_state = PttState::Pending { ptt_session_id };
     mark_ptt_state("pending");
     clear_pending_commit();
@@ -1121,10 +1074,14 @@ fn cleanup_state(ptt_state: &mut PttState) {
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-fn spawn_start_recording(ptt_session_id: u64, tx: mpsc::UnboundedSender<InternalEvent>) {
+fn spawn_start_recording(
+    ptt_session_id: u64,
+    target_engine_id: u64,
+    tx: mpsc::UnboundedSender<InternalEvent>,
+) {
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(START_RECORDING_ARM_DELAY_MS));
-        let result = call_handy_start_recording_session();
+        let result = call_handy_start_recording_session_for_target(target_engine_id);
         let _ = tx.send(InternalEvent::StartRecording {
             ptt_session_id,
             result,
@@ -1198,10 +1155,12 @@ fn call_handy_method_no_args(method: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
-fn call_handy_start_recording_session() -> std::result::Result<u64, String> {
+fn call_handy_start_recording_session_for_target(
+    target_engine_id: u64,
+) -> std::result::Result<u64, String> {
     let conn = zbus::blocking::Connection::session().map_err(|e| {
         let msg = format!("Failed to open session bus: {}", e);
-        mark_dbus_error("StartRecordingSession", &msg);
+        mark_dbus_error("StartRecordingSessionForTarget", &msg);
         msg
     })?;
     let reply = conn
@@ -1209,25 +1168,25 @@ fn call_handy_start_recording_session() -> std::result::Result<u64, String> {
             Some(HANDY_BUS_NAME),
             HANDY_OBJECT_PATH,
             Some(HANDY_INTERFACE),
-            "StartRecordingSession",
-            &(),
+            "StartRecordingSessionForTarget",
+            &(target_engine_id,),
         )
         .map_err(|e| {
-            let msg = format!("StartRecordingSession call failed: {}", e);
-            mark_dbus_error("StartRecordingSession", &msg);
+            let msg = format!("StartRecordingSessionForTarget call failed: {}", e);
+            mark_dbus_error("StartRecordingSessionForTarget", &msg);
             msg
         })?;
     reply.body().deserialize::<u64>().map_err(|e| {
-        let msg = format!("StartRecordingSession decode failed: {}", e);
-        mark_dbus_error("StartRecordingSession", &msg);
+        let msg = format!("StartRecordingSessionForTarget decode failed: {}", e);
+        mark_dbus_error("StartRecordingSessionForTarget", &msg);
         msg
     })
 }
 
-fn call_handy_peek_pending_commit_session() -> std::result::Result<u64, String> {
+fn call_handy_get_focused_engine() -> std::result::Result<(u64, u64), String> {
     let conn = zbus::blocking::Connection::session().map_err(|e| {
         let msg = format!("Failed to open session bus: {}", e);
-        mark_dbus_error("PeekPendingCommitSession", &msg);
+        mark_dbus_error("GetFocusedEngine", &msg);
         msg
     })?;
     let reply = conn
@@ -1235,115 +1194,39 @@ fn call_handy_peek_pending_commit_session() -> std::result::Result<u64, String> 
             Some(HANDY_BUS_NAME),
             HANDY_OBJECT_PATH,
             Some(HANDY_INTERFACE),
-            "PeekPendingCommitSession",
+            "GetFocusedEngine",
             &(),
         )
         .map_err(|e| {
-            let msg = format!("PeekPendingCommitSession call failed: {}", e);
-            mark_dbus_error("PeekPendingCommitSession", &msg);
+            let msg = format!("GetFocusedEngine call failed: {}", e);
+            mark_dbus_error("GetFocusedEngine", &msg);
             msg
         })?;
-    reply.body().deserialize::<u64>().map_err(|e| {
-        let msg = format!("PeekPendingCommitSession decode failed: {}", e);
-        mark_dbus_error("PeekPendingCommitSession", &msg);
+    reply.body().deserialize::<(u64, u64)>().map_err(|e| {
+        let msg = format!("GetFocusedEngine decode failed: {}", e);
+        mark_dbus_error("GetFocusedEngine", &msg);
         msg
     })
 }
 
-fn call_handy_get_pending_commit_age_ms() -> std::result::Result<u64, String> {
-    let conn = zbus::blocking::Connection::session().map_err(|e| {
-        let msg = format!("Failed to open session bus: {}", e);
-        mark_dbus_error("GetPendingCommitAgeMs", &msg);
-        msg
-    })?;
-    let reply = conn
-        .call_method(
-            Some(HANDY_BUS_NAME),
-            HANDY_OBJECT_PATH,
-            Some(HANDY_INTERFACE),
-            "GetPendingCommitAgeMs",
-            &(),
-        )
-        .map_err(|e| {
-            let msg = format!("GetPendingCommitAgeMs call failed: {}", e);
-            mark_dbus_error("GetPendingCommitAgeMs", &msg);
-            msg
-        })?;
-    reply.body().deserialize::<u64>().map_err(|e| {
-        let msg = format!("GetPendingCommitAgeMs decode failed: {}", e);
-        mark_dbus_error("GetPendingCommitAgeMs", &msg);
-        msg
-    })
-}
-
-fn call_handy_take_pending_commit() -> std::result::Result<(u64, String), String> {
-    let conn = zbus::blocking::Connection::session().map_err(|e| {
-        let msg = format!("Failed to open session bus: {}", e);
-        mark_dbus_error("TakePendingCommit", &msg);
-        msg
-    })?;
-    let reply = conn
-        .call_method(
-            Some(HANDY_BUS_NAME),
-            HANDY_OBJECT_PATH,
-            Some(HANDY_INTERFACE),
-            "TakePendingCommit",
-            &(),
-        )
-        .map_err(|e| {
-            let msg = format!("TakePendingCommit call failed: {}", e);
-            mark_dbus_error("TakePendingCommit", &msg);
-            msg
-        })?;
-    reply.body().deserialize::<(u64, String)>().map_err(|e| {
-        let msg = format!("TakePendingCommit decode failed: {}", e);
-        mark_dbus_error("TakePendingCommit", &msg);
-        msg
-    })
-}
-
-fn call_handy_get_engine_active() -> std::result::Result<(bool, u64), String> {
-    let conn = zbus::blocking::Connection::session().map_err(|e| {
-        let msg = format!("Failed to open session bus: {}", e);
-        mark_dbus_error("GetEngineActive", &msg);
-        msg
-    })?;
-    let reply = conn
-        .call_method(
-            Some(HANDY_BUS_NAME),
-            HANDY_OBJECT_PATH,
-            Some(HANDY_INTERFACE),
-            "GetEngineActive",
-            &(),
-        )
-        .map_err(|e| {
-            let msg = format!("GetEngineActive call failed: {}", e);
-            mark_dbus_error("GetEngineActive", &msg);
-            msg
-        })?;
-    reply.body().deserialize::<(bool, u64)>().map_err(|e| {
-        let msg = format!("GetEngineActive decode failed: {}", e);
-        mark_dbus_error("GetEngineActive", &msg);
-        msg
-    })
-}
-
-fn wait_for_engine_active(
+fn wait_for_focused_engine(
     timeout: Duration,
     poll_interval: Duration,
-) -> std::result::Result<u64, String> {
+) -> std::result::Result<(u64, u64), String> {
     let start = Instant::now();
+    let mut last_focused_engine_id = 0_u64;
     let mut last_change_ms = 0_u64;
     let last_error = loop {
-        let error_text = match call_handy_get_engine_active() {
-            Ok((is_active, change_ms)) => {
+        let error_text = match call_handy_get_focused_engine() {
+            Ok((engine_id, change_ms)) => {
+                last_focused_engine_id = engine_id;
                 last_change_ms = change_ms;
-                mark_engine_active_status(is_active, change_ms);
-                if is_active {
-                    return Ok(change_ms);
+                mark_focused_engine_status(engine_id, change_ms);
+                if engine_id != 0 {
+                    return Ok((engine_id, change_ms));
                 }
                 format!(
-                    "Handy engine still inactive in focused context (last_change_ms={})",
+                    "Focused Handy engine is unavailable (last_change_ms={})",
                     change_ms
                 )
             }
@@ -1356,91 +1239,14 @@ fn wait_for_engine_active(
         std::thread::sleep(poll_interval);
     };
 
-    mark_engine_active_status(false, last_change_ms);
+    mark_focused_engine_status(0, last_change_ms);
     Err(format!(
-        "Handy engine did not become active within {} ms (last_change_ms={} last_error='{}')",
+        "Handy engine did not report a focused context within {} ms (last_focused_engine_id={} last_change_ms={} last_error='{}')",
         timeout.as_millis(),
+        last_focused_engine_id,
         last_change_ms,
         last_error
     ))
-}
-
-fn reconcile_pending_commit_before_start(ptt_session_id: u64) {
-    let pending_session = match call_handy_peek_pending_commit_session() {
-        Ok(session_id) => session_id,
-        Err(e) => {
-            warn!(
-                "[ptt:{}] Could not peek pending commit state; continuing: {}",
-                ptt_session_id, e
-            );
-            push_ptt_event(format!(
-                "ptt:{} pending peek failed (non-fatal): {}",
-                ptt_session_id, e
-            ));
-            return;
-        }
-    };
-
-    if pending_session == 0 {
-        clear_pending_commit();
-        return;
-    }
-
-    let drained = wait_for_pending_commit_to_clear(
-        Duration::from_millis(PENDING_COMMIT_DRAIN_TIMEOUT_MS),
-        Duration::from_millis(PENDING_COMMIT_DRAIN_POLL_MS),
-    );
-    if drained {
-        clear_pending_commit();
-        push_ptt_event(format!(
-            "ptt:{} pending commit drained naturally before start",
-            ptt_session_id
-        ));
-        return;
-    }
-
-    let pending_age_ms = call_handy_get_pending_commit_age_ms().unwrap_or(0);
-    match call_handy_take_pending_commit() {
-        Ok((session_id, _)) if session_id != 0 => {
-            warn!(
-                "[ptt:{}] Force-cleared pending commit session {} (age={} ms) before starting next recording",
-                ptt_session_id, session_id, pending_age_ms
-            );
-            mark_pending_force_cleared(session_id, pending_age_ms, "start_gate_immediate_clear");
-            push_ptt_event(format!(
-                "ptt:{} force-cleared pending session {} (age={} ms)",
-                ptt_session_id, session_id, pending_age_ms
-            ));
-        }
-        Ok(_) => {
-            clear_pending_commit();
-        }
-        Err(e) => {
-            warn!(
-                "[ptt:{}] Pending commit clear failed; continuing with start: {}",
-                ptt_session_id, e
-            );
-            push_ptt_event(format!(
-                "ptt:{} pending clear failed (non-fatal): {}",
-                ptt_session_id, e
-            ));
-        }
-    }
-}
-
-fn wait_for_pending_commit_to_clear(timeout: Duration, poll_interval: Duration) -> bool {
-    let start = Instant::now();
-    loop {
-        match call_handy_peek_pending_commit_session() {
-            Ok(0) => return true,
-            Ok(_) => {}
-            Err(_) => return false,
-        }
-        if start.elapsed() >= timeout {
-            return false;
-        }
-        std::thread::sleep(poll_interval);
-    }
 }
 
 fn call_handy_stop_recording_session(session_id: u64) -> std::result::Result<String, String> {

@@ -463,10 +463,6 @@ impl TranscriptionManager {
         self.transcribe_internal(samples, true)
     }
 
-    pub fn transcribe_partial(&self, samples: Vec<f32>) -> Result<String> {
-        self.transcribe_internal(samples, false)
-    }
-
     pub fn refresh_config_from_settings(&self, settings: &Settings) {
         let updated = TranscriptionConfig::from_settings(settings);
         let mut config = self.shared.config.lock().unwrap();

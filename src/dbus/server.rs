@@ -13,7 +13,8 @@ use crate::text_utils::convert_chinese_variant;
 use crate::utils::logging::read_recent_logs;
 use crate::{audio_feedback::play_feedback_sound, audio_feedback::SoundType};
 use log::{debug, error, info};
-use std::collections::VecDeque;
+use serde_json::json;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -23,60 +24,95 @@ use zbus::Connection;
 
 const HANDY_BUS_NAME: &str = "com.handy.Transcription";
 const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
-const HANDY_INTERFACE: &str = "com.handy.Transcription";
 
 const DEFAULT_BINDING_ID: &str = "ibus";
+const MAX_PENDING_COMMIT_QUEUE: usize = 32;
 
 #[derive(Clone, Debug)]
 struct PendingCommit {
     session_id: u64,
+    target_engine_id: u64,
     text: String,
     created_ms: u64,
 }
 
-#[derive(Default)]
 struct PendingCommitStore {
-    inner: Mutex<Option<PendingCommit>>,
+    inner: Mutex<VecDeque<PendingCommit>>,
+    dropped_count: AtomicU64,
+}
+
+impl Default for PendingCommitStore {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(VecDeque::with_capacity(MAX_PENDING_COMMIT_QUEUE)),
+            dropped_count: AtomicU64::new(0),
+        }
+    }
 }
 
 impl PendingCommitStore {
-    fn store(&self, session_id: u64, text: String) {
-        if let Ok(mut pending) = self.inner.lock() {
-            *pending = Some(PendingCommit {
+    fn store(&self, session_id: u64, target_engine_id: u64, text: String) {
+        if let Ok(mut queue) = self.inner.lock() {
+            if queue.len() >= MAX_PENDING_COMMIT_QUEUE {
+                let _ = queue.pop_front();
+                self.dropped_count.fetch_add(1, Ordering::SeqCst);
+            }
+            queue.push_back(PendingCommit {
                 session_id,
+                target_engine_id,
                 text,
                 created_ms: now_millis(),
             });
         }
     }
 
-    fn take(&self) -> (u64, String) {
-        self.inner
-            .lock()
-            .ok()
-            .and_then(|mut pending| pending.take())
+    fn take_for_engine(&self, target_engine_id: u64) -> (u64, String) {
+        let Ok(mut queue) = self.inner.lock() else {
+            return (0, String::new());
+        };
+        let Some(index) = queue
+            .iter()
+            .position(|entry| entry.target_engine_id == target_engine_id)
+        else {
+            return (0, String::new());
+        };
+        queue
+            .remove(index)
             .map(|pending| (pending.session_id, pending.text))
             .unwrap_or_else(|| (0, String::new()))
     }
 
-    fn peek_session(&self) -> u64 {
-        self.inner
-            .lock()
-            .ok()
-            .and_then(|pending| pending.as_ref().map(|p| p.session_id))
-            .unwrap_or(0)
-    }
-
-    fn age_ms(&self) -> u64 {
-        self.inner
-            .lock()
-            .ok()
-            .and_then(|pending| {
-                pending
-                    .as_ref()
-                    .map(|p| now_millis().saturating_sub(p.created_ms))
+    fn stats_json(&self) -> String {
+        let dropped_count = self.dropped_count.load(Ordering::SeqCst);
+        if let Ok(queue) = self.inner.lock() {
+            let now = now_millis();
+            let oldest_age_ms = queue
+                .front()
+                .map(|entry| now.saturating_sub(entry.created_ms))
+                .unwrap_or(0);
+            let targets = queue
+                .iter()
+                .fold(HashMap::<u64, u64>::new(), |mut acc, item| {
+                    *acc.entry(item.target_engine_id).or_insert(0) += 1;
+                    acc
+                });
+            json!({
+                "queue_len": queue.len(),
+                "oldest_age_ms": oldest_age_ms,
+                "dropped_count": dropped_count,
+                "targets": targets,
             })
-            .unwrap_or(0)
+            .to_string()
+        } else {
+            json!({
+                "queue_len": 0,
+                "oldest_age_ms": 0,
+                "dropped_count": dropped_count,
+                "targets": {},
+                "error": "lock_poisoned",
+            })
+            .to_string()
+        }
     }
 }
 
@@ -86,17 +122,14 @@ pub struct HandyState {
     pub recording_manager: Arc<AudioRecordingManager>,
     pub transcription_manager: Arc<TranscriptionManager>,
     pub is_recording: AtomicBool,
-    partial_text: Mutex<String>,
-    partial_sequence: AtomicU64,
-    partial_session_id: AtomicU64,
-    partial_cancel: Mutex<Option<Arc<AtomicBool>>>,
     session_counter: AtomicU64,
     /// Compatibility cache for legacy StopRecording callers.
     /// Push-to-talk commit handoff now uses `pending_commit`.
     last_transcription_cache: Mutex<Option<String>>,
     pending_commit: PendingCommitStore,
-    engine_active: AtomicBool,
-    engine_last_change_ms: AtomicU64,
+    focused_engine_id: AtomicU64,
+    focused_engine_last_change_ms: AtomicU64,
+    session_targets: Mutex<HashMap<u64, u64>>,
     log_buffer: Arc<Mutex<VecDeque<String>>>,
 }
 
@@ -112,15 +145,12 @@ impl HandyState {
             recording_manager,
             transcription_manager,
             is_recording: AtomicBool::new(false),
-            partial_text: Mutex::new(String::new()),
-            partial_sequence: AtomicU64::new(0),
-            partial_session_id: AtomicU64::new(0),
-            partial_cancel: Mutex::new(None),
             session_counter: AtomicU64::new(1),
             last_transcription_cache: Mutex::new(None),
             pending_commit: PendingCommitStore::default(),
-            engine_active: AtomicBool::new(false),
-            engine_last_change_ms: AtomicU64::new(now_millis()),
+            focused_engine_id: AtomicU64::new(0),
+            focused_engine_last_change_ms: AtomicU64::new(now_millis()),
+            session_targets: Mutex::new(HashMap::new()),
             log_buffer,
         }
     }
@@ -129,90 +159,64 @@ impl HandyState {
         self.session_counter.fetch_add(1, Ordering::SeqCst)
     }
 
-    fn reset_partial_state(&self, session_id: u64) {
-        *self.partial_text.lock().unwrap() = String::new();
-        self.partial_sequence.store(0, Ordering::SeqCst);
-        self.partial_session_id.store(session_id, Ordering::SeqCst);
-    }
-
-    fn clear_partial_state(&self) {
-        *self.partial_text.lock().unwrap() = String::new();
-        self.partial_sequence.store(0, Ordering::SeqCst);
-    }
-
-    fn latest_partial(&self) -> (u64, u64, String) {
-        (
-            self.partial_session_id.load(Ordering::SeqCst),
-            self.partial_sequence.load(Ordering::SeqCst),
-            self.partial_text.lock().unwrap().clone(),
-        )
-    }
-
     fn recent_logs(&self, limit: usize) -> Vec<String> {
         read_recent_logs(&self.log_buffer, limit)
     }
 
-    fn store_pending_commit(&self, session_id: u64, text: String) {
-        self.pending_commit.store(session_id, text);
+    fn store_pending_commit(&self, session_id: u64, target_engine_id: u64, text: String) {
+        self.pending_commit
+            .store(session_id, target_engine_id, text);
     }
 
-    fn take_pending_commit(&self) -> (u64, String) {
-        self.pending_commit.take()
+    fn take_pending_commit_for_engine(&self, target_engine_id: u64) -> (u64, String) {
+        self.pending_commit.take_for_engine(target_engine_id)
     }
 
-    fn peek_pending_commit_session(&self) -> u64 {
-        self.pending_commit.peek_session()
+    fn pending_commit_stats_json(&self) -> String {
+        self.pending_commit.stats_json()
     }
 
-    fn pending_commit_age_ms(&self) -> u64 {
-        self.pending_commit.age_ms()
+    fn set_focused_engine(&self, engine_id: u64, focused: bool) {
+        let current = self.focused_engine_id.load(Ordering::SeqCst);
+        let next = if focused {
+            engine_id
+        } else if current == engine_id {
+            0
+        } else {
+            current
+        };
+        if next != current {
+            self.focused_engine_id.store(next, Ordering::SeqCst);
+            self.focused_engine_last_change_ms
+                .store(now_millis(), Ordering::SeqCst);
+        }
     }
 
-    fn set_engine_active(&self, active: bool) {
-        self.engine_active.store(active, Ordering::SeqCst);
-        self.engine_last_change_ms
-            .store(now_millis(), Ordering::SeqCst);
-    }
-
-    fn engine_active_status(&self) -> (bool, u64) {
+    fn focused_engine_status(&self) -> (u64, u64) {
         (
-            self.engine_active.load(Ordering::SeqCst),
-            self.engine_last_change_ms.load(Ordering::SeqCst),
+            self.focused_engine_id.load(Ordering::SeqCst),
+            self.focused_engine_last_change_ms.load(Ordering::SeqCst),
         )
     }
 
-    fn stop_partial_worker(&self) {
-        if let Some(cancel) = self.partial_cancel.lock().unwrap().take() {
-            cancel.store(true, Ordering::SeqCst);
+    fn register_session_target(&self, session_id: u64, target_engine_id: u64) {
+        if let Ok(mut targets) = self.session_targets.lock() {
+            targets.insert(session_id, target_engine_id);
         }
     }
 
-    fn start_partial_worker(self: &Arc<Self>, binding_id: String, session_id: u64) {
-        self.stop_partial_worker();
+    fn take_session_target(&self, session_id: u64) -> u64 {
+        self.session_targets
+            .lock()
+            .ok()
+            .and_then(|mut targets| targets.remove(&session_id))
+            .unwrap_or(0)
+    }
 
-        let settings = Settings::new();
-        if !settings.live_partial_enabled() {
-            return;
+    fn clear_session_targets(&self) {
+        if let Ok(mut targets) = self.session_targets.lock() {
+            targets.clear();
         }
-
-        let cancel = Arc::new(AtomicBool::new(false));
-        *self.partial_cancel.lock().unwrap() = Some(cancel.clone());
-
-        let state = self.clone();
-        let interval_ms = settings.live_partial_interval_ms().max(200);
-        let min_chars_delta = settings.live_partial_min_chars_delta() as usize;
-        let max_history_ms = settings.live_partial_max_history_ms().max(500);
-        std::thread::spawn(move || {
-            run_partial_worker(
-                state,
-                binding_id,
-                session_id,
-                cancel,
-                interval_ms,
-                min_chars_delta,
-                max_history_ms,
-            );
-        });
     }
 }
 
@@ -251,7 +255,8 @@ struct HandyTranscription {
 impl HandyTranscription {
     /// Start recording audio (compatibility method)
     async fn start_recording(&self) -> fdo::Result<()> {
-        self.start_recording_internal(DEFAULT_BINDING_ID, 0).await
+        self.start_recording_internal(DEFAULT_BINDING_ID, None)
+            .await
     }
 
     /// Stop recording and return transcribed text (compatibility method)
@@ -262,9 +267,38 @@ impl HandyTranscription {
     /// Start a recording session and return session id
     async fn start_recording_session(&self) -> fdo::Result<u64> {
         let session_id = self.state.next_session_id();
+        let (target_engine_id, _) = self.state.focused_engine_status();
+        self.state
+            .register_session_target(session_id, target_engine_id);
         let binding_id = binding_id_for_session(session_id);
-        self.start_recording_internal(&binding_id, session_id)
-            .await?;
+        if let Err(e) = self
+            .start_recording_internal(&binding_id, Some(session_id))
+            .await
+        {
+            let _ = self.state.take_session_target(session_id);
+            return Err(e);
+        }
+        Ok(session_id)
+    }
+
+    /// Start a recording session and bind commit routing to a focused engine id.
+    async fn start_recording_session_for_target(&self, target_engine_id: u64) -> fdo::Result<u64> {
+        if target_engine_id == 0 {
+            return Err(fdo::Error::Failed(
+                "Invalid target engine id 0 for session routing".to_string(),
+            ));
+        }
+        let session_id = self.state.next_session_id();
+        self.state
+            .register_session_target(session_id, target_engine_id);
+        let binding_id = binding_id_for_session(session_id);
+        if let Err(e) = self
+            .start_recording_internal(&binding_id, Some(session_id))
+            .await
+        {
+            let _ = self.state.take_session_target(session_id);
+            return Err(e);
+        }
         Ok(session_id)
     }
 
@@ -279,9 +313,8 @@ impl HandyTranscription {
     async fn cancel_recording(&self) -> fdo::Result<()> {
         debug!("D-Bus: CancelRecording called");
 
-        self.state.stop_partial_worker();
-        self.state.clear_partial_state();
         self.state.recording_manager.cancel_recording();
+        self.state.clear_session_targets();
 
         self.state.is_recording.store(false, Ordering::SeqCst);
         self.emit_recording_state_changed(false).await?;
@@ -296,11 +329,6 @@ impl HandyTranscription {
         let has_model = self.state.transcription_manager.has_model_selected();
 
         Ok((is_recording, has_model))
-    }
-
-    /// Get latest live partial: (session_id, sequence_id, text)
-    async fn get_latest_partial(&self) -> fdo::Result<(u64, u64, String)> {
-        Ok(self.state.latest_partial())
     }
 
     /// Get global shortcut diagnostics tuple
@@ -320,30 +348,25 @@ impl HandyTranscription {
         Ok(ptt_recent_events())
     }
 
-    /// Atomically consume pending final text for engine commit.
-    async fn take_pending_commit(&self) -> fdo::Result<(u64, String)> {
-        Ok(self.state.take_pending_commit())
+    /// Atomically consume pending final text for a specific engine id.
+    async fn take_pending_commit_for_engine(&self, engine_id: u64) -> fdo::Result<(u64, String)> {
+        Ok(self.state.take_pending_commit_for_engine(engine_id))
     }
 
-    /// Read pending commit session id without consuming payload. Returns 0 if empty.
-    async fn peek_pending_commit_session(&self) -> fdo::Result<u64> {
-        Ok(self.state.peek_pending_commit_session())
+    /// Get aggregate pending commit queue stats as JSON.
+    async fn get_pending_commit_stats(&self) -> fdo::Result<String> {
+        Ok(self.state.pending_commit_stats_json())
     }
 
-    /// Age of pending commit text in ms. Returns 0 if no pending payload exists.
-    async fn get_pending_commit_age_ms(&self) -> fdo::Result<u64> {
-        Ok(self.state.pending_commit_age_ms())
-    }
-
-    /// Update whether the Handy IBus engine is currently active in focused context.
-    async fn set_engine_active(&self, active: bool) -> fdo::Result<()> {
-        self.state.set_engine_active(active);
+    /// Report focused engine transitions from IBus callbacks.
+    async fn set_focused_engine(&self, engine_id: u64, focused: bool) -> fdo::Result<()> {
+        self.state.set_focused_engine(engine_id, focused);
         Ok(())
     }
 
-    /// Read current engine active status and last change timestamp.
-    async fn get_engine_active(&self) -> fdo::Result<(bool, u64)> {
-        Ok(self.state.engine_active_status())
+    /// Read currently focused engine id and last change timestamp.
+    async fn get_focused_engine(&self) -> fdo::Result<(u64, u64)> {
+        Ok(self.state.focused_engine_status())
     }
 
     /// Get recent daemon log lines
@@ -376,15 +399,6 @@ impl HandyTranscription {
     async fn recording_state_changed(
         ctxt: &SignalContext<'_>,
         is_recording: bool,
-    ) -> zbus::Result<()>;
-
-    /// Signal emitted when a live partial update is available
-    #[zbus(signal)]
-    async fn partial_transcription_ready(
-        ctxt: &SignalContext<'_>,
-        session_id: u64,
-        sequence_id: u64,
-        text: &str,
     ) -> zbus::Result<()>;
 
     /// Signal emitted when an error occurs
@@ -475,10 +489,15 @@ impl HandyTranscription {
         Self { state, dbus_state }
     }
 
-    async fn start_recording_internal(&self, binding_id: &str, session_id: u64) -> fdo::Result<()> {
+    async fn start_recording_internal(
+        &self,
+        binding_id: &str,
+        session_id: Option<u64>,
+    ) -> fdo::Result<()> {
+        let session_id_value = session_id.unwrap_or(0);
         debug!(
             "D-Bus: StartRecording called (binding='{}', session={})",
-            binding_id, session_id
+            binding_id, session_id_value
         );
         let start_time = Instant::now();
 
@@ -501,9 +520,6 @@ impl HandyTranscription {
                 });
 
                 self.state.is_recording.store(true, Ordering::SeqCst);
-                self.state.reset_partial_state(session_id);
-                self.state
-                    .start_partial_worker(binding_id.to_string(), session_id);
                 self.emit_recording_state_changed(true).await?;
                 play_feedback_sound(&Settings::new(), SoundType::Start);
                 info!("D-Bus: Recording started in {:?}", start_time.elapsed());
@@ -514,7 +530,7 @@ impl HandyTranscription {
                 let message = format!("Failed to start recording ({}): {}", err.code(), detail);
                 error!(
                     "D-Bus: StartRecording failed (binding='{}', session={}): {}",
-                    binding_id, session_id, message
+                    binding_id, session_id_value, message
                 );
                 self.emit_error(&message).await?;
                 Err(fdo::Error::Failed(message))
@@ -529,13 +545,15 @@ impl HandyTranscription {
     ) -> fdo::Result<String> {
         debug!("D-Bus: StopRecording called for binding '{}'", binding_id);
         let stop_time = Instant::now();
+        let target_engine_id = session_id
+            .map(|sid| self.state.take_session_target(sid))
+            .unwrap_or(0);
 
         let was_recording = self.state.is_recording.swap(false, Ordering::SeqCst);
         if was_recording {
             self.emit_recording_state_changed(false).await?;
         }
 
-        self.state.stop_partial_worker();
         play_feedback_sound(&Settings::new(), SoundType::Stop);
         self.state.recording_manager.remove_mute();
 
@@ -563,21 +581,24 @@ impl HandyTranscription {
                             None => converted_text,
                         };
 
-                    self.state.clear_partial_state();
                     // Cache transcription for engine process's subsequent stop_and_commit
                     if let Ok(mut cache) = self.state.last_transcription_cache.lock() {
                         *cache = Some(output_text.clone());
                     }
                     if let Some(session_id) = session_id {
-                        self.state
-                            .store_pending_commit(session_id, output_text.clone());
+                        if target_engine_id != 0 {
+                            self.state.store_pending_commit(
+                                session_id,
+                                target_engine_id,
+                                output_text.clone(),
+                            );
+                        }
                     }
                     self.emit_transcription_ready(&output_text).await?;
                     Ok(output_text)
                 }
                 Err(err) => {
                     error!("D-Bus: Transcription error: {}", err);
-                    self.state.clear_partial_state();
                     self.emit_error(&format!("Transcription failed: {}", err))
                         .await?;
                     Err(fdo::Error::Failed(format!("Transcription failed: {}", err)))
@@ -595,10 +616,15 @@ impl HandyTranscription {
             if !cached.is_empty() {
                 debug!("D-Bus: Returning cached transcription text");
                 if let Some(session_id) = session_id {
-                    self.state.store_pending_commit(session_id, cached.clone());
+                    if target_engine_id != 0 {
+                        self.state.store_pending_commit(
+                            session_id,
+                            target_engine_id,
+                            cached.clone(),
+                        );
+                    }
                 }
             }
-            self.state.clear_partial_state();
             Ok(cached)
         }
     }
@@ -680,91 +706,6 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
-fn should_emit_partial(previous: &str, candidate: &str, min_chars_delta: usize) -> bool {
-    if previous == candidate {
-        return false;
-    }
-    if previous.is_empty() {
-        return true;
-    }
-
-    let prev_len = previous.chars().count();
-    let next_len = candidate.chars().count();
-    let delta = prev_len.abs_diff(next_len);
-
-    delta >= min_chars_delta || !candidate.starts_with(previous)
-}
-
-fn run_partial_worker(
-    state: Arc<HandyState>,
-    binding_id: String,
-    session_id: u64,
-    cancel: Arc<AtomicBool>,
-    interval_ms: u32,
-    min_chars_delta: usize,
-    max_history_ms: u32,
-) {
-    let signal_conn = zbus::blocking::Connection::session().ok();
-
-    let max_history_samples = ((max_history_ms as usize) * 16).max(1600);
-
-    while !cancel.load(Ordering::SeqCst) {
-        std::thread::sleep(Duration::from_millis(interval_ms as u64));
-
-        if cancel.load(Ordering::SeqCst) || !state.is_recording.load(Ordering::SeqCst) {
-            continue;
-        }
-
-        let Some(mut samples) = state.recording_manager.snapshot_recording(&binding_id) else {
-            continue;
-        };
-
-        if samples.len() < 1600 {
-            continue;
-        }
-
-        if samples.len() > max_history_samples {
-            let start = samples.len() - max_history_samples;
-            samples = samples[start..].to_vec();
-        }
-
-        let transcription = match state.transcription_manager.transcribe_partial(samples) {
-            Ok(text) => text,
-            Err(e) => {
-                debug!("Live partial transcription failed: {}", e);
-                continue;
-            }
-        };
-
-        let lang = state.selected_language.lock().unwrap().clone();
-        let converted = convert_chinese_variant(&transcription, &lang);
-        let candidate = converted.trim().to_string();
-
-        if candidate.is_empty() {
-            continue;
-        }
-
-        let previous = state.partial_text.lock().unwrap().clone();
-        if !should_emit_partial(&previous, &candidate, min_chars_delta) {
-            continue;
-        }
-
-        *state.partial_text.lock().unwrap() = candidate.clone();
-        state.partial_session_id.store(session_id, Ordering::SeqCst);
-        let sequence_id = state.partial_sequence.fetch_add(1, Ordering::SeqCst) + 1;
-
-        if let Some(conn) = signal_conn.as_ref() {
-            let _ = conn.emit_signal(
-                None::<&str>,
-                HANDY_OBJECT_PATH,
-                HANDY_INTERFACE,
-                "PartialTranscriptionReady",
-                &(session_id, sequence_id, candidate.as_str()),
-            );
-        }
-    }
-}
-
 /// Start the D-Bus server
 pub async fn start_dbus_server(state: Arc<HandyState>) -> Result<Arc<HandyDbusState>, String> {
     info!("Starting D-Bus server for IBus integration...");
@@ -830,36 +771,50 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn pending_commit_store_take_clears_payload() {
+    fn pending_commit_store_take_for_engine_consumes_target_only() {
         let store = PendingCommitStore::default();
-        store.store(42, "hello".to_string());
+        store.store(42, 11, "hello".to_string());
+        store.store(43, 22, "world".to_string());
 
-        let (session_id, text) = store.take();
+        let (session_id, text) = store.take_for_engine(11);
         assert_eq!(session_id, 42);
         assert_eq!(text, "hello");
-        assert_eq!(store.peek_session(), 0);
+        let (remaining_sid, remaining_text) = store.take_for_engine(22);
+        assert_eq!(remaining_sid, 43);
+        assert_eq!(remaining_text, "world");
     }
 
     #[test]
-    fn pending_commit_store_peek_and_age() {
+    fn pending_commit_store_stats_reports_oldest_age() {
         let store = PendingCommitStore::default();
-        assert_eq!(store.peek_session(), 0);
-        assert_eq!(store.age_ms(), 0);
-
-        store.store(99, "payload".to_string());
+        store.store(99, 17, "payload".to_string());
         std::thread::sleep(Duration::from_millis(2));
-        assert_eq!(store.peek_session(), 99);
-        assert!(store.age_ms() > 0);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&store.stats_json()).expect("valid stats json");
+        let queue_len = parsed
+            .get("queue_len")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let oldest_age_ms = parsed
+            .get("oldest_age_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert_eq!(queue_len, 1);
+        assert!(oldest_age_ms > 0);
     }
 
     #[test]
-    fn pending_commit_store_store_overwrites_previous() {
+    fn pending_commit_store_keeps_independent_queue_order() {
         let store = PendingCommitStore::default();
-        store.store(10, "first".to_string());
-        store.store(11, "second".to_string());
+        store.store(10, 1, "first".to_string());
+        store.store(11, 1, "second".to_string());
+        store.store(12, 2, "third".to_string());
 
-        let (sid, text) = store.take();
-        assert_eq!((sid, text), (11, "second".to_string()));
-        assert_eq!(store.peek_session(), 0);
+        let (sid1, text1) = store.take_for_engine(1);
+        let (sid2, text2) = store.take_for_engine(1);
+        let (sid3, text3) = store.take_for_engine(2);
+        assert_eq!((sid1, text1), (10, "first".to_string()));
+        assert_eq!((sid2, text2), (11, "second".to_string()));
+        assert_eq!((sid3, text3), (12, "third".to_string()));
     }
 }
