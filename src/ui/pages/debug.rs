@@ -461,8 +461,8 @@ fn fetch_ptt_diagnostics_summary() -> Result<String, String> {
         .get("press_while_handy_count")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    let release_timeout_fallback_count = diagnostics
-        .get("release_timeout_fallback_count")
+    let stop_timeout_fallback_count = diagnostics
+        .get("stop_timeout_fallback_count")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
     let current_state = diagnostics
@@ -505,6 +505,30 @@ fn fetch_ptt_diagnostics_summary() -> Result<String, String> {
         .get("last_switch_failure_message")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let engine_active = diagnostics
+        .get("engine_active")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let engine_last_change_ms = diagnostics
+        .get("engine_last_change_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let pending_force_clear_count = diagnostics
+        .get("pending_force_clear_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let last_force_cleared_session_id = diagnostics
+        .get("last_force_cleared_session_id")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let last_force_cleared_age_ms = diagnostics
+        .get("last_force_cleared_age_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let last_force_clear_reason = diagnostics
+        .get("last_force_clear_reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     if let Ok(reply) = conn.call_method(
         Some(HANDY_BUS_NAME),
         HANDY_OBJECT_PATH,
@@ -529,7 +553,7 @@ fn fetch_ptt_diagnostics_summary() -> Result<String, String> {
     }
 
     Ok(format!(
-        "healthy={} code={} message={} state={} shortcut='{}' listener_ok={} shortcut_bound={} bind_failures={} press_while_handy={} stop_fallbacks={} start_failure_code={} start_failure_message={} stop_failure_message={} switch_confirm_latency_ms={} switch_failure_message={} pending_commit_session={} pending_commit_age_ms={} last_dbus_error={}",
+        "healthy={} code={} message={} state={} shortcut='{}' listener_ok={} shortcut_bound={} bind_failures={} press_while_handy={} stop_timeouts={} start_failure_code={} start_failure_message={} stop_failure_message={} switch_confirm_latency_ms={} switch_failure_message={} engine_active={} engine_last_change_ms={} pending_commit_session={} pending_commit_age_ms={} pending_force_clear_count={} last_force_cleared_session={} last_force_cleared_age_ms={} last_force_clear_reason={} last_dbus_error={}",
         healthy,
         code,
         message,
@@ -539,14 +563,20 @@ fn fetch_ptt_diagnostics_summary() -> Result<String, String> {
         shortcut_bound,
         bind_fail_count,
         press_while_handy_count,
-        release_timeout_fallback_count,
+        stop_timeout_fallback_count,
         last_start_failure_code,
         last_start_failure_message,
         last_stop_failure_message,
         last_switch_confirm_latency_ms,
         last_switch_failure_message,
+        engine_active,
+        engine_last_change_ms,
         pending_commit_session_id,
         pending_commit_age_ms,
+        pending_force_clear_count,
+        last_force_cleared_session_id,
+        last_force_cleared_age_ms,
+        last_force_clear_reason,
         last_dbus_error
     ))
 }
@@ -578,7 +608,7 @@ fn render_debug_text(
 ) -> String {
     let mut out = String::new();
 
-    out.push_str("=== Push-to-Talk Diagnostics ===\n");
+    out.push_str("=== Shortcut Diagnostics ===\n");
     match ptt_diagnostics {
         Ok(summary) => {
             out.push_str("[ptt] ");
@@ -593,7 +623,7 @@ fn render_debug_text(
     }
 
     out.push('\n');
-    out.push_str("=== Push-to-Talk Recent Events ===\n");
+    out.push_str("=== Shortcut Recent Events ===\n");
     match ptt_recent_events {
         Ok(events) if events.is_empty() => out.push_str("[ptt-events] <no events yet>\n"),
         Ok(events) => {

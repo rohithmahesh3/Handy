@@ -191,23 +191,23 @@ impl Settings {
             .ok();
     }
 
-    pub fn push_to_talk_keyval(&self) -> u32 {
-        self.gio_settings.uint("push-to-talk-keyval")
+    pub fn dictation_shortcut_keyval(&self) -> u32 {
+        self.gio_settings.uint("dictation-shortcut-keyval")
     }
 
-    pub fn set_push_to_talk_keyval(&self, value: u32) {
+    pub fn set_dictation_shortcut_keyval(&self, value: u32) {
         self.gio_settings
-            .set_uint("push-to-talk-keyval", value)
+            .set_uint("dictation-shortcut-keyval", value)
             .ok();
     }
 
-    pub fn push_to_talk_modifiers(&self) -> u32 {
-        self.gio_settings.uint("push-to-talk-modifiers")
+    pub fn dictation_shortcut_modifiers(&self) -> u32 {
+        self.gio_settings.uint("dictation-shortcut-modifiers")
     }
 
-    pub fn set_push_to_talk_modifiers(&self, value: u32) {
+    pub fn set_dictation_shortcut_modifiers(&self, value: u32) {
         self.gio_settings
-            .set_uint("push-to-talk-modifiers", value)
+            .set_uint("dictation-shortcut-modifiers", value)
             .ok();
     }
 

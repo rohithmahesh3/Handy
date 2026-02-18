@@ -14,8 +14,8 @@ use tokio::sync::mpsc;
 
 use crate::ibus_control::{get_current_engine, is_handy_engine, switch_to_handy_engine_verified};
 use crate::key_mapping::{
-    gdk_keyval_to_evdev, is_modifier_key, modifier_flag_for_key, modifiers_from_held_keys,
-    EvdevKeybinding, MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER,
+    gdk_keyval_to_evdev, is_modifier_key, modifiers_from_held_keys, EvdevKeybinding, MOD_ALT,
+    MOD_CTRL, MOD_SHIFT, MOD_SUPER,
 };
 use crate::settings::Settings;
 use crate::utils::launch::open_handy_ui;
@@ -27,9 +27,11 @@ const HANDY_INTERFACE: &str = "com.handy.Transcription";
 const START_RECORDING_ARM_DELAY_MS: u64 = 120;
 const STOP_RECORDING_TIMEOUT_MS: u64 = 20_000;
 const ENGINE_SWITCH_VERIFY_TIMEOUT_MS: u64 = 350;
-const PENDING_COMMIT_DRAIN_TIMEOUT_MS: u64 = 320;
+const ENGINE_ACTIVE_VERIFY_TIMEOUT_MS: u64 = 700;
+const ENGINE_ACTIVE_VERIFY_POLL_MS: u64 = 20;
+const PENDING_COMMIT_DRAIN_TIMEOUT_MS: u64 = 180;
 const PENDING_COMMIT_DRAIN_POLL_MS: u64 = 20;
-const PENDING_COMMIT_STALE_MS: u64 = 2_500;
+const TOGGLE_PRESS_DEBOUNCE_MS: u64 = 90;
 const SETTINGS_POLL_INTERVAL_MS: u64 = 350;
 const FAILURE_NOTIFICATION_COOLDOWN_MS: u64 = 8_000;
 const PTT_EVENT_HISTORY_LIMIT: usize = 60;
@@ -46,7 +48,6 @@ enum PttState {
     Idle,
     Pending {
         ptt_session_id: u64,
-        released_early: bool,
     },
     Recording {
         ptt_session_id: u64,
@@ -82,7 +83,7 @@ struct PttRuntimeHealth {
     shortcut_bound: bool,
     portal_bind_fail_count: u64,
     press_while_handy_count: u64,
-    release_timeout_fallback_count: u64,
+    stop_timeout_fallback_count: u64,
     last_notification_ms: u64,
     current_state: String,
     shortcut_description: String,
@@ -94,9 +95,15 @@ struct PttRuntimeHealth {
     pending_commit_session_id: u64,
     pending_commit_mark_ms: u64,
     stale_pending_clear_count: u64,
+    pending_force_clear_count: u64,
+    last_force_cleared_session_id: u64,
+    last_force_cleared_age_ms: u64,
+    last_force_clear_reason: String,
     last_stale_pending_session_id: u64,
     last_stale_pending_age_ms: u64,
     last_stale_pending_clear_ms: u64,
+    engine_active: bool,
+    engine_last_change_ms: u64,
     last_switch_attempt_ms: u64,
     last_switch_confirm_latency_ms: u64,
     last_switch_failure_message: String,
@@ -110,13 +117,13 @@ impl Default for PttRuntimeHealth {
             healthy: false,
             component: "global_shortcuts".to_string(),
             code: "not_initialized".to_string(),
-            message: "Global push-to-talk listener not initialized yet".to_string(),
+            message: "Global dictation shortcut listener not initialized yet".to_string(),
             last_success_ms: 0,
             portal_session_ok: false,
             shortcut_bound: false,
             portal_bind_fail_count: 0,
             press_while_handy_count: 0,
-            release_timeout_fallback_count: 0,
+            stop_timeout_fallback_count: 0,
             last_notification_ms: 0,
             current_state: "idle".to_string(),
             shortcut_description: String::new(),
@@ -128,9 +135,15 @@ impl Default for PttRuntimeHealth {
             pending_commit_session_id: 0,
             pending_commit_mark_ms: 0,
             stale_pending_clear_count: 0,
+            pending_force_clear_count: 0,
+            last_force_cleared_session_id: 0,
+            last_force_cleared_age_ms: 0,
+            last_force_clear_reason: String::new(),
             last_stale_pending_session_id: 0,
             last_stale_pending_age_ms: 0,
             last_stale_pending_clear_ms: 0,
+            engine_active: false,
+            engine_last_change_ms: 0,
             last_switch_attempt_ms: 0,
             last_switch_confirm_latency_ms: 0,
             last_switch_failure_message: String::new(),
@@ -256,14 +269,25 @@ fn clear_pending_commit() {
     }
 }
 
-fn mark_stale_pending_cleared(session_id: u64, age_ms: u64) {
+fn mark_pending_force_cleared(session_id: u64, age_ms: u64, reason: &str) {
     if let Ok(mut health) = health_state().lock() {
+        health.pending_force_clear_count = health.pending_force_clear_count.saturating_add(1);
+        health.last_force_cleared_session_id = session_id;
+        health.last_force_cleared_age_ms = age_ms;
+        health.last_force_clear_reason = reason.to_string();
         health.stale_pending_clear_count = health.stale_pending_clear_count.saturating_add(1);
         health.last_stale_pending_session_id = session_id;
         health.last_stale_pending_age_ms = age_ms;
         health.last_stale_pending_clear_ms = now_millis();
         health.pending_commit_session_id = 0;
         health.pending_commit_mark_ms = 0;
+    }
+}
+
+fn mark_engine_active_status(active: bool, last_change_ms: u64) {
+    if let Ok(mut health) = health_state().lock() {
+        health.engine_active = active;
+        health.engine_last_change_ms = last_change_ms;
     }
 }
 
@@ -299,10 +323,9 @@ fn bump_press_while_handy() {
     }
 }
 
-fn bump_release_timeout_fallback() {
+fn bump_stop_timeout_fallback() {
     if let Ok(mut health) = health_state().lock() {
-        health.release_timeout_fallback_count =
-            health.release_timeout_fallback_count.saturating_add(1);
+        health.stop_timeout_fallback_count = health.stop_timeout_fallback_count.saturating_add(1);
     }
 }
 
@@ -318,7 +341,7 @@ pub fn ptt_diagnostics_tuple() -> (bool, String, String, String, u64, bool, bool
             health.shortcut_bound,
             health.portal_bind_fail_count,
             health.press_while_handy_count,
-            health.release_timeout_fallback_count,
+            health.stop_timeout_fallback_count,
         )
     } else {
         (
@@ -353,7 +376,7 @@ pub fn ptt_diagnostics_verbose_json() -> String {
             "shortcut_bound": health.shortcut_bound,
             "bind_fail_count": health.portal_bind_fail_count,
             "press_while_handy_count": health.press_while_handy_count,
-            "release_timeout_fallback_count": health.release_timeout_fallback_count,
+            "stop_timeout_fallback_count": health.stop_timeout_fallback_count,
             "current_state": health.current_state,
             "shortcut_description": health.shortcut_description,
             "last_start_failure_code": health.last_start_failure_code,
@@ -364,9 +387,15 @@ pub fn ptt_diagnostics_verbose_json() -> String {
             "pending_commit_session_id": health.pending_commit_session_id,
             "pending_commit_age_ms": pending_commit_age_ms,
             "stale_pending_clear_count": health.stale_pending_clear_count,
+            "pending_force_clear_count": health.pending_force_clear_count,
+            "last_force_cleared_session_id": health.last_force_cleared_session_id,
+            "last_force_cleared_age_ms": health.last_force_cleared_age_ms,
+            "last_force_clear_reason": health.last_force_clear_reason,
             "last_stale_pending_session_id": health.last_stale_pending_session_id,
             "last_stale_pending_age_ms": health.last_stale_pending_age_ms,
             "last_stale_pending_clear_ms": health.last_stale_pending_clear_ms,
+            "engine_active": health.engine_active,
+            "engine_last_change_ms": health.engine_last_change_ms,
             "last_switch_attempt_ms": health.last_switch_attempt_ms,
             "last_switch_confirm_latency_ms": health.last_switch_confirm_latency_ms,
             "last_switch_failure_message": health.last_switch_failure_message,
@@ -386,7 +415,7 @@ pub fn ptt_diagnostics_verbose_json() -> String {
             "shortcut_bound": false,
             "bind_fail_count": 0,
             "press_while_handy_count": 0,
-            "release_timeout_fallback_count": 0,
+            "stop_timeout_fallback_count": 0,
             "current_state": "unknown",
             "shortcut_description": "",
             "last_start_failure_code": "",
@@ -397,9 +426,15 @@ pub fn ptt_diagnostics_verbose_json() -> String {
             "pending_commit_session_id": 0,
             "pending_commit_age_ms": 0,
             "stale_pending_clear_count": 0,
+            "pending_force_clear_count": 0,
+            "last_force_cleared_session_id": 0,
+            "last_force_cleared_age_ms": 0,
+            "last_force_clear_reason": "",
             "last_stale_pending_session_id": 0,
             "last_stale_pending_age_ms": 0,
             "last_stale_pending_clear_ms": 0,
+            "engine_active": false,
+            "engine_last_change_ms": 0,
             "last_switch_attempt_ms": 0,
             "last_switch_confirm_latency_ms": 0,
             "last_switch_failure_message": "",
@@ -415,7 +450,10 @@ pub fn ptt_diagnostics_verbose_json() -> String {
 
 pub fn start_global_shortcuts_listener() {
     let initial_config = ShortcutConfig::from_settings(&Settings::new());
-    mark_health_error("initializing", "Starting global push-to-talk listener");
+    mark_health_error(
+        "initializing",
+        "Starting global dictation shortcut listener",
+    );
     mark_ptt_state("initializing");
     push_ptt_event("listener: initializing");
 
@@ -484,12 +522,12 @@ async fn run_evdev_listener_loop(mut active_config: ShortcutConfig) {
             Some(kb) => kb,
             None => {
                 let msg = format!(
-                    "Unsupported push-to-talk shortcut: keyval {:#x}",
+                    "Unsupported dictation shortcut: keyval {:#x}",
                     active_config.keyval
                 );
                 mark_health_error("invalid_shortcut", &msg);
                 notify_ptt_failure(
-                    "Invalid push-to-talk shortcut",
+                    "Invalid dictation shortcut",
                     "Set a supported shortcut in Handy preferences.",
                 );
                 // Wait before retrying
@@ -515,7 +553,7 @@ async fn run_evdev_listener_loop(mut active_config: ShortcutConfig) {
                 };
                 mark_health_error(code, &e.to_string());
                 notify_ptt_failure(
-                    "Global push-to-talk is unavailable",
+                    "Global dictation shortcut is unavailable",
                     &format!("Keyboard input error: {}", e),
                 );
             }
@@ -571,6 +609,7 @@ async fn run_evdev_session(
     let mut ptt_state = PttState::Idle;
     let mut config_poll = tokio::time::interval(Duration::from_millis(SETTINGS_POLL_INTERVAL_MS));
     let mut held_modifiers: HashSet<u16> = HashSet::new();
+    let mut last_shortcut_press_ms = 0_u64;
 
     let loop_result = loop {
         tokio::select! {
@@ -600,6 +639,17 @@ async fn run_evdev_session(
                         } else if code == keybinding.key_code {
                             let current_mods = modifiers_from_held_keys(&held_modifiers);
                             if current_mods == keybinding.modifiers {
+                                let now_ms = now_millis();
+                                if now_ms.saturating_sub(last_shortcut_press_ms)
+                                    < TOGGLE_PRESS_DEBOUNCE_MS
+                                {
+                                    push_ptt_event(format!(
+                                        "ptt:shortcut press ignored by debounce ({} ms)",
+                                        TOGGLE_PRESS_DEBOUNCE_MS
+                                    ));
+                                    continue;
+                                }
+                                last_shortcut_press_ms = now_ms;
                                 on_global_pressed(&mut ptt_state, &internal_tx);
                             }
                         }
@@ -607,14 +657,6 @@ async fn run_evdev_session(
                     KeyEvent::Release(code) => {
                         if is_modifier_key(code) {
                             held_modifiers.remove(&code);
-                            // If a required modifier was released while PTT is active, treat as release
-                            if let Some(flag) = modifier_flag_for_key(code) {
-                                if keybinding.modifiers & flag != 0 && !matches!(ptt_state, PttState::Idle) {
-                                    on_global_released(&mut ptt_state, &internal_tx);
-                                }
-                            }
-                        } else if code == keybinding.key_code {
-                            on_global_released(&mut ptt_state, &internal_tx);
                         }
                     }
                 }
@@ -734,13 +776,60 @@ async fn read_device_events(path: PathBuf, tx: mpsc::UnboundedSender<KeyEvent>) 
     Ok(())
 }
 
-// ── PTT press/release handlers (preserved from original) ───────────────
+// ── PTT toggle handlers ─────────────────────────────────────────────────
 
 fn on_global_pressed(ptt_state: &mut PttState, internal_tx: &mpsc::UnboundedSender<InternalEvent>) {
-    if !matches!(ptt_state, PttState::Idle) {
-        debug!("Ignoring duplicate global PTT press while not idle");
-        return;
+    match ptt_state {
+        PttState::Idle => start_toggle_recording(ptt_state, internal_tx),
+        PttState::Pending { ptt_session_id } => {
+            push_ptt_event(format!(
+                "ptt:{} toggle ignored while start transition is pending",
+                ptt_session_id
+            ));
+            debug!(
+                "[ptt:{}] Ignoring toggle while start is pending",
+                ptt_session_id
+            );
+        }
+        PttState::Recording {
+            ptt_session_id,
+            daemon_session_id,
+        } => {
+            let current_session = *ptt_session_id;
+            let daemon_session = *daemon_session_id;
+            info!(
+                "[ptt:{}] Toggle pressed; waiting for StopRecordingSession({})",
+                current_session, daemon_session
+            );
+            push_ptt_event(format!(
+                "ptt:{} toggle stop requested; stopping daemon session {}",
+                current_session, daemon_session
+            ));
+            spawn_stop_recording(current_session, daemon_session, internal_tx.clone());
+            *ptt_state = PttState::Stopping {
+                ptt_session_id: current_session,
+                daemon_session_id: daemon_session,
+            };
+            mark_ptt_state("stopping");
+        }
+        PttState::Stopping { ptt_session_id, .. } => {
+            push_ptt_event(format!(
+                "ptt:{} toggle ignored while stop transition is pending",
+                ptt_session_id
+            ));
+            debug!(
+                "[ptt:{}] Ignoring toggle while stop is pending",
+                ptt_session_id
+            );
+        }
     }
+}
+
+fn start_toggle_recording(
+    ptt_state: &mut PttState,
+    internal_tx: &mpsc::UnboundedSender<InternalEvent>,
+) {
+    debug_assert!(matches!(ptt_state, PttState::Idle));
 
     let current_engine = match get_current_engine() {
         Ok(engine) => Some(engine),
@@ -756,40 +845,8 @@ fn on_global_pressed(ptt_state: &mut PttState, internal_tx: &mpsc::UnboundedSend
 
     let ptt_session_id = next_ptt_session_id();
     push_ptt_event(format!("ptt:{} pressed", ptt_session_id));
-    match wait_for_pending_commit_drain(
-        Duration::from_millis(PENDING_COMMIT_DRAIN_TIMEOUT_MS),
-        Duration::from_millis(PENDING_COMMIT_DRAIN_POLL_MS),
-        Duration::from_millis(PENDING_COMMIT_STALE_MS),
-    ) {
-        Ok(Some((session_id, age_ms))) => {
-            warn!(
-                "[ptt:{}] Cleared stale pending commit session {} (age={} ms) before start",
-                ptt_session_id, session_id, age_ms
-            );
-            mark_stale_pending_cleared(session_id, age_ms);
-            push_ptt_event(format!(
-                "ptt:{} cleared stale pending commit session {} (age={} ms)",
-                ptt_session_id, session_id, age_ms
-            ));
-        }
-        Ok(None) => {}
-        Err(e) => {
-            warn!(
-                "[ptt:{}] Previous pending transcription not yet consumed: {}",
-                ptt_session_id, e
-            );
-            mark_health_error("pending_commit_not_drained", &e);
-            notify_ptt_failure(
-                "Cannot start push-to-talk",
-                "Previous transcription is still being committed. Try again in a moment.",
-            );
-            push_ptt_event(format!(
-                "ptt:{} blocked start because pending commit is not drained: {}",
-                ptt_session_id, e
-            ));
-            return;
-        }
-    }
+    reconcile_pending_commit_before_start(ptt_session_id);
+
     if current_engine
         .as_ref()
         .is_some_and(|engine| is_handy_engine(engine))
@@ -820,7 +877,7 @@ fn on_global_pressed(ptt_state: &mut PttState, internal_tx: &mpsc::UnboundedSend
                 mark_switch_failure(&e.to_string());
                 mark_health_error("ibus_switch_to_handy_failed", &e.to_string());
                 notify_ptt_failure(
-                    "Cannot start push-to-talk",
+                    "Cannot start recording",
                     "Failed to switch input source to Handy (not confirmed active).",
                 );
                 push_ptt_event(format!(
@@ -843,62 +900,39 @@ fn on_global_pressed(ptt_state: &mut PttState, internal_tx: &mpsc::UnboundedSend
         );
     }
 
-    spawn_start_recording(ptt_session_id, internal_tx.clone());
-    *ptt_state = PttState::Pending {
-        ptt_session_id,
-        released_early: false,
-    };
-    mark_ptt_state("pending");
-    clear_pending_commit();
-}
-
-fn on_global_released(
-    ptt_state: &mut PttState,
-    internal_tx: &mpsc::UnboundedSender<InternalEvent>,
-) {
-    match ptt_state {
-        PttState::Idle => {}
-        PttState::Pending {
-            ptt_session_id,
-            released_early,
-        } => {
-            let current_session = *ptt_session_id;
-            info!(
-                "[ptt:{}] Released before recording confirmation",
-                current_session
+    match wait_for_engine_active(
+        Duration::from_millis(ENGINE_ACTIVE_VERIFY_TIMEOUT_MS),
+        Duration::from_millis(ENGINE_ACTIVE_VERIFY_POLL_MS),
+    ) {
+        Ok(last_change_ms) => {
+            push_ptt_event(format!(
+                "ptt:{} engine active confirmed (last_change_ms={})",
+                ptt_session_id, last_change_ms
+            ));
+        }
+        Err(e) => {
+            warn!(
+                "[ptt:{}] Handy engine was not active in the focused context: {}",
+                ptt_session_id, e
+            );
+            mark_start_failure("engine_not_active", &e);
+            mark_health_error("engine_not_active", &e);
+            notify_ptt_failure(
+                "Cannot start recording",
+                "Handy input source is not active in the focused text field.",
             );
             push_ptt_event(format!(
-                "ptt:{} released before start confirmed",
-                current_session
+                "ptt:{} blocked start because engine is inactive: {}",
+                ptt_session_id, e
             ));
-            // Mark early release; on_start_recording_result will cancel the stale session.
-            *released_early = true;
-        }
-        PttState::Recording {
-            ptt_session_id,
-            daemon_session_id,
-        } => {
-            let current_session = *ptt_session_id;
-            let daemon_session = *daemon_session_id;
-            info!(
-                "[ptt:{}] Released; waiting for StopRecordingSession({})",
-                current_session, daemon_session
-            );
-            push_ptt_event(format!(
-                "ptt:{} released; stopping daemon session {}",
-                current_session, daemon_session
-            ));
-            spawn_stop_recording(current_session, daemon_session, internal_tx.clone());
-            *ptt_state = PttState::Stopping {
-                ptt_session_id: current_session,
-                daemon_session_id: daemon_session,
-            };
-            mark_ptt_state("stopping");
-        }
-        PttState::Stopping { .. } => {
-            debug!("Ignoring duplicate global PTT release while stop is already in progress");
+            return;
         }
     }
+
+    spawn_start_recording(ptt_session_id, internal_tx.clone());
+    *ptt_state = PttState::Pending { ptt_session_id };
+    mark_ptt_state("pending");
+    clear_pending_commit();
 }
 
 fn handle_internal_event(ptt_state: &mut PttState, internal: InternalEvent) {
@@ -926,39 +960,23 @@ fn on_start_recording_result(
     match ptt_state {
         PttState::Pending {
             ptt_session_id: active_session,
-            released_early,
         } if *active_session == ptt_session_id => match result {
             Ok(daemon_session_id) => {
                 clear_start_failure();
                 clear_stop_failure();
-                if *released_early {
-                    info!(
-                        "[ptt:{}] Start completed after key release; cancelling stale recording",
-                        ptt_session_id
-                    );
-                    // Cancel the recording that started after key release.
-                    spawn_cancel_recording(ptt_session_id, "released early");
-                    *ptt_state = PttState::Idle;
-                    mark_ptt_state("idle");
-                    push_ptt_event(format!(
-                        "ptt:{} start completed after release; cancelled session {}",
-                        ptt_session_id, daemon_session_id
-                    ));
-                } else {
-                    info!(
-                        "[ptt:{}] Recording started with daemon session {}",
-                        ptt_session_id, daemon_session_id
-                    );
-                    *ptt_state = PttState::Recording {
-                        ptt_session_id,
-                        daemon_session_id,
-                    };
-                    mark_ptt_state("recording");
-                    push_ptt_event(format!(
-                        "ptt:{} started daemon session {}",
-                        ptt_session_id, daemon_session_id
-                    ));
-                }
+                info!(
+                    "[ptt:{}] Recording started with daemon session {}",
+                    ptt_session_id, daemon_session_id
+                );
+                *ptt_state = PttState::Recording {
+                    ptt_session_id,
+                    daemon_session_id,
+                };
+                mark_ptt_state("recording");
+                push_ptt_event(format!(
+                    "ptt:{} started daemon session {}",
+                    ptt_session_id, daemon_session_id
+                ));
             }
             Err(err) => {
                 warn!(
@@ -1045,7 +1063,7 @@ fn on_stop_recording_result(
                         ptt_session_id, daemon_session_id, err
                     );
                     if err.contains("timed out") {
-                        bump_release_timeout_fallback();
+                        bump_stop_timeout_fallback();
                     }
                     mark_health_error("stop_recording_failed", &err);
                     mark_stop_failure(&err);
@@ -1077,7 +1095,7 @@ fn on_stop_recording_result(
 fn cleanup_state(ptt_state: &mut PttState) {
     match ptt_state {
         PttState::Idle => {}
-        PttState::Pending { ptt_session_id, .. } => {
+        PttState::Pending { ptt_session_id } => {
             let sid = *ptt_session_id;
             spawn_cancel_recording(sid, "cleanup");
         }
@@ -1284,64 +1302,145 @@ fn call_handy_take_pending_commit() -> std::result::Result<(u64, String), String
     })
 }
 
-fn wait_for_pending_commit_drain(
+fn call_handy_get_engine_active() -> std::result::Result<(bool, u64), String> {
+    let conn = zbus::blocking::Connection::session().map_err(|e| {
+        let msg = format!("Failed to open session bus: {}", e);
+        mark_dbus_error("GetEngineActive", &msg);
+        msg
+    })?;
+    let reply = conn
+        .call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "GetEngineActive",
+            &(),
+        )
+        .map_err(|e| {
+            let msg = format!("GetEngineActive call failed: {}", e);
+            mark_dbus_error("GetEngineActive", &msg);
+            msg
+        })?;
+    reply.body().deserialize::<(bool, u64)>().map_err(|e| {
+        let msg = format!("GetEngineActive decode failed: {}", e);
+        mark_dbus_error("GetEngineActive", &msg);
+        msg
+    })
+}
+
+fn wait_for_engine_active(
     timeout: Duration,
     poll_interval: Duration,
-    stale_after: Duration,
-) -> std::result::Result<Option<(u64, u64)>, String> {
+) -> std::result::Result<u64, String> {
     let start = Instant::now();
-    let mut last_pending_session = 0_u64;
-    let mut last_pending_age_ms = 0_u64;
-    let mut last_error = String::new();
-
-    loop {
-        match call_handy_peek_pending_commit_session() {
-            Ok(pending_session) => {
-                last_pending_session = pending_session;
-                if pending_session == 0 {
-                    return Ok(None);
+    let mut last_change_ms = 0_u64;
+    let last_error = loop {
+        let error_text = match call_handy_get_engine_active() {
+            Ok((is_active, change_ms)) => {
+                last_change_ms = change_ms;
+                mark_engine_active_status(is_active, change_ms);
+                if is_active {
+                    return Ok(change_ms);
                 }
-
-                match call_handy_get_pending_commit_age_ms() {
-                    Ok(age_ms) => {
-                        last_pending_age_ms = age_ms;
-                        if age_ms >= stale_after.as_millis() as u64 {
-                            match call_handy_take_pending_commit() {
-                                Ok((cleared_session_id, _)) if cleared_session_id != 0 => {
-                                    return Ok(Some((cleared_session_id, age_ms)));
-                                }
-                                Ok(_) => {
-                                    // Commit likely drained concurrently; continue polling.
-                                }
-                                Err(e) => {
-                                    last_error = e;
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        last_error = e;
-                    }
-                }
+                format!(
+                    "Handy engine still inactive in focused context (last_change_ms={})",
+                    change_ms
+                )
             }
-            Err(e) => {
-                last_error = e;
-            }
-        }
+            Err(e) => e,
+        };
 
         if start.elapsed() >= timeout {
-            break;
+            break error_text;
+        }
+        std::thread::sleep(poll_interval);
+    };
+
+    mark_engine_active_status(false, last_change_ms);
+    Err(format!(
+        "Handy engine did not become active within {} ms (last_change_ms={} last_error='{}')",
+        timeout.as_millis(),
+        last_change_ms,
+        last_error
+    ))
+}
+
+fn reconcile_pending_commit_before_start(ptt_session_id: u64) {
+    let pending_session = match call_handy_peek_pending_commit_session() {
+        Ok(session_id) => session_id,
+        Err(e) => {
+            warn!(
+                "[ptt:{}] Could not peek pending commit state; continuing: {}",
+                ptt_session_id, e
+            );
+            push_ptt_event(format!(
+                "ptt:{} pending peek failed (non-fatal): {}",
+                ptt_session_id, e
+            ));
+            return;
+        }
+    };
+
+    if pending_session == 0 {
+        clear_pending_commit();
+        return;
+    }
+
+    let drained = wait_for_pending_commit_to_clear(
+        Duration::from_millis(PENDING_COMMIT_DRAIN_TIMEOUT_MS),
+        Duration::from_millis(PENDING_COMMIT_DRAIN_POLL_MS),
+    );
+    if drained {
+        clear_pending_commit();
+        push_ptt_event(format!(
+            "ptt:{} pending commit drained naturally before start",
+            ptt_session_id
+        ));
+        return;
+    }
+
+    let pending_age_ms = call_handy_get_pending_commit_age_ms().unwrap_or(0);
+    match call_handy_take_pending_commit() {
+        Ok((session_id, _)) if session_id != 0 => {
+            warn!(
+                "[ptt:{}] Force-cleared pending commit session {} (age={} ms) before starting next recording",
+                ptt_session_id, session_id, pending_age_ms
+            );
+            mark_pending_force_cleared(session_id, pending_age_ms, "start_gate_immediate_clear");
+            push_ptt_event(format!(
+                "ptt:{} force-cleared pending session {} (age={} ms)",
+                ptt_session_id, session_id, pending_age_ms
+            ));
+        }
+        Ok(_) => {
+            clear_pending_commit();
+        }
+        Err(e) => {
+            warn!(
+                "[ptt:{}] Pending commit clear failed; continuing with start: {}",
+                ptt_session_id, e
+            );
+            push_ptt_event(format!(
+                "ptt:{} pending clear failed (non-fatal): {}",
+                ptt_session_id, e
+            ));
+        }
+    }
+}
+
+fn wait_for_pending_commit_to_clear(timeout: Duration, poll_interval: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        match call_handy_peek_pending_commit_session() {
+            Ok(0) => return true,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+        if start.elapsed() >= timeout {
+            return false;
         }
         std::thread::sleep(poll_interval);
     }
-
-    Err(format!(
-        "Pending commit did not drain within {} ms (last_pending_session={} last_pending_age_ms={} last_error='{}')",
-        timeout.as_millis(),
-        last_pending_session,
-        last_pending_age_ms,
-        last_error
-    ))
 }
 
 fn call_handy_stop_recording_session(session_id: u64) -> std::result::Result<String, String> {
@@ -1452,8 +1551,8 @@ struct ShortcutConfig {
 impl ShortcutConfig {
     fn from_settings(settings: &Settings) -> Self {
         Self {
-            keyval: normalize_keyval(settings.push_to_talk_keyval()),
-            modifiers: settings.push_to_talk_modifiers(),
+            keyval: normalize_keyval(settings.dictation_shortcut_keyval()),
+            modifiers: settings.dictation_shortcut_modifiers(),
         }
     }
 

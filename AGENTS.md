@@ -100,6 +100,8 @@ Methods:
 - `StopRecordingSession(u64) -> string`
 - `CancelRecording()`
 - `GetState() -> (bool is_recording, bool has_model_selected)`
+- `SetEngineActive(bool)`
+- `GetEngineActive() -> (bool active, u64 last_change_ms)`
 - `GetLatestPartial() -> (u64 session_id, u64 sequence_id, string text)`
 - `GetPttDiagnostics() -> (bool, string, string, string, u64, bool, bool, u64, u64, u64)`
 - `GetPttDiagnosticsVerbose() -> string` (JSON)
@@ -128,25 +130,26 @@ Important behavior:
 - `CancelRecording` does **not** clear pending commit.
 - `pending_commit` is overwritten on new store.
 - Debug transcription testing drains its own session payload via `TakePendingCommit` after `StopRecordingSession`.
-- PTT waits briefly for pending drain before starting a new session, and auto-clears stale pending payloads after an age threshold.
+- PTT waits briefly for pending drain before starting a new session, then force-clears stuck pending payloads to avoid blocked starts.
 
-## Push-to-Talk Behavior
+## Shortcut Behavior
 
-Handy is push-to-talk only.
+Handy uses a global press-to-toggle dictation shortcut.
 
-Settings keys used for PTT:
-- `push-to-talk-keyval` (GDK keyval stored in GSettings)
-- `push-to-talk-modifiers` (GDK modifier bitmask)
+Settings keys used for the global shortcut:
+- `dictation-shortcut-keyval` (GDK keyval stored in GSettings)
+- `dictation-shortcut-modifiers` (GDK modifier bitmask)
 
 Global PTT uses **evdev** (`src/global_shortcuts.rs`):
 1. Discover keyboard devices in `/dev/input/event*`, open event streams.
 2. Resolve GDK keyval+modifiers to evdev keycodes (`src/key_mapping.rs`).
 3. On press:
    - wait briefly for prior pending commit to drain,
-   - if pending is stale, clear it via `TakePendingCommit` and continue,
+   - if pending remains, clear it via `TakePendingCommit` and continue,
    - switch to Handy engine (verified),
+   - verify focused-context activation via daemon `GetEngineActive`,
    - call `StartRecordingSession`.
-4. On release:
+4. On next press while recording:
    - call `StopRecordingSession` and wait for result,
    - do **not** auto-restore input source in PTT path.
 5. Final text delivery:

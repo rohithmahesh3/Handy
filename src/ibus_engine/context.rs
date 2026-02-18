@@ -16,7 +16,8 @@ const HANDY_BUS_NAME: &str = "com.handy.Transcription";
 const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
 const HANDY_INTERFACE: &str = "com.handy.Transcription";
 const LIVE_PARTIAL_POLL_MS: u64 = 220;
-const PENDING_COMMIT_POLL_MS: u64 = 100;
+const PENDING_COMMIT_POLL_MS: u64 = 60;
+const PENDING_COMMIT_FAILURE_RECONNECT_THRESHOLD: u64 = 5;
 
 pub struct HandyContext {
     connection: Option<Connection>,
@@ -90,6 +91,7 @@ impl HandyContext {
             return;
         }
 
+        self.set_engine_active_state(true);
         self.ensure_pending_commit_listener(engine);
         self.ensure_live_partial_listener(engine);
 
@@ -240,7 +242,7 @@ impl HandyContext {
         }
 
         std::thread::spawn(move || {
-            let conn = match Connection::session() {
+            let mut conn = match Connection::session() {
                 Ok(conn) => conn,
                 Err(e) => {
                     error!("Failed to create pending commit DBus connection: {}", e);
@@ -250,6 +252,7 @@ impl HandyContext {
                     return;
                 }
             };
+            let mut failure_streak: u64 = 0;
 
             while !cancel.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(PENDING_COMMIT_POLL_MS));
@@ -265,10 +268,46 @@ impl HandyContext {
                     &(),
                 );
 
-                let Ok(reply) = reply else {
-                    continue;
+                let reply = match reply {
+                    Ok(reply) => reply,
+                    Err(e) => {
+                        failure_streak = failure_streak.saturating_add(1);
+                        if failure_streak == 1 || failure_streak.is_multiple_of(10) {
+                            warn!(
+                                "TakePendingCommit call failed (streak={}): {}",
+                                failure_streak, e
+                            );
+                        }
+                        if failure_streak >= PENDING_COMMIT_FAILURE_RECONNECT_THRESHOLD {
+                            match Connection::session() {
+                                Ok(new_conn) => {
+                                    warn!(
+                                        "Reconnected pending commit listener DBus session after {} failures",
+                                        failure_streak
+                                    );
+                                    conn = new_conn;
+                                    failure_streak = 0;
+                                }
+                                Err(reconnect_err) => {
+                                    warn!(
+                                        "Pending commit listener reconnect failed after {} errors: {}",
+                                        failure_streak, reconnect_err
+                                    );
+                                }
+                            }
+                        }
+                        continue;
+                    }
                 };
+                if failure_streak > 0 {
+                    info!(
+                        "Pending commit listener recovered after {} consecutive errors",
+                        failure_streak
+                    );
+                    failure_streak = 0;
+                }
                 let Ok((session_id, text)) = reply.body().deserialize::<(u64, String)>() else {
+                    warn!("TakePendingCommit returned an invalid payload");
                     continue;
                 };
 
@@ -276,13 +315,14 @@ impl HandyContext {
                 if session_id == 0 || final_text.is_empty() {
                     continue;
                 }
+                let commit_success_ms = now_millis();
 
                 glib::MainContext::default().invoke(move || {
                     let engine_ptr = engine_addr as *mut IBusEngine;
                     clear_preedit_text(engine_ptr);
                     info!(
-                        "Committed pending transcription from session {} while engine stayed active",
-                        session_id
+                        "Committed pending transcription from session {} while engine stayed active (last_success_ms={})",
+                        session_id, commit_success_ms
                     );
                     commit_text_to_engine(engine_ptr, &final_text);
                 });
@@ -299,6 +339,25 @@ impl HandyContext {
             cancel.store(true, Ordering::SeqCst);
         }
         self.pending_commit_engine_addr = None;
+    }
+
+    fn set_engine_active_state(&mut self, active: bool) {
+        if self.connection.is_none() && !self.try_connect() {
+            return;
+        }
+        let Some(conn) = self.connection.clone() else {
+            return;
+        };
+        if let Err(e) = conn.call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "SetEngineActive",
+            &(active,),
+        ) {
+            warn!("SetEngineActive({}) failed: {}", active, e);
+            self.connection = None;
+        }
     }
 
     fn show_model_notification(&self) {
@@ -361,6 +420,7 @@ impl HandyContext {
 
     pub fn disable(&mut self, engine: *mut IBusEngine) {
         debug!("Engine disabled");
+        self.set_engine_active_state(false);
         self.stop_pending_commit_listener();
         self.stop_live_partial_listener();
         self.commit_pending_transcription(engine);
@@ -423,6 +483,13 @@ impl HandyContext {
         );
         commit_text_to_engine(engine, trimmed);
     }
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn update_preedit_text_to_engine(engine: *mut IBusEngine, text: &str) {

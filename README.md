@@ -9,7 +9,7 @@ This is a fork of [Handy](https://github.com/cjpais/Handy) specifically optimize
 ## Features
 
 - **Native IBus Integration** - IBus engine + GNOME input source integration
-- **Global Push-to-Talk** - Uses XDG Desktop Portal global shortcuts
+- **Global Dictation Shortcut** - Uses system keyboard events for hands-free dictation
 - **Local Processing** - Uses Whisper/Parakeet for offline speech recognition
 - **Multi-language Support** - Supports 50+ languages
 - **Native GTK4/Libadwaita UI** - GNOME-native preferences window
@@ -32,9 +32,9 @@ After installation, Handy automatically registers with IBus.
 
 ## Usage
 
-1. Configure your push-to-talk shortcut in Handy preferences.
-2. Press and hold the shortcut to start recording.
-3. Release the shortcut to stop recording and commit text.
+1. Configure your dictation shortcut in Handy preferences.
+2. Press the shortcut once to start recording.
+3. Press the shortcut again to stop recording and commit text.
 
 ### Preferences
 
@@ -70,8 +70,8 @@ cargo build --release
 ## How It Works
 
 1. **Daemon**: `handy --daemon` exports `com.handy.Transcription` on session D-Bus.
-2. **Global shortcut listener**: daemon registers push-to-talk via `org.freedesktop.portal.GlobalShortcuts`.
-3. **IBus bridge**: release restores previous input source; IBus engine stop/commit path commits transcribed text to focused app.
+2. **Global shortcut listener**: daemon listens to evdev keyboard events for the configured shortcut.
+3. **IBus bridge**: first press starts recording and next press stops; engine-side pending commit path commits text to the focused app.
 4. **Transcription**: audio is transcribed locally; optional post-processing can rewrite final output.
 
 ## Model Support

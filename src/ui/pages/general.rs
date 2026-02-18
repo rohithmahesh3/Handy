@@ -43,16 +43,16 @@ impl GeneralPage {
 
         let recording_group = PreferencesGroup::builder()
             .title("Recording")
-            .description("Push-to-talk records while the configured key is held.")
+            .description("Press shortcut once to start recording, and press it again to stop.")
             .build();
 
         let ptt_row = ActionRow::builder()
-            .title("Push-to-Talk Shortcut")
+            .title("Dictation Shortcut")
             .subtitle("Click the button, then press a shortcut. Press Esc to cancel capture.")
             .build();
         let ptt_button = Button::with_label(&format_shortcut_label(
-            state.settings.push_to_talk_keyval(),
-            state.settings.push_to_talk_modifiers(),
+            state.settings.dictation_shortcut_keyval(),
+            state.settings.dictation_shortcut_modifiers(),
         ));
         ptt_button.add_css_class("flat");
         ptt_button.set_can_focus(true);
@@ -80,8 +80,8 @@ impl GeneralPage {
         recording_group.add(&mute_row);
 
         let live_partial_row = ActionRow::builder()
-            .title("Live Preview While Holding Key")
-            .subtitle("Show partial transcription before release")
+            .title("Live Preview While Recording")
+            .subtitle("Show partial transcription while recording is active")
             .build();
         let live_partial_switch = Switch::builder()
             .active(state.settings.live_partial_enabled())
@@ -101,7 +101,7 @@ impl GeneralPage {
 
         let partial_interval_row = ActionRow::builder()
             .title("Live Preview Speed")
-            .subtitle("How often partial text updates while key is held")
+            .subtitle("How often partial text updates while recording is active")
             .build();
         let partial_interval_combo = ComboBoxText::new();
         let interval_options = [
@@ -155,8 +155,8 @@ impl GeneralPage {
                 if keyval == gdk::Key::Escape {
                     is_capturing.set(false);
                     button.set_label(&format_shortcut_label(
-                        settings.push_to_talk_keyval(),
-                        settings.push_to_talk_modifiers(),
+                        settings.dictation_shortcut_keyval(),
+                        settings.dictation_shortcut_modifiers(),
                     ));
                     return Propagation::Stop;
                 }
@@ -170,8 +170,8 @@ impl GeneralPage {
                 }
 
                 let normalized_key = keyval.to_lower().into_glib();
-                settings.set_push_to_talk_keyval(normalized_key);
-                settings.set_push_to_talk_modifiers(modifiers);
+                settings.set_dictation_shortcut_keyval(normalized_key);
+                settings.set_dictation_shortcut_modifiers(modifiers);
                 button.set_label(&format_shortcut_label(normalized_key, modifiers));
                 is_capturing.set(false);
                 Propagation::Stop

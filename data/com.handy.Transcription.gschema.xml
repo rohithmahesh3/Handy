@@ -71,19 +71,19 @@
       <summary>Mute system audio while recording</summary>
     </key>
 
-    <key name="push-to-talk-keyval" type="u">
+    <key name="dictation-shortcut-keyval" type="u">
       <default>32</default>
-      <summary>Push-to-talk key symbol (IBus/X11 keyval)</summary>
+      <summary>Dictation shortcut key symbol (IBus/X11 keyval)</summary>
     </key>
 
-    <key name="push-to-talk-modifiers" type="u">
+    <key name="dictation-shortcut-modifiers" type="u">
       <default>4</default>
-      <summary>Push-to-talk modifier bitmask (IBus modifiers)</summary>
+      <summary>Dictation shortcut modifier bitmask (IBus modifiers)</summary>
     </key>
 
     <key name="live-partial-enabled" type="b">
       <default>true</default>
-      <summary>Enable live partial transcription while push-to-talk is active</summary>
+      <summary>Enable live partial transcription while recording is active</summary>
     </key>
 
     <key name="live-partial-interval-ms" type="u">

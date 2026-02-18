@@ -95,6 +95,8 @@ pub struct HandyState {
     /// Push-to-talk commit handoff now uses `pending_commit`.
     last_transcription_cache: Mutex<Option<String>>,
     pending_commit: PendingCommitStore,
+    engine_active: AtomicBool,
+    engine_last_change_ms: AtomicU64,
     log_buffer: Arc<Mutex<VecDeque<String>>>,
 }
 
@@ -117,6 +119,8 @@ impl HandyState {
             session_counter: AtomicU64::new(1),
             last_transcription_cache: Mutex::new(None),
             pending_commit: PendingCommitStore::default(),
+            engine_active: AtomicBool::new(false),
+            engine_last_change_ms: AtomicU64::new(now_millis()),
             log_buffer,
         }
     }
@@ -162,6 +166,19 @@ impl HandyState {
 
     fn pending_commit_age_ms(&self) -> u64 {
         self.pending_commit.age_ms()
+    }
+
+    fn set_engine_active(&self, active: bool) {
+        self.engine_active.store(active, Ordering::SeqCst);
+        self.engine_last_change_ms
+            .store(now_millis(), Ordering::SeqCst);
+    }
+
+    fn engine_active_status(&self) -> (bool, u64) {
+        (
+            self.engine_active.load(Ordering::SeqCst),
+            self.engine_last_change_ms.load(Ordering::SeqCst),
+        )
     }
 
     fn stop_partial_worker(&self) {
@@ -286,19 +303,19 @@ impl HandyTranscription {
         Ok(self.state.latest_partial())
     }
 
-    /// Get global push-to-talk diagnostics tuple
+    /// Get global shortcut diagnostics tuple
     async fn get_ptt_diagnostics(
         &self,
     ) -> fdo::Result<(bool, String, String, String, u64, bool, bool, u64, u64, u64)> {
         Ok(ptt_diagnostics_tuple())
     }
 
-    /// Get global push-to-talk diagnostics with verbose runtime fields.
+    /// Get global shortcut diagnostics with verbose runtime fields.
     async fn get_ptt_diagnostics_verbose(&self) -> fdo::Result<String> {
         Ok(ptt_diagnostics_verbose_json())
     }
 
-    /// Get recent push-to-talk event lines.
+    /// Get recent global shortcut event lines.
     async fn get_ptt_recent_events(&self) -> fdo::Result<Vec<String>> {
         Ok(ptt_recent_events())
     }
@@ -316,6 +333,17 @@ impl HandyTranscription {
     /// Age of pending commit text in ms. Returns 0 if no pending payload exists.
     async fn get_pending_commit_age_ms(&self) -> fdo::Result<u64> {
         Ok(self.state.pending_commit_age_ms())
+    }
+
+    /// Update whether the Handy IBus engine is currently active in focused context.
+    async fn set_engine_active(&self, active: bool) -> fdo::Result<()> {
+        self.state.set_engine_active(active);
+        Ok(())
+    }
+
+    /// Read current engine active status and last change timestamp.
+    async fn get_engine_active(&self) -> fdo::Result<(bool, u64)> {
+        Ok(self.state.engine_active_status())
     }
 
     /// Get recent daemon log lines

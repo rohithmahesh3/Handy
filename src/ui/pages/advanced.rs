@@ -127,7 +127,7 @@ impl AdvancedPage {
         main_box.append(&debug_group);
 
         let diagnostics_group = PreferencesGroup::builder()
-            .title("Push-to-Talk Diagnostics")
+            .title("Shortcut Diagnostics")
             .build();
 
         let status_row = ActionRow::builder()
@@ -151,7 +151,7 @@ impl AdvancedPage {
 
         let authorize_row = ActionRow::builder()
             .title("Check Input Access")
-            .subtitle("Verify that keyboard devices are accessible for push-to-talk")
+            .subtitle("Verify that keyboard devices are accessible for the dictation shortcut")
             .build();
         let authorize_button = gtk4::Button::with_label("Check Now");
         authorize_button.add_css_class("flat");
@@ -280,8 +280,8 @@ fn load_ptt_diagnostics_subtitle() -> String {
             .get("press_while_handy_count")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        let release_timeout_fallback_count = diagnostics
-            .get("release_timeout_fallback_count")
+        let stop_timeout_fallback_count = diagnostics
+            .get("stop_timeout_fallback_count")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
         let current_state = diagnostics
@@ -438,7 +438,7 @@ fn load_ptt_diagnostics_subtitle() -> String {
         }
 
         return format!(
-            "Unhealthy ({}) | {} | state={} | start_fail={} | stop_fail={} | switch={} | pending_commit={} | dbus={} | bind_failures={} press_while_handy={} watchdog_fallbacks={}",
+            "Unhealthy ({}) | {} | state={} | start_fail={} | stop_fail={} | switch={} | pending_commit={} | dbus={} | bind_failures={} press_while_handy={} stop_timeouts={}",
             code,
             message,
             current_state,
@@ -449,7 +449,7 @@ fn load_ptt_diagnostics_subtitle() -> String {
             dbus_suffix,
             bind_fail_count,
             press_while_handy_count,
-            release_timeout_fallback_count
+            stop_timeout_fallback_count
         );
     }
 
@@ -480,7 +480,7 @@ fn load_ptt_diagnostics_subtitle() -> String {
         shortcut_bound,
         portal_bind_fail_count,
         press_while_handy_count,
-        release_timeout_fallback_count,
+        stop_timeout_fallback_count,
     ) = diagnostics;
 
     let now_ms = SystemTime::now()
@@ -506,12 +506,12 @@ fn load_ptt_diagnostics_subtitle() -> String {
         }
     } else {
         format!(
-            "Unhealthy ({}) | {} | bind_failures={} press_while_handy={} watchdog_fallbacks={}",
+            "Unhealthy ({}) | {} | bind_failures={} press_while_handy={} stop_timeouts={}",
             code,
             message,
             portal_bind_fail_count,
             press_while_handy_count,
-            release_timeout_fallback_count
+            stop_timeout_fallback_count
         )
     }
 }
