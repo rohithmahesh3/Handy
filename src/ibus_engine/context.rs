@@ -7,6 +7,7 @@ use log::{debug, error, info, warn};
 use notify_rust::Notification;
 use zbus::blocking::Connection;
 
+use crate::settings::Settings;
 use crate::utils::launch::open_handy_ui;
 use ibus_sys::{g_object_unref, gboolean, gpointer, guint, IBusEngine};
 
@@ -15,6 +16,8 @@ const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
 const HANDY_INTERFACE: &str = "com.handy.Transcription";
 const PENDING_COMMIT_POLL_MS: u64 = 60;
 const PENDING_COMMIT_FAILURE_RECONNECT_THRESHOLD: u64 = 5;
+const LIVE_PREEDIT_POLL_TICKS: u64 = 4;
+const LIVE_PREEDIT_REFRESH_TICKS: u64 = 5;
 
 pub struct HandyContext {
     connection: Option<Connection>,
@@ -23,6 +26,7 @@ pub struct HandyContext {
     notification_shown: bool,
     pending_commit_cancel: Option<Arc<AtomicBool>>,
     pending_commit_engine_addr: Option<usize>,
+    pending_commit_live_preedit_enabled: bool,
 }
 
 impl HandyContext {
@@ -34,6 +38,7 @@ impl HandyContext {
             notification_shown: false,
             pending_commit_cancel: None,
             pending_commit_engine_addr: None,
+            pending_commit_live_preedit_enabled: false,
         }
     }
 
@@ -68,6 +73,7 @@ impl HandyContext {
     pub fn focus_out(&mut self, engine: *mut IBusEngine) {
         debug!("Focus out");
         self.is_focused = false;
+        hide_preedit_text(engine);
         self.set_focused_engine_state(engine, false);
     }
 
@@ -84,7 +90,7 @@ impl HandyContext {
         }
 
         self.set_focused_engine_state(engine, self.is_focused);
-        self.ensure_pending_commit_listener(engine);
+        self.ensure_pending_commit_listener(engine, Settings::new().experimental_enabled());
 
         if !self.notification_shown {
             if let Some(conn) = &self.connection {
@@ -113,10 +119,16 @@ impl HandyContext {
         }
     }
 
-    fn ensure_pending_commit_listener(&mut self, engine: *mut IBusEngine) {
+    fn ensure_pending_commit_listener(
+        &mut self,
+        engine: *mut IBusEngine,
+        live_preedit_enabled: bool,
+    ) {
         let engine_addr = engine as usize;
         if self.pending_commit_cancel.is_some() {
-            if self.pending_commit_engine_addr == Some(engine_addr) {
+            if self.pending_commit_engine_addr == Some(engine_addr)
+                && self.pending_commit_live_preedit_enabled == live_preedit_enabled
+            {
                 return;
             }
             self.stop_pending_commit_listener();
@@ -125,6 +137,7 @@ impl HandyContext {
         let cancel = Arc::new(AtomicBool::new(false));
         self.pending_commit_cancel = Some(cancel.clone());
         self.pending_commit_engine_addr = Some(engine_addr);
+        self.pending_commit_live_preedit_enabled = live_preedit_enabled;
 
         unsafe {
             ibus_sys::g_object_ref(engine as gpointer);
@@ -142,6 +155,12 @@ impl HandyContext {
                 }
             };
             let mut failure_streak: u64 = 0;
+            let mut poll_tick: u64 = 0;
+            let mut live_preedit_supported = live_preedit_enabled;
+            let mut last_live_revision: u64 = 0;
+            let mut last_live_visible = false;
+            let mut last_live_text = String::new();
+            let mut live_refresh_tick: u64 = 0;
 
             while !cancel.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(PENDING_COMMIT_POLL_MS));
@@ -150,6 +169,76 @@ impl HandyContext {
                 }
 
                 let engine_id = engine_addr as u64;
+
+                poll_tick = poll_tick.wrapping_add(1);
+
+                if live_preedit_supported && poll_tick.is_multiple_of(LIVE_PREEDIT_POLL_TICKS) {
+                    match conn.call_method(
+                        Some(HANDY_BUS_NAME),
+                        HANDY_OBJECT_PATH,
+                        Some(HANDY_INTERFACE),
+                        "GetLivePreeditForEngine",
+                        &(engine_id,),
+                    ) {
+                        Ok(live_reply) => {
+                            match live_reply.body().deserialize::<(u64, u64, bool, String)>() {
+                                Ok((_, revision, visible, text)) => {
+                                    let preedit_text = text.trim().to_string();
+                                    let should_show = visible && !preedit_text.is_empty();
+                                    let should_apply = should_show
+                                        && (revision > last_live_revision
+                                            || !last_live_visible
+                                            || preedit_text != last_live_text
+                                            || live_refresh_tick >= LIVE_PREEDIT_REFRESH_TICKS);
+                                    let should_hide = !should_show
+                                        && (last_live_visible || revision > last_live_revision);
+
+                                    if should_apply || should_hide {
+                                        let preedit_text_for_ui = preedit_text.clone();
+                                        glib::MainContext::default().invoke(move || {
+                                            let engine_ptr = engine_addr as *mut IBusEngine;
+                                            if should_show {
+                                                update_preedit_text(
+                                                    engine_ptr,
+                                                    &preedit_text_for_ui,
+                                                );
+                                            } else {
+                                                hide_preedit_text(engine_ptr);
+                                            }
+                                        });
+
+                                        live_refresh_tick = 0;
+                                    } else {
+                                        live_refresh_tick = live_refresh_tick.saturating_add(1);
+                                    }
+
+                                    last_live_revision = last_live_revision.max(revision);
+                                    last_live_visible = should_show;
+                                    if should_show {
+                                        last_live_text = preedit_text;
+                                    } else {
+                                        last_live_text.clear();
+                                    }
+                                }
+                                Err(_) => {
+                                    warn!("GetLivePreeditForEngine returned an invalid payload");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let detail = e.to_string();
+                            if detail.contains("UnknownMethod") {
+                                warn!(
+                                    "GetLivePreeditForEngine unavailable; disabling live preedit polling"
+                                );
+                                live_preedit_supported = false;
+                            } else if poll_tick == 1 || poll_tick.is_multiple_of(50) {
+                                warn!("GetLivePreeditForEngine call failed: {}", detail);
+                            }
+                        }
+                    }
+                }
+
                 let reply = conn.call_method(
                     Some(HANDY_BUS_NAME),
                     HANDY_OBJECT_PATH,
@@ -213,6 +302,7 @@ impl HandyContext {
                         "Committed pending transcription from session {} while engine stayed active (last_success_ms={})",
                         session_id, commit_success_ms
                     );
+                    hide_preedit_text(engine_ptr);
                     commit_text_to_engine(engine_ptr, &final_text);
                 });
             }
@@ -228,6 +318,7 @@ impl HandyContext {
             cancel.store(true, Ordering::SeqCst);
         }
         self.pending_commit_engine_addr = None;
+        self.pending_commit_live_preedit_enabled = false;
     }
 
     fn set_focused_engine_state(&mut self, engine: *mut IBusEngine, focused: bool) {
@@ -318,6 +409,7 @@ impl HandyContext {
         debug!("Engine disabled");
         self.set_focused_engine_state(engine, false);
         self.stop_pending_commit_listener();
+        hide_preedit_text(engine);
         self.commit_pending_transcription(engine);
         self.is_enabled = false;
         self.is_focused = false;
@@ -373,6 +465,7 @@ impl HandyContext {
             session_id,
             trimmed.chars().count()
         );
+        hide_preedit_text(engine);
         commit_text_to_engine(engine, trimmed);
     }
 }
@@ -382,6 +475,43 @@ fn now_millis() -> u64 {
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn update_preedit_text(engine: *mut IBusEngine, text: &str) {
+    if engine.is_null() {
+        return;
+    }
+
+    let c_text = match CString::new(text) {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to create preedit CString: {}", e);
+            return;
+        }
+    };
+
+    unsafe {
+        let ibus_text = ibus_sys::ibus_text_new_from_string(c_text.as_ptr());
+        if !ibus_text.is_null() {
+            ibus_sys::ibus_engine_update_preedit_text(
+                engine,
+                ibus_text,
+                text.chars().count() as guint,
+                1 as gboolean,
+            );
+            ibus_sys::ibus_engine_show_preedit_text(engine);
+            g_object_unref(ibus_text as gpointer);
+        }
+    }
+}
+
+fn hide_preedit_text(engine: *mut IBusEngine) {
+    if engine.is_null() {
+        return;
+    }
+    unsafe {
+        ibus_sys::ibus_engine_hide_preedit_text(engine);
+    }
 }
 
 fn commit_text_to_engine(engine: *mut IBusEngine, text: &str) {
