@@ -50,12 +50,6 @@ impl PendingCommitStore {
         }
     }
 
-    fn clear(&self) {
-        if let Ok(mut pending) = self.inner.lock() {
-            *pending = None;
-        }
-    }
-
     fn take(&self) -> (u64, String) {
         self.inner
             .lock()
@@ -156,10 +150,6 @@ impl HandyState {
 
     fn store_pending_commit(&self, session_id: u64, text: String) {
         self.pending_commit.store(session_id, text);
-    }
-
-    fn clear_pending_commit(&self) {
-        self.pending_commit.clear();
     }
 
     fn take_pending_commit(&self) -> (u64, String) {
@@ -274,7 +264,6 @@ impl HandyTranscription {
 
         self.state.stop_partial_worker();
         self.state.clear_partial_state();
-        self.state.clear_pending_commit();
         self.state.recording_manager.cancel_recording();
 
         self.state.is_recording.store(false, Ordering::SeqCst);
@@ -464,7 +453,6 @@ impl HandyTranscription {
             binding_id, session_id
         );
         let start_time = Instant::now();
-        self.state.clear_pending_commit();
 
         if !self.state.transcription_manager.has_model_selected() {
             self.emit_error(
@@ -834,5 +822,16 @@ mod tests {
         std::thread::sleep(Duration::from_millis(2));
         assert_eq!(store.peek_session(), 99);
         assert!(store.age_ms() > 0);
+    }
+
+    #[test]
+    fn pending_commit_store_store_overwrites_previous() {
+        let store = PendingCommitStore::default();
+        store.store(10, "first".to_string());
+        store.store(11, "second".to_string());
+
+        let (sid, text) = store.take();
+        assert_eq!((sid, text), (11, "second".to_string()));
+        assert_eq!(store.peek_session(), 0);
     }
 }

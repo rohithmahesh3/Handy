@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use evdev::{Device, EventType, InputEventKind};
@@ -12,9 +12,7 @@ use notify_rust::Notification;
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use crate::ibus_control::{
-    get_current_engine, is_handy_engine, set_global_engine, switch_to_handy_engine,
-};
+use crate::ibus_control::{get_current_engine, is_handy_engine, switch_to_handy_engine_verified};
 use crate::key_mapping::{
     gdk_keyval_to_evdev, is_modifier_key, modifier_flag_for_key, modifiers_from_held_keys,
     EvdevKeybinding, MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER,
@@ -28,13 +26,15 @@ const HANDY_INTERFACE: &str = "com.handy.Transcription";
 
 const START_RECORDING_ARM_DELAY_MS: u64 = 120;
 const STOP_RECORDING_TIMEOUT_MS: u64 = 20_000;
+const ENGINE_SWITCH_VERIFY_TIMEOUT_MS: u64 = 350;
+const PENDING_COMMIT_DRAIN_TIMEOUT_MS: u64 = 320;
+const PENDING_COMMIT_DRAIN_POLL_MS: u64 = 20;
 const SETTINGS_POLL_INTERVAL_MS: u64 = 350;
 const FAILURE_NOTIFICATION_COOLDOWN_MS: u64 = 8_000;
 const PTT_EVENT_HISTORY_LIMIT: usize = 60;
 
 static PTT_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 static HEALTH_STATE: OnceLock<Mutex<PttRuntimeHealth>> = OnceLock::new();
-static LAST_NON_HANDY_ENGINE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static PTT_RECENT_EVENTS: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
 static FORCE_REBIND_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -45,27 +45,24 @@ enum PttState {
     Idle,
     Pending {
         ptt_session_id: u64,
-        restore_engine: Option<String>,
         released_early: bool,
     },
     Recording {
         ptt_session_id: u64,
         daemon_session_id: u64,
-        restore_engine: Option<String>,
     },
     Stopping {
         ptt_session_id: u64,
         daemon_session_id: u64,
-        restore_engine: Option<String>,
     },
 }
 
 enum InternalEvent {
-    StartRecordingResult {
+    StartRecording {
         ptt_session_id: u64,
         result: std::result::Result<u64, String>,
     },
-    StopRecordingResult {
+    StopRecording {
         ptt_session_id: u64,
         result: std::result::Result<String, String>,
     },
@@ -95,6 +92,9 @@ struct PttRuntimeHealth {
     last_stop_failure_ms: u64,
     pending_commit_session_id: u64,
     pending_commit_mark_ms: u64,
+    last_switch_attempt_ms: u64,
+    last_switch_confirm_latency_ms: u64,
+    last_switch_failure_message: String,
     last_dbus_error: String,
     last_dbus_error_ms: u64,
 }
@@ -122,6 +122,9 @@ impl Default for PttRuntimeHealth {
             last_stop_failure_ms: 0,
             pending_commit_session_id: 0,
             pending_commit_mark_ms: 0,
+            last_switch_attempt_ms: 0,
+            last_switch_confirm_latency_ms: 0,
+            last_switch_failure_message: String::new(),
             last_dbus_error: String::new(),
             last_dbus_error_ms: 0,
         }
@@ -130,10 +133,6 @@ impl Default for PttRuntimeHealth {
 
 fn health_state() -> &'static Mutex<PttRuntimeHealth> {
     HEALTH_STATE.get_or_init(|| Mutex::new(PttRuntimeHealth::default()))
-}
-
-fn last_non_handy_engine_state() -> &'static Mutex<Option<String>> {
-    LAST_NON_HANDY_ENGINE.get_or_init(|| Mutex::new(None))
 }
 
 fn ptt_recent_events_state() -> &'static Mutex<VecDeque<String>> {
@@ -248,6 +247,25 @@ fn clear_pending_commit() {
     }
 }
 
+fn mark_switch_attempt() {
+    if let Ok(mut health) = health_state().lock() {
+        health.last_switch_attempt_ms = now_millis();
+    }
+}
+
+fn mark_switch_confirm(latency_ms: u64) {
+    if let Ok(mut health) = health_state().lock() {
+        health.last_switch_confirm_latency_ms = latency_ms;
+        health.last_switch_failure_message.clear();
+    }
+}
+
+fn mark_switch_failure(message: &str) {
+    if let Ok(mut health) = health_state().lock() {
+        health.last_switch_failure_message = message.to_string();
+    }
+}
+
 fn mark_dbus_error(method: &str, message: &str) {
     if let Ok(mut health) = health_state().lock() {
         health.last_dbus_error = format!("{}: {}", method, message);
@@ -325,6 +343,9 @@ pub fn ptt_diagnostics_verbose_json() -> String {
             "last_stop_failure_ms": health.last_stop_failure_ms,
             "pending_commit_session_id": health.pending_commit_session_id,
             "pending_commit_age_ms": pending_commit_age_ms,
+            "last_switch_attempt_ms": health.last_switch_attempt_ms,
+            "last_switch_confirm_latency_ms": health.last_switch_confirm_latency_ms,
+            "last_switch_failure_message": health.last_switch_failure_message,
             "last_dbus_error": health.last_dbus_error,
             "last_dbus_error_ms": health.last_dbus_error_ms,
             "recent_event_count": ptt_recent_events().len(),
@@ -351,6 +372,9 @@ pub fn ptt_diagnostics_verbose_json() -> String {
             "last_stop_failure_ms": 0,
             "pending_commit_session_id": 0,
             "pending_commit_age_ms": 0,
+            "last_switch_attempt_ms": 0,
+            "last_switch_confirm_latency_ms": 0,
+            "last_switch_failure_message": "",
             "last_dbus_error": "health_state lock poisoned",
             "last_dbus_error_ms": 0,
             "recent_event_count": 0,
@@ -708,44 +732,53 @@ fn on_global_pressed(ptt_state: &mut PttState, internal_tx: &mpsc::UnboundedSend
 
     let ptt_session_id = next_ptt_session_id();
     push_ptt_event(format!("ptt:{} pressed", ptt_session_id));
-    let restore_engine = if is_handy_engine(&current_engine) {
+    if let Err(e) = wait_for_pending_commit_drain(
+        Duration::from_millis(PENDING_COMMIT_DRAIN_TIMEOUT_MS),
+        Duration::from_millis(PENDING_COMMIT_DRAIN_POLL_MS),
+    ) {
+        warn!(
+            "[ptt:{}] Previous pending transcription not yet consumed: {}",
+            ptt_session_id, e
+        );
+        mark_health_error("pending_commit_not_drained", &e);
+        notify_ptt_failure(
+            "Cannot start push-to-talk",
+            "Previous transcription is still being committed. Try again in a moment.",
+        );
+        push_ptt_event(format!(
+            "ptt:{} blocked start because pending commit is not drained: {}",
+            ptt_session_id, e
+        ));
+        return;
+    }
+    if is_handy_engine(&current_engine) {
+        mark_switch_confirm(0);
+        push_ptt_event(format!("ptt:{} already on handy source", ptt_session_id));
         bump_press_while_handy();
-        let restore_engine = last_non_handy_engine_state()
-            .lock()
-            .ok()
-            .and_then(|engine| engine.clone());
-        if let Some(restore_engine) = restore_engine {
-            info!(
-                "[ptt:{}] Pressed while Handy source already active; will restore source '{}'",
-                ptt_session_id, restore_engine
-            );
-            Some(restore_engine)
-        } else {
-            warn!(
-                "[ptt:{}] Pressed while Handy source is active and no restore source is known; continuing without restore target",
-                ptt_session_id
-            );
-            push_ptt_event(format!(
-                "ptt:{} pressed while handy active without restore target",
-                ptt_session_id
-            ));
-            None
-        }
+        push_ptt_event(format!(
+            "ptt:{} pressed while handy already active",
+            ptt_session_id
+        ));
     } else {
-        if let Ok(mut state) = last_non_handy_engine_state().lock() {
-            *state = Some(current_engine.clone());
-        }
-        let switched_engine = match switch_to_handy_engine() {
+        mark_switch_attempt();
+        push_ptt_event(format!(
+            "ptt:{} switch requested from {}",
+            ptt_session_id, current_engine
+        ));
+        let switch_started = Instant::now();
+        let switched_engine = match switch_to_handy_engine_verified(ENGINE_SWITCH_VERIFY_TIMEOUT_MS)
+        {
             Ok(engine) => engine,
             Err(e) => {
                 warn!(
                     "[ptt:{}] Failed to switch input source to Handy on press: {}",
                     ptt_session_id, e
                 );
+                mark_switch_failure(&e.to_string());
                 mark_health_error("ibus_switch_to_handy_failed", &e.to_string());
                 notify_ptt_failure(
                     "Cannot start push-to-talk",
-                    "Failed to switch input source to Handy.",
+                    "Failed to switch input source to Handy (not confirmed active).",
                 );
                 push_ptt_event(format!(
                     "ptt:{} failed to switch to handy engine: {}",
@@ -754,17 +787,22 @@ fn on_global_pressed(ptt_state: &mut PttState, internal_tx: &mpsc::UnboundedSend
                 return;
             }
         };
+        mark_switch_confirm(switch_started.elapsed().as_millis() as u64);
+        push_ptt_event(format!(
+            "ptt:{} switch confirmed to {} ({} ms)",
+            ptt_session_id,
+            switched_engine,
+            switch_started.elapsed().as_millis()
+        ));
         info!(
             "[ptt:{}] Pressed; switched to Handy source '{}' from '{}'",
             ptt_session_id, switched_engine, current_engine
         );
-        Some(current_engine)
-    };
+    }
 
     spawn_start_recording(ptt_session_id, internal_tx.clone());
     *ptt_state = PttState::Pending {
         ptt_session_id,
-        restore_engine,
         released_early: false,
     };
     mark_ptt_state("pending");
@@ -779,7 +817,6 @@ fn on_global_released(
         PttState::Idle => {}
         PttState::Pending {
             ptt_session_id,
-            restore_engine: _,
             released_early,
         } => {
             let current_session = *ptt_session_id;
@@ -791,31 +828,27 @@ fn on_global_released(
                 "ptt:{} released before start confirmed",
                 current_session
             ));
-            // Don't restore engine yet — mark early release, handled in on_start_recording_result
+            // Mark early release; on_start_recording_result will cancel the stale session.
             *released_early = true;
         }
         PttState::Recording {
             ptt_session_id,
             daemon_session_id,
-            restore_engine,
         } => {
             let current_session = *ptt_session_id;
             let daemon_session = *daemon_session_id;
             info!(
-                "[ptt:{}] Released; waiting for StopRecordingSession({}) before restoring input source",
-                current_session
-                ,daemon_session
+                "[ptt:{}] Released; waiting for StopRecordingSession({})",
+                current_session, daemon_session
             );
             push_ptt_event(format!(
                 "ptt:{} released; stopping daemon session {}",
                 current_session, daemon_session
             ));
             spawn_stop_recording(current_session, daemon_session, internal_tx.clone());
-            let restore_engine = restore_engine.clone();
             *ptt_state = PttState::Stopping {
                 ptt_session_id: current_session,
                 daemon_session_id: daemon_session,
-                restore_engine,
             };
             mark_ptt_state("stopping");
         }
@@ -825,42 +858,15 @@ fn on_global_released(
     }
 }
 
-fn restore_engine_for_session(session_id: u64, restore_engine: &Option<String>) {
-    if let Some(engine_name) = restore_engine {
-        if let Err(e) = set_global_engine(engine_name) {
-            warn!(
-                "[ptt:{}] Failed to restore engine '{}': {}",
-                session_id, engine_name, e
-            );
-            mark_health_error("ibus_restore_engine_failed", &e.to_string());
-            push_ptt_event(format!(
-                "ptt:{} restore engine failed for {}: {}",
-                session_id, engine_name, e
-            ));
-        } else {
-            info!("[ptt:{}] Restored engine '{}'", session_id, engine_name);
-            push_ptt_event(format!(
-                "ptt:{} restored engine {}",
-                session_id, engine_name
-            ));
-        }
-    } else {
-        push_ptt_event(format!(
-            "ptt:{} no restore engine configured after stop",
-            session_id
-        ));
-    }
-}
-
 fn handle_internal_event(ptt_state: &mut PttState, internal: InternalEvent) {
     match internal {
-        InternalEvent::StartRecordingResult {
+        InternalEvent::StartRecording {
             ptt_session_id,
             result,
         } => {
             on_start_recording_result(ptt_state, ptt_session_id, result);
         }
-        InternalEvent::StopRecordingResult {
+        InternalEvent::StopRecording {
             ptt_session_id,
             result,
         } => {
@@ -877,7 +883,6 @@ fn on_start_recording_result(
     match ptt_state {
         PttState::Pending {
             ptt_session_id: active_session,
-            restore_engine,
             released_early,
         } if *active_session == ptt_session_id => match result {
             Ok(daemon_session_id) => {
@@ -888,16 +893,8 @@ fn on_start_recording_result(
                         "[ptt:{}] Start completed after key release; cancelling stale recording",
                         ptt_session_id
                     );
-                    // Cancel the recording we just started and restore the engine
+                    // Cancel the recording that started after key release.
                     spawn_cancel_recording(ptt_session_id, "released early");
-                    if let Some(ref engine_name) = restore_engine {
-                        if let Err(e) = set_global_engine(engine_name) {
-                            warn!(
-                                "[ptt:{}] Failed to restore engine after early release: {}",
-                                ptt_session_id, e
-                            );
-                        }
-                    }
                     *ptt_state = PttState::Idle;
                     mark_ptt_state("idle");
                     push_ptt_event(format!(
@@ -909,11 +906,9 @@ fn on_start_recording_result(
                         "[ptt:{}] Recording started with daemon session {}",
                         ptt_session_id, daemon_session_id
                     );
-                    let restore_engine = restore_engine.clone();
                     *ptt_state = PttState::Recording {
                         ptt_session_id,
                         daemon_session_id,
-                        restore_engine,
                     };
                     mark_ptt_state("recording");
                     push_ptt_event(format!(
@@ -939,14 +934,6 @@ fn on_start_recording_result(
                 );
                 push_ptt_event(format!("ptt:{} start failed: {}", ptt_session_id, err));
                 spawn_cancel_recording(ptt_session_id, "start failed");
-                if let Some(ref engine_name) = restore_engine {
-                    if let Err(e) = set_global_engine(engine_name) {
-                        warn!(
-                            "[ptt:{}] Failed to restore engine after start failure: {}",
-                            ptt_session_id, e
-                        );
-                    }
-                }
                 *ptt_state = PttState::Idle;
                 mark_ptt_state("idle");
                 clear_pending_commit();
@@ -986,7 +973,6 @@ fn on_stop_recording_result(
         PttState::Stopping {
             ptt_session_id: active_session,
             daemon_session_id,
-            restore_engine,
         } if *active_session == ptt_session_id => {
             match result {
                 Ok(text) => {
@@ -1002,6 +988,13 @@ fn on_stop_recording_result(
                         daemon_session_id,
                         text.chars().count()
                     ));
+                    push_ptt_event(format!(
+                        "ptt:{} stop-complete for session {}; commit is delivered by engine-side pending commit listener",
+                        ptt_session_id, daemon_session_id
+                    ));
+                    *ptt_state = PttState::Idle;
+                    mark_ptt_state("idle");
+                    return;
                 }
                 Err(err) => {
                     warn!(
@@ -1020,9 +1013,13 @@ fn on_stop_recording_result(
                 }
             }
 
-            restore_engine_for_session(ptt_session_id, restore_engine);
+            clear_pending_commit();
             *ptt_state = PttState::Idle;
             mark_ptt_state("idle");
+            push_ptt_event(format!(
+                "ptt:{} stop result handled (failure path)",
+                ptt_session_id
+            ));
         }
         _ => {
             debug!(
@@ -1037,39 +1034,23 @@ fn on_stop_recording_result(
 fn cleanup_state(ptt_state: &mut PttState) {
     match ptt_state {
         PttState::Idle => {}
-        PttState::Pending {
-            ptt_session_id,
-            restore_engine,
-            ..
-        } => {
+        PttState::Pending { ptt_session_id, .. } => {
             let sid = *ptt_session_id;
             spawn_cancel_recording(sid, "cleanup");
-            if let Some(ref engine_name) = restore_engine {
-                if let Err(e) = set_global_engine(engine_name) {
-                    warn!(
-                        "[ptt:{}] Failed to restore engine during cleanup: {}",
-                        sid, e
-                    );
-                }
-            }
         }
         PttState::Recording {
             ptt_session_id,
             daemon_session_id: _,
-            restore_engine,
         } => {
             let sid = *ptt_session_id;
             spawn_cancel_recording(sid, "cleanup");
-            restore_engine_for_session(sid, restore_engine);
         }
         PttState::Stopping {
             ptt_session_id,
             daemon_session_id: _,
-            restore_engine,
         } => {
             let sid = *ptt_session_id;
             spawn_cancel_recording(sid, "cleanup after stop pending");
-            restore_engine_for_session(sid, restore_engine);
         }
     }
 
@@ -1083,7 +1064,7 @@ fn spawn_start_recording(ptt_session_id: u64, tx: mpsc::UnboundedSender<Internal
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(START_RECORDING_ARM_DELAY_MS));
         let result = call_handy_start_recording_session();
-        let _ = tx.send(InternalEvent::StartRecordingResult {
+        let _ = tx.send(InternalEvent::StartRecording {
             ptt_session_id,
             result,
         });
@@ -1114,7 +1095,7 @@ fn spawn_stop_recording(
                 })
             }
         };
-        let _ = tx.send(InternalEvent::StopRecordingResult {
+        let _ = tx.send(InternalEvent::StopRecording {
             ptt_session_id,
             result,
         });
@@ -1180,6 +1161,67 @@ fn call_handy_start_recording_session() -> std::result::Result<u64, String> {
         mark_dbus_error("StartRecordingSession", &msg);
         msg
     })
+}
+
+fn call_handy_peek_pending_commit_session() -> std::result::Result<u64, String> {
+    let conn = zbus::blocking::Connection::session().map_err(|e| {
+        let msg = format!("Failed to open session bus: {}", e);
+        mark_dbus_error("PeekPendingCommitSession", &msg);
+        msg
+    })?;
+    let reply = conn
+        .call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "PeekPendingCommitSession",
+            &(),
+        )
+        .map_err(|e| {
+            let msg = format!("PeekPendingCommitSession call failed: {}", e);
+            mark_dbus_error("PeekPendingCommitSession", &msg);
+            msg
+        })?;
+    reply.body().deserialize::<u64>().map_err(|e| {
+        let msg = format!("PeekPendingCommitSession decode failed: {}", e);
+        mark_dbus_error("PeekPendingCommitSession", &msg);
+        msg
+    })
+}
+
+fn wait_for_pending_commit_drain(
+    timeout: Duration,
+    poll_interval: Duration,
+) -> std::result::Result<(), String> {
+    let start = Instant::now();
+    let mut last_pending_session = 0_u64;
+    let mut last_error = String::new();
+
+    loop {
+        match call_handy_peek_pending_commit_session() {
+            Ok(pending_session) => {
+                last_pending_session = pending_session;
+                if pending_session == 0 {
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                last_error = e;
+            }
+        }
+
+        if start.elapsed() >= timeout {
+            break;
+        }
+        std::thread::sleep(poll_interval);
+    }
+
+    Err(format!(
+        "Pending commit did not drain within {} ms (last_pending_session={} last_error='{}')",
+        timeout.as_millis(),
+        last_pending_session,
+        last_error
+    ))
 }
 
 fn call_handy_stop_recording_session(session_id: u64) -> std::result::Result<String, String> {

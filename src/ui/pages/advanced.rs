@@ -320,6 +320,14 @@ fn load_ptt_diagnostics_subtitle() -> String {
             .get("pending_commit_age_ms")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
+        let last_switch_confirm_latency_ms = diagnostics
+            .get("last_switch_confirm_latency_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let last_switch_failure_message = diagnostics
+            .get("last_switch_failure_message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if let Ok(reply) = conn.call_method(
             Some(HANDY_BUS_NAME),
             HANDY_OBJECT_PATH,
@@ -408,29 +416,35 @@ fn load_ptt_diagnostics_subtitle() -> String {
                 pending_commit_age_ms / 1000
             )
         };
-
+        let switch_suffix = if last_switch_failure_message.is_empty() {
+            format!("ok ({} ms)", last_switch_confirm_latency_ms)
+        } else {
+            format!("failed ({})", last_switch_failure_message)
+        };
         if healthy {
             let age_text = age_seconds
                 .map(|s| format!("{}s ago", s))
                 .unwrap_or_else(|| "unknown".to_string());
             return format!(
-                "Healthy | state={} shortcut='{}' | listener={} bound={} | pending_commit={} | last ok {}",
+                "Healthy | state={} shortcut='{}' | listener={} bound={} | switch={} | pending_commit={} | last ok {}",
                 current_state,
                 shortcut_description,
                 listener_session_ok,
                 shortcut_bound,
+                switch_suffix,
                 pending_commit_suffix,
                 age_text
             );
         }
 
         return format!(
-            "Unhealthy ({}) | {} | state={} | start_fail={} | stop_fail={} | pending_commit={} | dbus={} | bind_failures={} press_while_handy={} watchdog_fallbacks={}",
+            "Unhealthy ({}) | {} | state={} | start_fail={} | stop_fail={} | switch={} | pending_commit={} | dbus={} | bind_failures={} press_while_handy={} watchdog_fallbacks={}",
             code,
             message,
             current_state,
             start_failure_suffix,
             stop_failure_suffix,
+            switch_suffix,
             pending_commit_suffix,
             dbus_suffix,
             bind_fail_count,

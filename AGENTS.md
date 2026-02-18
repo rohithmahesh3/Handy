@@ -102,6 +102,12 @@ Methods:
 - `GetState() -> (bool is_recording, bool has_model_selected)`
 - `GetLatestPartial() -> (u64 session_id, u64 sequence_id, string text)`
 - `GetPttDiagnostics() -> (bool, string, string, string, u64, bool, bool, u64, u64, u64)`
+- `GetPttDiagnosticsVerbose() -> string` (JSON)
+- `GetPttRecentEvents() -> array<string>`
+- `TakePendingCommit() -> (u64, string)`
+- `PeekPendingCommitSession() -> u64`
+- `GetPendingCommitAgeMs() -> u64`
+- `GetRecentLogs() -> array<string>`
 - `GetLanguage() -> string`
 - `SetLanguage(string)`
 
@@ -111,12 +117,16 @@ Signals:
 - `PartialTranscriptionReady(u64 session_id, u64 sequence_id, string text)`
 - `Error(string)`
 
-### Transcription cache
+### Pending commit handoff
 
-`HandyState` keeps a `last_transcription_cache`. When `StopRecording` produces text,
-the result is cached. If a second `StopRecording` arrives and recording has already
-stopped (e.g. from the engine process's `disable()` → `stop_and_commit()` path), the
-cached text is returned and cleared. This enables the deferred stop-and-restore PTT flow.
+`HandyState` stores final transcripts in:
+- `last_transcription_cache` (compatibility fallback)
+- `pending_commit` (single-slot handoff consumed by engine via `TakePendingCommit`)
+
+Important behavior:
+- Start recording does **not** clear pending commit.
+- `CancelRecording` does **not** clear pending commit.
+- `pending_commit` is overwritten on new store; PTT now waits briefly for pending drain before starting a new session.
 
 ## Push-to-Talk Behavior
 
@@ -126,22 +136,22 @@ Settings keys used for PTT:
 - `push-to-talk-keyval` (GDK keyval stored in GSettings)
 - `push-to-talk-modifiers` (GDK modifier bitmask)
 
-Global PTT uses **evdev** for keyboard monitoring (`src/global_shortcuts.rs`):
-1. On startup: discover keyboard devices in `/dev/input/event*`, open event streams.
-2. GDK keyvals from settings are mapped to evdev keycodes via `src/key_mapping.rs`.
-3. On press: store current engine, switch to Handy engine, call `StartRecording`.
-4. On release (**deferred stop-and-restore**):
-   a. `StopRecording` is called via D-Bus first — blocks until transcription completes.
-   b. Only after `StopRecording` returns does the daemon restore the previous engine.
-   c. Restoring the engine triggers `context.rs:disable()` in the engine process.
-   d. `disable()` calls `stop_and_commit()` which retrieves the cached transcription
-      and commits it via `ibus_engine_commit_text` while the engine pointer is still valid.
-   e. After commit, `switch_engine_async` restores the previous input source.
-5. Release watchdog checks for stuck recording and calls `CancelRecording` as fallback.
+Global PTT uses **evdev** (`src/global_shortcuts.rs`):
+1. Discover keyboard devices in `/dev/input/event*`, open event streams.
+2. Resolve GDK keyval+modifiers to evdev keycodes (`src/key_mapping.rs`).
+3. On press:
+   - wait briefly for prior pending commit to drain,
+   - switch to Handy engine (verified),
+   - call `StartRecordingSession`.
+4. On release:
+   - call `StopRecordingSession` and wait for result,
+   - do **not** auto-restore input source in PTT path.
+5. Final text delivery:
+   - engine-side pending commit listener (`src/ibus_engine/context.rs`) polls `TakePendingCommit`,
+   - commits via `ibus_engine_commit_text` on GTK main context while engine is active.
+6. `disable()` still performs a final `TakePendingCommit` consume as fallback.
 
-This ordering is critical: `ibus_engine_commit_text` does not reliably deliver text
-after the engine has been disabled. The Handy engine must remain active during the
-full transcription + commit cycle.
+This architecture intentionally avoids autoswitch restore races.
 
 This approach requires read access to `/dev/input/event*` devices. A udev rule
 (`packaging/fedora/90-handy-input.rules`) ensures `uaccess` for the active desktop user.
@@ -149,10 +159,10 @@ This approach requires read access to `/dev/input/event*` devices. A udev rule
 ## Critical Constraints
 
 1. Do not reintroduce shell-based input-source switching.
-   Use FFI-backed helpers (`src/ibus_control.rs`, `src/ibus_engine/ibus_api.rs`).
+   Use FFI-backed helpers (`src/ibus_control.rs`, `ibus-sys/wrapper.c`).
 
 2. Do not block IBus callback threads with long operations.
-   Stop/transcribe work must remain off callback thread.
+   Stop/transcribe work stays in daemon; engine commit listener runs in worker thread and invokes GTK main context for UI/IBus operations.
 
 3. Preserve GObject lifetime safety in async commit paths.
    Keep ref/unref pattern intact in `src/ibus_engine/context.rs`.
@@ -163,9 +173,8 @@ This approach requires read access to `/dev/input/event*` devices. A udev rule
 5. Keep daemon state transitions consistent.
    `RecordingStateChanged(false)` should happen immediately when stop starts, not after long transcription.
 
-6. Never restore the IBus engine before `StopRecording` completes.
-   The deferred stop-and-restore pattern in `global_shortcuts.rs` prevents commit-after-disable.
-   `context.rs:disable()` must pass `last_non_handy_engine` to `stop_and_commit()`.
+6. Keep commit delivery single-path in PTT flow.
+   Do not reintroduce direct restore/commit in `global_shortcuts.rs`.
 
 ## Settings and Feature Notes
 
@@ -193,7 +202,6 @@ IBus and PTT:
 - `src/key_mapping.rs`
 - `src/ibus_engine/context.rs`
 - `src/ibus_control.rs`
-- `src/ibus_engine/ibus_api.rs`
 - `src/bin/ibus-handy-engine.rs`
 - `ibus-sys/wrapper.c`
 - `ibus-sys/wrapper.h`
@@ -210,6 +218,7 @@ UI:
 - `src/ui/pages/general.rs`
 - `src/ui/pages/models.rs`
 - `src/ui/pages/advanced.rs`
+- `src/ui/pages/debug.rs`
 
 Packaging:
 - `build-rpm.sh`

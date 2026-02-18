@@ -492,6 +492,14 @@ fn fetch_ptt_diagnostics_summary() -> Result<String, String> {
         .get("pending_commit_age_ms")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
+    let last_switch_confirm_latency_ms = diagnostics
+        .get("last_switch_confirm_latency_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let last_switch_failure_message = diagnostics
+        .get("last_switch_failure_message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     if let Ok(reply) = conn.call_method(
         Some(HANDY_BUS_NAME),
         HANDY_OBJECT_PATH,
@@ -516,7 +524,7 @@ fn fetch_ptt_diagnostics_summary() -> Result<String, String> {
     }
 
     Ok(format!(
-        "healthy={} code={} message={} state={} shortcut='{}' listener_ok={} shortcut_bound={} bind_failures={} press_while_handy={} stop_fallbacks={} start_failure_code={} start_failure_message={} stop_failure_message={} pending_commit_session={} pending_commit_age_ms={} last_dbus_error={}",
+        "healthy={} code={} message={} state={} shortcut='{}' listener_ok={} shortcut_bound={} bind_failures={} press_while_handy={} stop_fallbacks={} start_failure_code={} start_failure_message={} stop_failure_message={} switch_confirm_latency_ms={} switch_failure_message={} pending_commit_session={} pending_commit_age_ms={} last_dbus_error={}",
         healthy,
         code,
         message,
@@ -530,6 +538,8 @@ fn fetch_ptt_diagnostics_summary() -> Result<String, String> {
         last_start_failure_code,
         last_start_failure_message,
         last_stop_failure_message,
+        last_switch_confirm_latency_ms,
+        last_switch_failure_message,
         pending_commit_session_id,
         pending_commit_age_ms,
         last_dbus_error

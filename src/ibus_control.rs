@@ -1,4 +1,6 @@
 use std::ffi::{CStr, CString};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use ibus_sys::{
@@ -7,6 +9,15 @@ use ibus_sys::{
 
 pub const HANDY_ENGINE_NAME: &str = "handy";
 const HANDY_ENGINE_FALLBACK_NAME: &str = "other:handy";
+const ENGINE_SWITCH_POLL_MS: u64 = 20;
+
+fn engine_matches_target(current: &str, target: &str) -> bool {
+    if is_handy_engine(target) {
+        is_handy_engine(current)
+    } else {
+        current == target
+    }
+}
 
 pub fn get_current_engine() -> Result<String> {
     let engine_ptr = unsafe { ibus_handy_daemon_get_global_engine_name() };
@@ -53,7 +64,7 @@ pub fn is_handy_engine(engine_name: &str) -> bool {
     engine_name == HANDY_ENGINE_NAME || engine_name.ends_with(":handy")
 }
 
-pub fn switch_to_handy_engine() -> Result<String> {
+pub fn switch_to_handy_engine_verified(timeout_ms: u64) -> Result<String> {
     if let Ok(engine) = get_current_engine() {
         if is_handy_engine(&engine) {
             return Ok(engine);
@@ -61,15 +72,81 @@ pub fn switch_to_handy_engine() -> Result<String> {
     }
 
     let mut attempts = Vec::new();
+
     for candidate in [HANDY_ENGINE_NAME, HANDY_ENGINE_FALLBACK_NAME] {
-        match set_global_engine(candidate) {
-            Ok(()) => return Ok(candidate.to_string()),
+        match switch_engine_verified(candidate, timeout_ms) {
+            Ok(engine) => return Ok(engine),
             Err(e) => attempts.push(format!("{} ({})", candidate, e)),
         }
     }
 
     Err(anyhow!(
-        "Failed to switch to Handy input source. Tried: {}",
+        "Failed to switch to Handy input source with confirmation. Tried: {}",
         attempts.join(", ")
+    ))
+}
+
+pub fn switch_engine_verified(target_engine: &str, timeout_ms: u64) -> Result<String> {
+    if target_engine.trim().is_empty() {
+        return Err(anyhow!("Target engine name is empty"));
+    }
+
+    if let Ok(engine) = get_current_engine() {
+        if engine_matches_target(&engine, target_engine) {
+            return Ok(engine);
+        }
+    }
+
+    let timeout = Duration::from_millis(timeout_ms.max(1));
+    let set_retry_interval = Duration::from_millis(120);
+    let start = Instant::now();
+    let mut last_set_attempt = Instant::now()
+        .checked_sub(set_retry_interval)
+        .unwrap_or_else(Instant::now);
+    let mut set_attempts = 0_u32;
+    let mut last_set_error = String::new();
+    let mut last_engine = String::new();
+    let mut last_error = String::new();
+
+    loop {
+        if last_set_attempt.elapsed() >= set_retry_interval {
+            match set_global_engine(target_engine) {
+                Ok(()) => {
+                    set_attempts = set_attempts.saturating_add(1);
+                    last_set_error.clear();
+                }
+                Err(e) => {
+                    last_set_error = e.to_string();
+                }
+            }
+            last_set_attempt = Instant::now();
+        }
+
+        match get_current_engine() {
+            Ok(engine) => {
+                if engine_matches_target(&engine, target_engine) {
+                    return Ok(engine);
+                }
+                last_engine = engine;
+            }
+            Err(e) => {
+                last_error = e.to_string();
+            }
+        }
+
+        if start.elapsed() >= timeout {
+            break;
+        }
+        thread::sleep(Duration::from_millis(ENGINE_SWITCH_POLL_MS));
+    }
+
+    Err(anyhow!(
+        "Switch to '{}' not confirmed within {} ms (set_attempts={} last_set_error='{}' last_engine='{}' last_error='{}')",
+        target_engine,
+        timeout_ms,
+        set_attempts,
+        last_set_error,
+        last_engine,
+        last_error
     ))
 }
