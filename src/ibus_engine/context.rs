@@ -20,6 +20,7 @@ const HANDY_BUS_NAME: &str = "com.handy.Transcription";
 const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
 const HANDY_INTERFACE: &str = "com.handy.Transcription";
 const LIVE_PARTIAL_POLL_MS: u64 = 220;
+const PENDING_COMMIT_POLL_MS: u64 = 100;
 const STOP_RECORDING_TIMEOUT_MS: u64 = 20_000;
 
 pub struct HandyContext {
@@ -32,6 +33,7 @@ pub struct HandyContext {
     last_non_handy_engine: Option<String>,
     active_session_id: Option<u64>,
     live_partial_cancel: Option<Arc<AtomicBool>>,
+    pending_commit_cancel: Option<Arc<AtomicBool>>,
 }
 
 impl HandyContext {
@@ -46,6 +48,7 @@ impl HandyContext {
             last_non_handy_engine: None,
             active_session_id: None,
             live_partial_cancel: None,
+            pending_commit_cancel: None,
         };
         context.refresh_last_non_handy_engine();
         context
@@ -99,6 +102,7 @@ impl HandyContext {
             return;
         }
 
+        self.ensure_pending_commit_listener(engine);
         self.ensure_live_partial_listener(engine);
 
         if !self.notification_shown {
@@ -230,6 +234,80 @@ impl HandyContext {
         }
     }
 
+    fn ensure_pending_commit_listener(&mut self, engine: *mut IBusEngine) {
+        if self.pending_commit_cancel.is_some() {
+            return;
+        }
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.pending_commit_cancel = Some(cancel.clone());
+
+        unsafe {
+            ibus_sys::g_object_ref(engine as gpointer);
+        }
+
+        let engine_addr = engine as usize;
+        std::thread::spawn(move || {
+            let conn = match Connection::session() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    error!("Failed to create pending commit DBus connection: {}", e);
+                    glib::MainContext::default().invoke(move || unsafe {
+                        g_object_unref(engine_addr as gpointer);
+                    });
+                    return;
+                }
+            };
+
+            while !cancel.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(PENDING_COMMIT_POLL_MS));
+                if cancel.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                let reply = conn.call_method(
+                    Some(HANDY_BUS_NAME),
+                    HANDY_OBJECT_PATH,
+                    Some(HANDY_INTERFACE),
+                    "TakePendingCommit",
+                    &(),
+                );
+
+                let Ok(reply) = reply else {
+                    continue;
+                };
+                let Ok((session_id, text)) = reply.body().deserialize::<(u64, String)>() else {
+                    continue;
+                };
+
+                let final_text = text.trim().to_string();
+                if session_id == 0 || final_text.is_empty() {
+                    continue;
+                }
+
+                glib::MainContext::default().invoke(move || {
+                    let engine_ptr = engine_addr as *mut IBusEngine;
+                    clear_preedit_text(engine_ptr);
+                    info!(
+                        "Committed pending transcription from session {} while engine stayed active",
+                        session_id
+                    );
+                    commit_text_to_engine(engine_ptr, &final_text);
+                });
+            }
+
+            glib::MainContext::default().invoke(move || unsafe {
+                g_object_unref(engine_addr as gpointer);
+            });
+        });
+    }
+
+    fn stop_pending_commit_listener(&mut self) {
+        if let Some(cancel) = self.pending_commit_cancel.take() {
+            cancel.store(true, Ordering::SeqCst);
+        }
+    }
+
     fn show_model_notification(&self) {
         debug!("Showing model notification");
 
@@ -290,8 +368,9 @@ impl HandyContext {
 
     pub fn disable(&mut self, engine: *mut IBusEngine) {
         debug!("Engine disabled");
+        self.stop_pending_commit_listener();
         self.stop_live_partial_listener();
-        self.stop_and_commit(engine, None, true);
+        self.commit_pending_transcription(engine);
         self.is_enabled = false;
         self.is_focused = false;
         self.active_session_id = None;
@@ -381,6 +460,51 @@ impl HandyContext {
                 }
             });
         });
+    }
+
+    fn commit_pending_transcription(&mut self, engine: *mut IBusEngine) {
+        if self.connection.is_none() && !self.try_connect() {
+            clear_preedit_text(engine);
+            return;
+        }
+
+        let Some(conn) = self.connection.as_ref() else {
+            clear_preedit_text(engine);
+            return;
+        };
+
+        let reply = conn.call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "TakePendingCommit",
+            &(),
+        );
+
+        let (session_id, text) = match reply {
+            Ok(reply) => reply
+                .body()
+                .deserialize::<(u64, String)>()
+                .unwrap_or((0, String::new())),
+            Err(e) => {
+                debug!("TakePendingCommit unavailable on disable: {}", e);
+                (0, String::new())
+            }
+        };
+
+        clear_preedit_text(engine);
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            debug!("No pending commit payload found on engine disable");
+            return;
+        }
+
+        info!(
+            "Committing pending transcription from session {} ({} chars)",
+            session_id,
+            trimmed.chars().count()
+        );
+        commit_text_to_engine(engine, trimmed);
     }
 
     fn cancel_recording(&mut self) {

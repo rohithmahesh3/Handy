@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
@@ -30,10 +30,12 @@ const START_RECORDING_ARM_DELAY_MS: u64 = 120;
 const STOP_RECORDING_TIMEOUT_MS: u64 = 20_000;
 const SETTINGS_POLL_INTERVAL_MS: u64 = 350;
 const FAILURE_NOTIFICATION_COOLDOWN_MS: u64 = 8_000;
+const PTT_EVENT_HISTORY_LIMIT: usize = 60;
 
 static PTT_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 static HEALTH_STATE: OnceLock<Mutex<PttRuntimeHealth>> = OnceLock::new();
 static LAST_NON_HANDY_ENGINE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static PTT_RECENT_EVENTS: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
 static FORCE_REBIND_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 // ── PTT state machine ──────────────────────────────────────────────────
@@ -65,7 +67,7 @@ enum InternalEvent {
     },
     StopRecordingResult {
         ptt_session_id: u64,
-        result: std::result::Result<(), String>,
+        result: std::result::Result<String, String>,
     },
 }
 
@@ -89,6 +91,10 @@ struct PttRuntimeHealth {
     last_start_failure_code: String,
     last_start_failure_message: String,
     last_start_failure_ms: u64,
+    last_stop_failure_message: String,
+    last_stop_failure_ms: u64,
+    pending_commit_session_id: u64,
+    pending_commit_mark_ms: u64,
     last_dbus_error: String,
     last_dbus_error_ms: u64,
 }
@@ -112,6 +118,10 @@ impl Default for PttRuntimeHealth {
             last_start_failure_code: String::new(),
             last_start_failure_message: String::new(),
             last_start_failure_ms: 0,
+            last_stop_failure_message: String::new(),
+            last_stop_failure_ms: 0,
+            pending_commit_session_id: 0,
+            pending_commit_mark_ms: 0,
             last_dbus_error: String::new(),
             last_dbus_error_ms: 0,
         }
@@ -126,11 +136,32 @@ fn last_non_handy_engine_state() -> &'static Mutex<Option<String>> {
     LAST_NON_HANDY_ENGINE.get_or_init(|| Mutex::new(None))
 }
 
+fn ptt_recent_events_state() -> &'static Mutex<VecDeque<String>> {
+    PTT_RECENT_EVENTS.get_or_init(|| Mutex::new(VecDeque::with_capacity(PTT_EVENT_HISTORY_LIMIT)))
+}
+
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn push_ptt_event(event: impl Into<String>) {
+    let line = format!("{} {}", now_millis(), event.into());
+    if let Ok(mut events) = ptt_recent_events_state().lock() {
+        events.push_back(line);
+        while events.len() > PTT_EVENT_HISTORY_LIMIT {
+            let _ = events.pop_front();
+        }
+    }
+}
+
+pub fn ptt_recent_events() -> Vec<String> {
+    ptt_recent_events_state()
+        .lock()
+        .map(|events| events.iter().cloned().collect())
+        .unwrap_or_default()
 }
 
 fn mark_health_success(message: &str) {
@@ -189,6 +220,34 @@ fn clear_start_failure() {
     }
 }
 
+fn mark_stop_failure(message: &str) {
+    if let Ok(mut health) = health_state().lock() {
+        health.last_stop_failure_message = message.to_string();
+        health.last_stop_failure_ms = now_millis();
+    }
+}
+
+fn clear_stop_failure() {
+    if let Ok(mut health) = health_state().lock() {
+        health.last_stop_failure_message.clear();
+        health.last_stop_failure_ms = 0;
+    }
+}
+
+fn mark_pending_commit(session_id: u64) {
+    if let Ok(mut health) = health_state().lock() {
+        health.pending_commit_session_id = session_id;
+        health.pending_commit_mark_ms = now_millis();
+    }
+}
+
+fn clear_pending_commit() {
+    if let Ok(mut health) = health_state().lock() {
+        health.pending_commit_session_id = 0;
+        health.pending_commit_mark_ms = 0;
+    }
+}
+
 fn mark_dbus_error(method: &str, message: &str) {
     if let Ok(mut health) = health_state().lock() {
         health.last_dbus_error = format!("{}: {}", method, message);
@@ -241,6 +300,11 @@ pub fn ptt_diagnostics_tuple() -> (bool, String, String, String, u64, bool, bool
 
 pub fn ptt_diagnostics_verbose_json() -> String {
     if let Ok(health) = health_state().lock() {
+        let pending_commit_age_ms = if health.pending_commit_session_id == 0 {
+            0
+        } else {
+            now_millis().saturating_sub(health.pending_commit_mark_ms)
+        };
         json!({
             "healthy": health.healthy,
             "component": health.component,
@@ -257,8 +321,13 @@ pub fn ptt_diagnostics_verbose_json() -> String {
             "last_start_failure_code": health.last_start_failure_code,
             "last_start_failure_message": health.last_start_failure_message,
             "last_start_failure_ms": health.last_start_failure_ms,
+            "last_stop_failure_message": health.last_stop_failure_message,
+            "last_stop_failure_ms": health.last_stop_failure_ms,
+            "pending_commit_session_id": health.pending_commit_session_id,
+            "pending_commit_age_ms": pending_commit_age_ms,
             "last_dbus_error": health.last_dbus_error,
             "last_dbus_error_ms": health.last_dbus_error_ms,
+            "recent_event_count": ptt_recent_events().len(),
         })
         .to_string()
     } else {
@@ -278,8 +347,13 @@ pub fn ptt_diagnostics_verbose_json() -> String {
             "last_start_failure_code": "",
             "last_start_failure_message": "Failed to read PTT diagnostics",
             "last_start_failure_ms": 0,
+            "last_stop_failure_message": "",
+            "last_stop_failure_ms": 0,
+            "pending_commit_session_id": 0,
+            "pending_commit_age_ms": 0,
             "last_dbus_error": "health_state lock poisoned",
             "last_dbus_error_ms": 0,
+            "recent_event_count": 0,
         })
         .to_string()
     }
@@ -291,6 +365,7 @@ pub fn start_global_shortcuts_listener() {
     let initial_config = ShortcutConfig::from_settings(&Settings::new());
     mark_health_error("initializing", "Starting global push-to-talk listener");
     mark_ptt_state("initializing");
+    push_ptt_event("listener: initializing");
 
     std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -304,6 +379,7 @@ pub fn start_global_shortcuts_listener() {
                     "runtime_init_failed",
                     &format!("Failed to create runtime for global shortcuts: {}", e),
                 );
+                push_ptt_event(format!("listener: runtime init failed: {}", e));
                 return;
             }
         };
@@ -631,6 +707,7 @@ fn on_global_pressed(ptt_state: &mut PttState, internal_tx: &mpsc::UnboundedSend
     };
 
     let ptt_session_id = next_ptt_session_id();
+    push_ptt_event(format!("ptt:{} pressed", ptt_session_id));
     let restore_engine = if is_handy_engine(&current_engine) {
         bump_press_while_handy();
         let restore_engine = last_non_handy_engine_state()
@@ -648,6 +725,10 @@ fn on_global_pressed(ptt_state: &mut PttState, internal_tx: &mpsc::UnboundedSend
                 "[ptt:{}] Pressed while Handy source is active and no restore source is known; continuing without restore target",
                 ptt_session_id
             );
+            push_ptt_event(format!(
+                "ptt:{} pressed while handy active without restore target",
+                ptt_session_id
+            ));
             None
         }
     } else {
@@ -666,6 +747,10 @@ fn on_global_pressed(ptt_state: &mut PttState, internal_tx: &mpsc::UnboundedSend
                     "Cannot start push-to-talk",
                     "Failed to switch input source to Handy.",
                 );
+                push_ptt_event(format!(
+                    "ptt:{} failed to switch to handy engine: {}",
+                    ptt_session_id, e
+                ));
                 return;
             }
         };
@@ -683,6 +768,7 @@ fn on_global_pressed(ptt_state: &mut PttState, internal_tx: &mpsc::UnboundedSend
         released_early: false,
     };
     mark_ptt_state("pending");
+    clear_pending_commit();
 }
 
 fn on_global_released(
@@ -701,6 +787,10 @@ fn on_global_released(
                 "[ptt:{}] Released before recording confirmation",
                 current_session
             );
+            push_ptt_event(format!(
+                "ptt:{} released before start confirmed",
+                current_session
+            ));
             // Don't restore engine yet — mark early release, handled in on_start_recording_result
             *released_early = true;
         }
@@ -716,6 +806,10 @@ fn on_global_released(
                 current_session
                 ,daemon_session
             );
+            push_ptt_event(format!(
+                "ptt:{} released; stopping daemon session {}",
+                current_session, daemon_session
+            ));
             spawn_stop_recording(current_session, daemon_session, internal_tx.clone());
             let restore_engine = restore_engine.clone();
             *ptt_state = PttState::Stopping {
@@ -739,9 +833,22 @@ fn restore_engine_for_session(session_id: u64, restore_engine: &Option<String>) 
                 session_id, engine_name, e
             );
             mark_health_error("ibus_restore_engine_failed", &e.to_string());
+            push_ptt_event(format!(
+                "ptt:{} restore engine failed for {}: {}",
+                session_id, engine_name, e
+            ));
         } else {
             info!("[ptt:{}] Restored engine '{}'", session_id, engine_name);
+            push_ptt_event(format!(
+                "ptt:{} restored engine {}",
+                session_id, engine_name
+            ));
         }
+    } else {
+        push_ptt_event(format!(
+            "ptt:{} no restore engine configured after stop",
+            session_id
+        ));
     }
 }
 
@@ -775,6 +882,7 @@ fn on_start_recording_result(
         } if *active_session == ptt_session_id => match result {
             Ok(daemon_session_id) => {
                 clear_start_failure();
+                clear_stop_failure();
                 if *released_early {
                     info!(
                         "[ptt:{}] Start completed after key release; cancelling stale recording",
@@ -792,6 +900,10 @@ fn on_start_recording_result(
                     }
                     *ptt_state = PttState::Idle;
                     mark_ptt_state("idle");
+                    push_ptt_event(format!(
+                        "ptt:{} start completed after release; cancelled session {}",
+                        ptt_session_id, daemon_session_id
+                    ));
                 } else {
                     info!(
                         "[ptt:{}] Recording started with daemon session {}",
@@ -804,6 +916,10 @@ fn on_start_recording_result(
                         restore_engine,
                     };
                     mark_ptt_state("recording");
+                    push_ptt_event(format!(
+                        "ptt:{} started daemon session {}",
+                        ptt_session_id, daemon_session_id
+                    ));
                 }
             }
             Err(err) => {
@@ -816,8 +932,12 @@ fn on_start_recording_result(
                 mark_health_error("start_recording_failed", &err);
                 notify_ptt_failure(
                     "Cannot start recording",
-                    &format!("Push-to-talk start failed: {}", err),
+                    &format!(
+                        "Push-to-talk start failed ({})",
+                        extract_start_failure_code(&err)
+                    ),
                 );
+                push_ptt_event(format!("ptt:{} start failed: {}", ptt_session_id, err));
                 spawn_cancel_recording(ptt_session_id, "start failed");
                 if let Some(ref engine_name) = restore_engine {
                     if let Err(e) = set_global_engine(engine_name) {
@@ -829,6 +949,7 @@ fn on_start_recording_result(
                 }
                 *ptt_state = PttState::Idle;
                 mark_ptt_state("idle");
+                clear_pending_commit();
             }
         },
         _ => {
@@ -838,11 +959,19 @@ fn on_start_recording_result(
                     ptt_session_id
                 );
                 spawn_cancel_recording(ptt_session_id, "stale start success");
+                push_ptt_event(format!(
+                    "ptt:{} stale start success cancelled",
+                    ptt_session_id
+                ));
             } else {
                 debug!(
                     "[ptt:{}] Ignoring stale start failure for inactive session",
                     ptt_session_id
                 );
+                push_ptt_event(format!(
+                    "ptt:{} stale start failure ignored",
+                    ptt_session_id
+                ));
             }
         }
     }
@@ -851,7 +980,7 @@ fn on_start_recording_result(
 fn on_stop_recording_result(
     ptt_state: &mut PttState,
     ptt_session_id: u64,
-    result: std::result::Result<(), String>,
+    result: std::result::Result<String, String>,
 ) {
     match ptt_state {
         PttState::Stopping {
@@ -860,11 +989,19 @@ fn on_stop_recording_result(
             restore_engine,
         } if *active_session == ptt_session_id => {
             match result {
-                Ok(()) => {
+                Ok(text) => {
                     info!(
                         "[ptt:{}] StopRecordingSession({}) completed",
                         ptt_session_id, daemon_session_id
                     );
+                    clear_stop_failure();
+                    mark_pending_commit(*daemon_session_id);
+                    push_ptt_event(format!(
+                        "ptt:{} stopped daemon session {} (text_len={})",
+                        ptt_session_id,
+                        daemon_session_id,
+                        text.chars().count()
+                    ));
                 }
                 Err(err) => {
                     warn!(
@@ -875,6 +1012,11 @@ fn on_stop_recording_result(
                         bump_release_timeout_fallback();
                     }
                     mark_health_error("stop_recording_failed", &err);
+                    mark_stop_failure(&err);
+                    push_ptt_event(format!(
+                        "ptt:{} stop failed for daemon session {}: {}",
+                        ptt_session_id, daemon_session_id, err
+                    ));
                 }
             }
 
@@ -887,6 +1029,7 @@ fn on_stop_recording_result(
                 "[ptt:{}] Ignoring stale stop result for inactive session",
                 ptt_session_id
             );
+            push_ptt_event(format!("ptt:{} stale stop result ignored", ptt_session_id));
         }
     }
 }
@@ -957,7 +1100,7 @@ fn spawn_stop_recording(
             daemon_session_id,
             Duration::from_millis(STOP_RECORDING_TIMEOUT_MS),
         ) {
-            Ok(()) => Ok(()),
+            Ok(text) => Ok(text),
             Err(stop_err) => {
                 let cancel_result = call_handy_method_no_args("CancelRecording");
                 Err(match cancel_result {
@@ -1039,31 +1182,36 @@ fn call_handy_start_recording_session() -> std::result::Result<u64, String> {
     })
 }
 
-fn call_handy_stop_recording_session(session_id: u64) -> std::result::Result<(), String> {
+fn call_handy_stop_recording_session(session_id: u64) -> std::result::Result<String, String> {
     let conn = zbus::blocking::Connection::session().map_err(|e| {
         let msg = format!("Failed to open session bus: {}", e);
         mark_dbus_error("StopRecordingSession", &msg);
         msg
     })?;
-    conn.call_method(
-        Some(HANDY_BUS_NAME),
-        HANDY_OBJECT_PATH,
-        Some(HANDY_INTERFACE),
-        "StopRecordingSession",
-        &(session_id,),
-    )
-    .map_err(|e| {
-        let msg = format!("StopRecordingSession call failed: {}", e);
+    let reply = conn
+        .call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "StopRecordingSession",
+            &(session_id,),
+        )
+        .map_err(|e| {
+            let msg = format!("StopRecordingSession call failed: {}", e);
+            mark_dbus_error("StopRecordingSession", &msg);
+            msg
+        })?;
+    reply.body().deserialize::<String>().map_err(|e| {
+        let msg = format!("StopRecordingSession decode failed: {}", e);
         mark_dbus_error("StopRecordingSession", &msg);
         msg
-    })?;
-    Ok(())
+    })
 }
 
 fn call_handy_stop_recording_session_with_timeout(
     session_id: u64,
     timeout: Duration,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<String, String> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(call_handy_stop_recording_session(session_id));

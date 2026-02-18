@@ -304,6 +304,44 @@ fn load_ptt_diagnostics_subtitle() -> String {
             .get("last_start_failure_ms")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
+        let last_stop_failure_message = diagnostics
+            .get("last_stop_failure_message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let last_stop_failure_ms = diagnostics
+            .get("last_stop_failure_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let mut pending_commit_session_id = diagnostics
+            .get("pending_commit_session_id")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let mut pending_commit_age_ms = diagnostics
+            .get("pending_commit_age_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        if let Ok(reply) = conn.call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "PeekPendingCommitSession",
+            &(),
+        ) {
+            if let Ok(value) = reply.body().deserialize::<u64>() {
+                pending_commit_session_id = value;
+            }
+        }
+        if let Ok(reply) = conn.call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "GetPendingCommitAgeMs",
+            &(),
+        ) {
+            if let Ok(value) = reply.body().deserialize::<u64>() {
+                pending_commit_age_ms = value;
+            }
+        }
         let last_dbus_error = diagnostics
             .get("last_dbus_error")
             .and_then(|v| v.as_str())
@@ -350,23 +388,50 @@ fn load_ptt_diagnostics_subtitle() -> String {
                 now_ms.saturating_sub(last_dbus_error_ms) / 1000
             )
         };
+        let stop_failure_suffix = if last_stop_failure_message.is_empty() {
+            "none".to_string()
+        } else if last_stop_failure_ms == 0 {
+            last_stop_failure_message.to_string()
+        } else {
+            format!(
+                "{} ({}s ago)",
+                last_stop_failure_message,
+                now_ms.saturating_sub(last_stop_failure_ms) / 1000
+            )
+        };
+        let pending_commit_suffix = if pending_commit_session_id == 0 {
+            "none".to_string()
+        } else {
+            format!(
+                "session {} ({}s old)",
+                pending_commit_session_id,
+                pending_commit_age_ms / 1000
+            )
+        };
 
         if healthy {
             let age_text = age_seconds
                 .map(|s| format!("{}s ago", s))
                 .unwrap_or_else(|| "unknown".to_string());
             return format!(
-                "Healthy | state={} shortcut='{}' | listener={} bound={} | last ok {}",
-                current_state, shortcut_description, listener_session_ok, shortcut_bound, age_text
+                "Healthy | state={} shortcut='{}' | listener={} bound={} | pending_commit={} | last ok {}",
+                current_state,
+                shortcut_description,
+                listener_session_ok,
+                shortcut_bound,
+                pending_commit_suffix,
+                age_text
             );
         }
 
         return format!(
-            "Unhealthy ({}) | {} | state={} | start_fail={} | dbus={} | bind_failures={} press_while_handy={} watchdog_fallbacks={}",
+            "Unhealthy ({}) | {} | state={} | start_fail={} | stop_fail={} | pending_commit={} | dbus={} | bind_failures={} press_while_handy={} watchdog_fallbacks={}",
             code,
             message,
             current_state,
             start_failure_suffix,
+            stop_failure_suffix,
+            pending_commit_suffix,
             dbus_suffix,
             bind_fail_count,
             press_while_handy_count,

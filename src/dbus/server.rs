@@ -3,7 +3,9 @@
 //! This module provides a D-Bus interface that allows the handy-ibus engine
 //! to control Handy's transcription functionality.
 
-use crate::global_shortcuts::{ptt_diagnostics_tuple, ptt_diagnostics_verbose_json};
+use crate::global_shortcuts::{
+    ptt_diagnostics_tuple, ptt_diagnostics_verbose_json, ptt_recent_events,
+};
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::transcription::TranscriptionManager;
 use crate::settings::{PostProcessProvider, Settings};
@@ -25,6 +27,65 @@ const HANDY_INTERFACE: &str = "com.handy.Transcription";
 
 const DEFAULT_BINDING_ID: &str = "ibus";
 
+#[derive(Clone, Debug)]
+struct PendingCommit {
+    session_id: u64,
+    text: String,
+    created_ms: u64,
+}
+
+#[derive(Default)]
+struct PendingCommitStore {
+    inner: Mutex<Option<PendingCommit>>,
+}
+
+impl PendingCommitStore {
+    fn store(&self, session_id: u64, text: String) {
+        if let Ok(mut pending) = self.inner.lock() {
+            *pending = Some(PendingCommit {
+                session_id,
+                text,
+                created_ms: now_millis(),
+            });
+        }
+    }
+
+    fn clear(&self) {
+        if let Ok(mut pending) = self.inner.lock() {
+            *pending = None;
+        }
+    }
+
+    fn take(&self) -> (u64, String) {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.take())
+            .map(|pending| (pending.session_id, pending.text))
+            .unwrap_or_else(|| (0, String::new()))
+    }
+
+    fn peek_session(&self) -> u64 {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|pending| pending.as_ref().map(|p| p.session_id))
+            .unwrap_or(0)
+    }
+
+    fn age_ms(&self) -> u64 {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|pending| {
+                pending
+                    .as_ref()
+                    .map(|p| now_millis().saturating_sub(p.created_ms))
+            })
+            .unwrap_or(0)
+    }
+}
+
 /// Shared state for the D-Bus server and handlers
 pub struct HandyState {
     pub selected_language: Mutex<String>,
@@ -36,11 +97,10 @@ pub struct HandyState {
     partial_session_id: AtomicU64,
     partial_cancel: Mutex<Option<Arc<AtomicBool>>>,
     session_counter: AtomicU64,
-    /// Cached transcription text from the last StopRecording call.
-    /// When the daemon finishes transcription before the engine process calls
-    /// StopRecording (deferred stop-and-restore pattern), the engine process's
-    /// subsequent StopRecording retrieves this cached text for commit.
+    /// Compatibility cache for legacy StopRecording callers.
+    /// Push-to-talk commit handoff now uses `pending_commit`.
     last_transcription_cache: Mutex<Option<String>>,
+    pending_commit: PendingCommitStore,
     log_buffer: Arc<Mutex<VecDeque<String>>>,
 }
 
@@ -62,6 +122,7 @@ impl HandyState {
             partial_cancel: Mutex::new(None),
             session_counter: AtomicU64::new(1),
             last_transcription_cache: Mutex::new(None),
+            pending_commit: PendingCommitStore::default(),
             log_buffer,
         }
     }
@@ -91,6 +152,26 @@ impl HandyState {
 
     fn recent_logs(&self, limit: usize) -> Vec<String> {
         read_recent_logs(&self.log_buffer, limit)
+    }
+
+    fn store_pending_commit(&self, session_id: u64, text: String) {
+        self.pending_commit.store(session_id, text);
+    }
+
+    fn clear_pending_commit(&self) {
+        self.pending_commit.clear();
+    }
+
+    fn take_pending_commit(&self) -> (u64, String) {
+        self.pending_commit.take()
+    }
+
+    fn peek_pending_commit_session(&self) -> u64 {
+        self.pending_commit.peek_session()
+    }
+
+    fn pending_commit_age_ms(&self) -> u64 {
+        self.pending_commit.age_ms()
     }
 
     fn stop_partial_worker(&self) {
@@ -168,7 +249,7 @@ impl HandyTranscription {
 
     /// Stop recording and return transcribed text (compatibility method)
     async fn stop_recording(&self) -> fdo::Result<String> {
-        self.stop_recording_internal(DEFAULT_BINDING_ID).await
+        self.stop_recording_internal(DEFAULT_BINDING_ID, None).await
     }
 
     /// Start a recording session and return session id
@@ -183,7 +264,8 @@ impl HandyTranscription {
     /// Stop a specific recording session and return final text
     async fn stop_recording_session(&self, session_id: u64) -> fdo::Result<String> {
         let binding_id = binding_id_for_session(session_id);
-        self.stop_recording_internal(&binding_id).await
+        self.stop_recording_internal(&binding_id, Some(session_id))
+            .await
     }
 
     /// Cancel current recording without transcription
@@ -192,6 +274,7 @@ impl HandyTranscription {
 
         self.state.stop_partial_worker();
         self.state.clear_partial_state();
+        self.state.clear_pending_commit();
         self.state.recording_manager.cancel_recording();
 
         self.state.is_recording.store(false, Ordering::SeqCst);
@@ -224,6 +307,26 @@ impl HandyTranscription {
     /// Get global push-to-talk diagnostics with verbose runtime fields.
     async fn get_ptt_diagnostics_verbose(&self) -> fdo::Result<String> {
         Ok(ptt_diagnostics_verbose_json())
+    }
+
+    /// Get recent push-to-talk event lines.
+    async fn get_ptt_recent_events(&self) -> fdo::Result<Vec<String>> {
+        Ok(ptt_recent_events())
+    }
+
+    /// Atomically consume pending final text for engine commit.
+    async fn take_pending_commit(&self) -> fdo::Result<(u64, String)> {
+        Ok(self.state.take_pending_commit())
+    }
+
+    /// Read pending commit session id without consuming payload. Returns 0 if empty.
+    async fn peek_pending_commit_session(&self) -> fdo::Result<u64> {
+        Ok(self.state.peek_pending_commit_session())
+    }
+
+    /// Age of pending commit text in ms. Returns 0 if no pending payload exists.
+    async fn get_pending_commit_age_ms(&self) -> fdo::Result<u64> {
+        Ok(self.state.pending_commit_age_ms())
     }
 
     /// Get recent daemon log lines
@@ -361,6 +464,7 @@ impl HandyTranscription {
             binding_id, session_id
         );
         let start_time = Instant::now();
+        self.state.clear_pending_commit();
 
         if !self.state.transcription_manager.has_model_selected() {
             self.emit_error(
@@ -402,7 +506,11 @@ impl HandyTranscription {
         }
     }
 
-    async fn stop_recording_internal(&self, binding_id: &str) -> fdo::Result<String> {
+    async fn stop_recording_internal(
+        &self,
+        binding_id: &str,
+        session_id: Option<u64>,
+    ) -> fdo::Result<String> {
         debug!("D-Bus: StopRecording called for binding '{}'", binding_id);
         let stop_time = Instant::now();
 
@@ -444,6 +552,10 @@ impl HandyTranscription {
                     if let Ok(mut cache) = self.state.last_transcription_cache.lock() {
                         *cache = Some(output_text.clone());
                     }
+                    if let Some(session_id) = session_id {
+                        self.state
+                            .store_pending_commit(session_id, output_text.clone());
+                    }
                     self.emit_transcription_ready(&output_text).await?;
                     Ok(output_text)
                 }
@@ -466,6 +578,9 @@ impl HandyTranscription {
                 .unwrap_or_default();
             if !cached.is_empty() {
                 debug!("D-Bus: Returning cached transcription text");
+                if let Some(session_id) = session_id {
+                    self.state.store_pending_commit(session_id, cached.clone());
+                }
             }
             self.state.clear_partial_state();
             Ok(cached)
@@ -540,6 +655,13 @@ impl HandyTranscription {
 
 fn binding_id_for_session(session_id: u64) -> String {
     format!("session-{}", session_id)
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn should_emit_partial(previous: &str, candidate: &str, min_chars_delta: usize) -> bool {
@@ -684,4 +806,33 @@ pub async fn stop_dbus_server(dbus_state: &HandyDbusState) -> Result<(), String>
 
     info!("D-Bus server stopped");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PendingCommitStore;
+    use std::time::Duration;
+
+    #[test]
+    fn pending_commit_store_take_clears_payload() {
+        let store = PendingCommitStore::default();
+        store.store(42, "hello".to_string());
+
+        let (session_id, text) = store.take();
+        assert_eq!(session_id, 42);
+        assert_eq!(text, "hello");
+        assert_eq!(store.peek_session(), 0);
+    }
+
+    #[test]
+    fn pending_commit_store_peek_and_age() {
+        let store = PendingCommitStore::default();
+        assert_eq!(store.peek_session(), 0);
+        assert_eq!(store.age_ms(), 0);
+
+        store.store(99, "payload".to_string());
+        std::thread::sleep(Duration::from_millis(2));
+        assert_eq!(store.peek_session(), 99);
+        assert!(store.age_ms() > 0);
+    }
 }
