@@ -195,7 +195,7 @@ impl DebugPage {
                 let (tx, rx) = std::sync::mpsc::channel();
                 std::thread::spawn(move || {
                     let result = match session_id {
-                        Some(id) => call_stop_recording(id),
+                        Some(id) => call_stop_recording_and_drain(id),
                         None => Err("No active session id for stop".to_string()),
                     };
                     let _ = tx.send(result);
@@ -217,14 +217,19 @@ impl DebugPage {
                                 *guard = None;
                             }
                             match result {
-                                Ok(text) => {
+                                Ok((text, drain_warning)) => {
                                     let final_text = if text.trim().is_empty() {
                                         "No speech detected.".to_string()
                                     } else {
                                         text
                                     };
                                     output_buffer.set_text(&final_text);
-                                    status_label.set_text("Idle");
+                                    if let Some(warning) = drain_warning {
+                                        status_label
+                                            .set_text(&format!("Idle with warning: {}", warning));
+                                    } else {
+                                        status_label.set_text("Idle");
+                                    }
                                 }
                                 Err(e) => {
                                     status_label.set_text(&format!("Error: {}", e));
@@ -671,6 +676,37 @@ fn call_stop_recording(session_id: u64) -> Result<String, String> {
         .body()
         .deserialize::<String>()
         .map_err(|e| format!("Failed to decode StopRecordingSession response: {}", e))
+}
+
+fn call_take_pending_commit() -> Result<(u64, String), String> {
+    let conn = Connection::session().map_err(|e| format!("Session bus unavailable: {}", e))?;
+    let reply = conn
+        .call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "TakePendingCommit",
+            &(),
+        )
+        .map_err(|e| format!("TakePendingCommit failed: {}", e))?;
+    reply
+        .body()
+        .deserialize::<(u64, String)>()
+        .map_err(|e| format!("Failed to decode TakePendingCommit response: {}", e))
+}
+
+fn call_stop_recording_and_drain(session_id: u64) -> Result<(String, Option<String>), String> {
+    let text = call_stop_recording(session_id)?;
+    let drain_warning = match call_take_pending_commit() {
+        Ok((0, _)) => None,
+        Ok((drained_session_id, _)) if drained_session_id == session_id => None,
+        Ok((drained_session_id, _)) => Some(format!(
+            "Drained pending session {} while expected {}",
+            drained_session_id, session_id
+        )),
+        Err(err) => Some(format!("Failed to drain pending commit: {}", err)),
+    };
+    Ok((text, drain_warning))
 }
 
 fn call_cancel_recording() -> Result<(), String> {

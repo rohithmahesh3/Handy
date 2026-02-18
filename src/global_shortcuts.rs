@@ -29,6 +29,7 @@ const STOP_RECORDING_TIMEOUT_MS: u64 = 20_000;
 const ENGINE_SWITCH_VERIFY_TIMEOUT_MS: u64 = 350;
 const PENDING_COMMIT_DRAIN_TIMEOUT_MS: u64 = 320;
 const PENDING_COMMIT_DRAIN_POLL_MS: u64 = 20;
+const PENDING_COMMIT_STALE_MS: u64 = 2_500;
 const SETTINGS_POLL_INTERVAL_MS: u64 = 350;
 const FAILURE_NOTIFICATION_COOLDOWN_MS: u64 = 8_000;
 const PTT_EVENT_HISTORY_LIMIT: usize = 60;
@@ -92,6 +93,10 @@ struct PttRuntimeHealth {
     last_stop_failure_ms: u64,
     pending_commit_session_id: u64,
     pending_commit_mark_ms: u64,
+    stale_pending_clear_count: u64,
+    last_stale_pending_session_id: u64,
+    last_stale_pending_age_ms: u64,
+    last_stale_pending_clear_ms: u64,
     last_switch_attempt_ms: u64,
     last_switch_confirm_latency_ms: u64,
     last_switch_failure_message: String,
@@ -122,6 +127,10 @@ impl Default for PttRuntimeHealth {
             last_stop_failure_ms: 0,
             pending_commit_session_id: 0,
             pending_commit_mark_ms: 0,
+            stale_pending_clear_count: 0,
+            last_stale_pending_session_id: 0,
+            last_stale_pending_age_ms: 0,
+            last_stale_pending_clear_ms: 0,
             last_switch_attempt_ms: 0,
             last_switch_confirm_latency_ms: 0,
             last_switch_failure_message: String::new(),
@@ -247,6 +256,17 @@ fn clear_pending_commit() {
     }
 }
 
+fn mark_stale_pending_cleared(session_id: u64, age_ms: u64) {
+    if let Ok(mut health) = health_state().lock() {
+        health.stale_pending_clear_count = health.stale_pending_clear_count.saturating_add(1);
+        health.last_stale_pending_session_id = session_id;
+        health.last_stale_pending_age_ms = age_ms;
+        health.last_stale_pending_clear_ms = now_millis();
+        health.pending_commit_session_id = 0;
+        health.pending_commit_mark_ms = 0;
+    }
+}
+
 fn mark_switch_attempt() {
     if let Ok(mut health) = health_state().lock() {
         health.last_switch_attempt_ms = now_millis();
@@ -343,6 +363,10 @@ pub fn ptt_diagnostics_verbose_json() -> String {
             "last_stop_failure_ms": health.last_stop_failure_ms,
             "pending_commit_session_id": health.pending_commit_session_id,
             "pending_commit_age_ms": pending_commit_age_ms,
+            "stale_pending_clear_count": health.stale_pending_clear_count,
+            "last_stale_pending_session_id": health.last_stale_pending_session_id,
+            "last_stale_pending_age_ms": health.last_stale_pending_age_ms,
+            "last_stale_pending_clear_ms": health.last_stale_pending_clear_ms,
             "last_switch_attempt_ms": health.last_switch_attempt_ms,
             "last_switch_confirm_latency_ms": health.last_switch_confirm_latency_ms,
             "last_switch_failure_message": health.last_switch_failure_message,
@@ -372,6 +396,10 @@ pub fn ptt_diagnostics_verbose_json() -> String {
             "last_stop_failure_ms": 0,
             "pending_commit_session_id": 0,
             "pending_commit_age_ms": 0,
+            "stale_pending_clear_count": 0,
+            "last_stale_pending_session_id": 0,
+            "last_stale_pending_age_ms": 0,
+            "last_stale_pending_clear_ms": 0,
             "last_switch_attempt_ms": 0,
             "last_switch_confirm_latency_ms": 0,
             "last_switch_failure_message": "",
@@ -732,24 +760,39 @@ fn on_global_pressed(ptt_state: &mut PttState, internal_tx: &mpsc::UnboundedSend
 
     let ptt_session_id = next_ptt_session_id();
     push_ptt_event(format!("ptt:{} pressed", ptt_session_id));
-    if let Err(e) = wait_for_pending_commit_drain(
+    match wait_for_pending_commit_drain(
         Duration::from_millis(PENDING_COMMIT_DRAIN_TIMEOUT_MS),
         Duration::from_millis(PENDING_COMMIT_DRAIN_POLL_MS),
+        Duration::from_millis(PENDING_COMMIT_STALE_MS),
     ) {
-        warn!(
-            "[ptt:{}] Previous pending transcription not yet consumed: {}",
-            ptt_session_id, e
-        );
-        mark_health_error("pending_commit_not_drained", &e);
-        notify_ptt_failure(
-            "Cannot start push-to-talk",
-            "Previous transcription is still being committed. Try again in a moment.",
-        );
-        push_ptt_event(format!(
-            "ptt:{} blocked start because pending commit is not drained: {}",
-            ptt_session_id, e
-        ));
-        return;
+        Ok(Some((session_id, age_ms))) => {
+            warn!(
+                "[ptt:{}] Cleared stale pending commit session {} (age={} ms) before start",
+                ptt_session_id, session_id, age_ms
+            );
+            mark_stale_pending_cleared(session_id, age_ms);
+            push_ptt_event(format!(
+                "ptt:{} cleared stale pending commit session {} (age={} ms)",
+                ptt_session_id, session_id, age_ms
+            ));
+        }
+        Ok(None) => {}
+        Err(e) => {
+            warn!(
+                "[ptt:{}] Previous pending transcription not yet consumed: {}",
+                ptt_session_id, e
+            );
+            mark_health_error("pending_commit_not_drained", &e);
+            notify_ptt_failure(
+                "Cannot start push-to-talk",
+                "Previous transcription is still being committed. Try again in a moment.",
+            );
+            push_ptt_event(format!(
+                "ptt:{} blocked start because pending commit is not drained: {}",
+                ptt_session_id, e
+            ));
+            return;
+        }
     }
     if is_handy_engine(&current_engine) {
         mark_switch_confirm(0);
@@ -1189,12 +1232,66 @@ fn call_handy_peek_pending_commit_session() -> std::result::Result<u64, String> 
     })
 }
 
+fn call_handy_get_pending_commit_age_ms() -> std::result::Result<u64, String> {
+    let conn = zbus::blocking::Connection::session().map_err(|e| {
+        let msg = format!("Failed to open session bus: {}", e);
+        mark_dbus_error("GetPendingCommitAgeMs", &msg);
+        msg
+    })?;
+    let reply = conn
+        .call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "GetPendingCommitAgeMs",
+            &(),
+        )
+        .map_err(|e| {
+            let msg = format!("GetPendingCommitAgeMs call failed: {}", e);
+            mark_dbus_error("GetPendingCommitAgeMs", &msg);
+            msg
+        })?;
+    reply.body().deserialize::<u64>().map_err(|e| {
+        let msg = format!("GetPendingCommitAgeMs decode failed: {}", e);
+        mark_dbus_error("GetPendingCommitAgeMs", &msg);
+        msg
+    })
+}
+
+fn call_handy_take_pending_commit() -> std::result::Result<(u64, String), String> {
+    let conn = zbus::blocking::Connection::session().map_err(|e| {
+        let msg = format!("Failed to open session bus: {}", e);
+        mark_dbus_error("TakePendingCommit", &msg);
+        msg
+    })?;
+    let reply = conn
+        .call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "TakePendingCommit",
+            &(),
+        )
+        .map_err(|e| {
+            let msg = format!("TakePendingCommit call failed: {}", e);
+            mark_dbus_error("TakePendingCommit", &msg);
+            msg
+        })?;
+    reply.body().deserialize::<(u64, String)>().map_err(|e| {
+        let msg = format!("TakePendingCommit decode failed: {}", e);
+        mark_dbus_error("TakePendingCommit", &msg);
+        msg
+    })
+}
+
 fn wait_for_pending_commit_drain(
     timeout: Duration,
     poll_interval: Duration,
-) -> std::result::Result<(), String> {
+    stale_after: Duration,
+) -> std::result::Result<Option<(u64, u64)>, String> {
     let start = Instant::now();
     let mut last_pending_session = 0_u64;
+    let mut last_pending_age_ms = 0_u64;
     let mut last_error = String::new();
 
     loop {
@@ -1202,7 +1299,29 @@ fn wait_for_pending_commit_drain(
             Ok(pending_session) => {
                 last_pending_session = pending_session;
                 if pending_session == 0 {
-                    return Ok(());
+                    return Ok(None);
+                }
+
+                match call_handy_get_pending_commit_age_ms() {
+                    Ok(age_ms) => {
+                        last_pending_age_ms = age_ms;
+                        if age_ms >= stale_after.as_millis() as u64 {
+                            match call_handy_take_pending_commit() {
+                                Ok((cleared_session_id, _)) if cleared_session_id != 0 => {
+                                    return Ok(Some((cleared_session_id, age_ms)));
+                                }
+                                Ok(_) => {
+                                    // Commit likely drained concurrently; continue polling.
+                                }
+                                Err(e) => {
+                                    last_error = e;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        last_error = e;
+                    }
                 }
             }
             Err(e) => {
@@ -1217,9 +1336,10 @@ fn wait_for_pending_commit_drain(
     }
 
     Err(format!(
-        "Pending commit did not drain within {} ms (last_pending_session={} last_error='{}')",
+        "Pending commit did not drain within {} ms (last_pending_session={} last_pending_age_ms={} last_error='{}')",
         timeout.as_millis(),
         last_pending_session,
+        last_pending_age_ms,
         last_error
     ))
 }

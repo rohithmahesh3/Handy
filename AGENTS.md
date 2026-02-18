@@ -126,7 +126,9 @@ Signals:
 Important behavior:
 - Start recording does **not** clear pending commit.
 - `CancelRecording` does **not** clear pending commit.
-- `pending_commit` is overwritten on new store; PTT now waits briefly for pending drain before starting a new session.
+- `pending_commit` is overwritten on new store.
+- Debug transcription testing drains its own session payload via `TakePendingCommit` after `StopRecordingSession`.
+- PTT waits briefly for pending drain before starting a new session, and auto-clears stale pending payloads after an age threshold.
 
 ## Push-to-Talk Behavior
 
@@ -141,6 +143,7 @@ Global PTT uses **evdev** (`src/global_shortcuts.rs`):
 2. Resolve GDK keyval+modifiers to evdev keycodes (`src/key_mapping.rs`).
 3. On press:
    - wait briefly for prior pending commit to drain,
+   - if pending is stale, clear it via `TakePendingCommit` and continue,
    - switch to Handy engine (verified),
    - call `StartRecordingSession`.
 4. On release:
