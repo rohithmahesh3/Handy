@@ -1,7 +1,7 @@
 //! D-Bus server for IBus integration
 //!
-//! This module provides a D-Bus interface that allows the handy-ibus engine
-//! to control Handy's transcription functionality.
+//! This module provides a D-Bus interface that allows the dikt-ibus engine
+//! to control Dikt's transcription functionality.
 
 use crate::global_shortcuts::{
     toggle_diagnostics_tuple, toggle_diagnostics_verbose_json, toggle_recent_events,
@@ -22,8 +22,8 @@ use zbus::fdo;
 use zbus::object_server::SignalContext;
 use zbus::Connection;
 
-const HANDY_BUS_NAME: &str = "com.handy.Transcription";
-const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
+const DIKT_BUS_NAME: &str = "io.dikt.Transcription";
+const DIKT_OBJECT_PATH: &str = "/io/dikt/Transcription";
 
 const MAX_PENDING_COMMIT_QUEUE: usize = 32;
 const LIVE_PREEDIT_POLL_MS: u64 = 600;
@@ -223,7 +223,7 @@ impl SessionStatusEntry {
 }
 
 /// Shared state for the D-Bus server and handlers
-pub struct HandyState {
+pub struct DiktState {
     pub selected_language: Mutex<String>,
     pub recording_manager: Arc<AudioRecordingManager>,
     pub transcription_manager: Arc<TranscriptionManager>,
@@ -242,7 +242,7 @@ pub struct HandyState {
     log_buffer: Arc<Mutex<VecDeque<String>>>,
 }
 
-impl HandyState {
+impl DiktState {
     pub fn new(
         recording_manager: Arc<AudioRecordingManager>,
         transcription_manager: Arc<TranscriptionManager>,
@@ -544,18 +544,18 @@ impl HandyState {
 }
 
 /// D-Bus state for connection management
-pub struct HandyDbusState {
+pub struct DiktDbusState {
     running: AtomicBool,
     connection: Mutex<Option<Connection>>,
 }
 
-impl Default for HandyDbusState {
+impl Default for DiktDbusState {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl HandyDbusState {
+impl DiktDbusState {
     pub fn new() -> Self {
         Self {
             running: AtomicBool::new(false),
@@ -568,14 +568,14 @@ impl HandyDbusState {
     }
 }
 
-/// The D-Bus interface for Handy transcription
-struct HandyTranscription {
-    state: Arc<HandyState>,
-    dbus_state: Arc<HandyDbusState>,
+/// The D-Bus interface for Dikt transcription
+struct DiktTranscription {
+    state: Arc<DiktState>,
+    dbus_state: Arc<DiktDbusState>,
 }
 
-#[zbus::interface(name = "com.handy.Transcription")]
-impl HandyTranscription {
+#[zbus::interface(name = "io.dikt.Transcription")]
+impl DiktTranscription {
     /// Start a recording session and bind commit routing to an engine id.
     async fn start_recording_session_for_target(
         &self,
@@ -840,8 +840,8 @@ async fn post_process_transcription_if_enabled(text: &str) -> Option<String> {
     }
 }
 
-impl HandyTranscription {
-    fn new(state: Arc<HandyState>, dbus_state: Arc<HandyDbusState>) -> Self {
+impl DiktTranscription {
+    fn new(state: Arc<DiktState>, dbus_state: Arc<DiktDbusState>) -> Self {
         Self { state, dbus_state }
     }
 
@@ -856,7 +856,7 @@ impl HandyTranscription {
 
         if !self.state.transcription_manager.has_model_selected() {
             self.emit_error(
-                "No model selected. Open Handy preferences to download and select a model.",
+                "No model selected. Open Dikt preferences to download and select a model.",
             )
             .await?;
             self.state
@@ -965,7 +965,7 @@ impl HandyTranscription {
             return Ok(false);
         };
 
-        let worker = HandyTranscription::new(self.state.clone(), self.dbus_state.clone());
+        let worker = DiktTranscription::new(self.state.clone(), self.dbus_state.clone());
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -1089,7 +1089,7 @@ impl HandyTranscription {
         {
             let iface_ref = conn
                 .object_server()
-                .interface::<_, Self>(HANDY_OBJECT_PATH)
+                .interface::<_, Self>(DIKT_OBJECT_PATH)
                 .await;
             if let Ok(iface_ref) = iface_ref {
                 if let Err(e) = Self::transcription_ready(iface_ref.signal_context(), text).await {
@@ -1110,7 +1110,7 @@ impl HandyTranscription {
         {
             let iface_ref = conn
                 .object_server()
-                .interface::<_, Self>(HANDY_OBJECT_PATH)
+                .interface::<_, Self>(DIKT_OBJECT_PATH)
                 .await;
             if let Ok(iface_ref) = iface_ref {
                 if let Err(e) =
@@ -1133,7 +1133,7 @@ impl HandyTranscription {
         {
             let iface_ref = conn
                 .object_server()
-                .interface::<_, Self>(HANDY_OBJECT_PATH)
+                .interface::<_, Self>(DIKT_OBJECT_PATH)
                 .await;
             if let Ok(iface_ref) = iface_ref {
                 if let Err(e) = Self::error(iface_ref.signal_context(), message).await {
@@ -1146,7 +1146,7 @@ impl HandyTranscription {
 }
 
 fn spawn_live_preedit_worker(
-    state: Arc<HandyState>,
+    state: Arc<DiktState>,
     binding_id: String,
     session_id: u64,
     target_engine_id: u64,
@@ -1392,25 +1392,25 @@ fn now_millis() -> u64 {
 }
 
 /// Start the D-Bus server
-pub async fn start_dbus_server(state: Arc<HandyState>) -> Result<Arc<HandyDbusState>, String> {
+pub async fn start_dbus_server(state: Arc<DiktState>) -> Result<Arc<DiktDbusState>, String> {
     info!("Starting D-Bus server for IBus integration...");
 
-    let dbus_state = Arc::new(HandyDbusState::new());
+    let dbus_state = Arc::new(DiktDbusState::new());
 
     let connection = Connection::session()
         .await
         .map_err(|e| format!("Failed to connect to session bus: {}", e))?;
 
     connection
-        .request_name(HANDY_BUS_NAME)
+        .request_name(DIKT_BUS_NAME)
         .await
         .map_err(|e| format!("Failed to request bus name: {}", e))?;
 
-    let transcription = HandyTranscription::new(state, dbus_state.clone());
+    let transcription = DiktTranscription::new(state, dbus_state.clone());
 
     connection
         .object_server()
-        .at(HANDY_OBJECT_PATH, transcription)
+        .at(DIKT_OBJECT_PATH, transcription)
         .await
         .map_err(|e| format!("Failed to register D-Bus object: {}", e))?;
 
@@ -1424,12 +1424,12 @@ pub async fn start_dbus_server(state: Arc<HandyState>) -> Result<Arc<HandyDbusSt
 
     dbus_state.running.store(true, Ordering::SeqCst);
 
-    info!("D-Bus server started successfully on com.handy.Transcription");
+    info!("D-Bus server started successfully on io.dikt.Transcription");
     Ok(dbus_state)
 }
 
 /// Stop the D-Bus server
-pub async fn stop_dbus_server(dbus_state: &HandyDbusState) -> Result<(), String> {
+pub async fn stop_dbus_server(dbus_state: &DiktDbusState) -> Result<(), String> {
     info!("Stopping D-Bus server...");
 
     if !dbus_state.is_running() {

@@ -12,17 +12,17 @@ use notify_rust::Notification;
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use crate::ibus_control::{get_current_engine, is_handy_engine, switch_to_handy_engine_verified};
+use crate::ibus_control::{get_current_engine, is_dikt_engine, switch_to_dikt_engine_verified};
 use crate::key_mapping::{
     gdk_keyval_to_evdev, is_modifier_key, modifiers_from_held_keys, EvdevKeybinding, MOD_ALT,
     MOD_CTRL, MOD_SHIFT, MOD_SUPER,
 };
 use crate::settings::Settings;
-use crate::utils::launch::open_handy_ui;
+use crate::utils::launch::open_dikt_ui;
 
-const HANDY_BUS_NAME: &str = "com.handy.Transcription";
-const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
-const HANDY_INTERFACE: &str = "com.handy.Transcription";
+const DIKT_BUS_NAME: &str = "io.dikt.Transcription";
+const DIKT_OBJECT_PATH: &str = "/io/dikt/Transcription";
+const DIKT_INTERFACE: &str = "io.dikt.Transcription";
 
 const START_RECORDING_ARM_DELAY_MS: u64 = 120;
 const STOP_RECORDING_TIMEOUT_MS: u64 = 20_000;
@@ -93,7 +93,7 @@ struct ToggleRuntimeHealth {
     listener_session_ok: bool,
     shortcut_bound: bool,
     bind_fail_count: u64,
-    press_while_handy_count: u64,
+    press_while_dikt_count: u64,
     stop_timeout_fallback_count: u64,
     last_notification_ms: u64,
     current_state: String,
@@ -125,7 +125,7 @@ impl Default for ToggleRuntimeHealth {
             listener_session_ok: false,
             shortcut_bound: false,
             bind_fail_count: 0,
-            press_while_handy_count: 0,
+            press_while_dikt_count: 0,
             stop_timeout_fallback_count: 0,
             last_notification_ms: 0,
             current_state: "idle".to_string(),
@@ -298,9 +298,9 @@ fn mark_dbus_error(method: &str, message: &str) {
     }
 }
 
-fn bump_press_while_handy() {
+fn bump_press_while_dikt() {
     if let Ok(mut health) = health_state().lock() {
-        health.press_while_handy_count = health.press_while_handy_count.saturating_add(1);
+        health.press_while_dikt_count = health.press_while_dikt_count.saturating_add(1);
     }
 }
 
@@ -322,7 +322,7 @@ pub fn toggle_diagnostics_tuple() -> (bool, String, String, String, u64, bool, b
             health.listener_session_ok,
             health.shortcut_bound,
             health.bind_fail_count,
-            health.press_while_handy_count,
+            health.press_while_dikt_count,
             health.stop_timeout_fallback_count,
         )
     } else {
@@ -357,7 +357,7 @@ pub fn toggle_diagnostics_verbose_json() -> String {
             "listener_session_ok": health.listener_session_ok,
             "shortcut_bound": health.shortcut_bound,
             "bind_fail_count": health.bind_fail_count,
-            "press_while_handy_count": health.press_while_handy_count,
+            "press_while_dikt_count": health.press_while_dikt_count,
             "stop_timeout_fallback_count": health.stop_timeout_fallback_count,
             "current_state": health.current_state,
             "shortcut_description": health.shortcut_description,
@@ -389,7 +389,7 @@ pub fn toggle_diagnostics_verbose_json() -> String {
             "listener_session_ok": false,
             "shortcut_bound": false,
             "bind_fail_count": 0,
-            "press_while_handy_count": 0,
+            "press_while_dikt_count": 0,
             "stop_timeout_fallback_count": 0,
             "current_state": "unknown",
             "shortcut_description": "",
@@ -496,7 +496,7 @@ async fn run_evdev_listener_loop(mut active_config: ShortcutConfig) {
                 mark_health_error("invalid_shortcut", &msg);
                 notify_toggle_failure(
                     "Invalid dictation shortcut",
-                    "Set a supported shortcut in Handy preferences.",
+                    "Set a supported shortcut in Dikt preferences.",
                 );
                 // Wait before retrying
                 sleep_until_retry_or_rebind(5_000).await;
@@ -831,16 +831,16 @@ fn start_toggle_recording(
 
     if current_engine
         .as_ref()
-        .is_some_and(|engine| is_handy_engine(engine))
+        .is_some_and(|engine| is_dikt_engine(engine))
     {
         mark_switch_confirm(0);
         push_toggle_event(format!(
-            "toggle:{} already on handy source",
+            "toggle:{} already on dikt source",
             toggle_session_id
         ));
-        bump_press_while_handy();
+        bump_press_while_dikt();
         push_toggle_event(format!(
-            "toggle:{} pressed while handy already active",
+            "toggle:{} pressed while dikt already active",
             toggle_session_id
         ));
     } else {
@@ -851,22 +851,22 @@ fn start_toggle_recording(
             toggle_session_id, current_engine_label
         ));
         let switch_started = Instant::now();
-        let switched_engine = match switch_to_handy_engine_verified(ENGINE_SWITCH_VERIFY_TIMEOUT_MS)
+        let switched_engine = match switch_to_dikt_engine_verified(ENGINE_SWITCH_VERIFY_TIMEOUT_MS)
         {
             Ok(engine) => engine,
             Err(e) => {
                 warn!(
-                    "[toggle:{}] Failed to switch input source to Handy on press: {}",
+                    "[toggle:{}] Failed to switch input source to Dikt on press: {}",
                     toggle_session_id, e
                 );
                 mark_switch_failure(&e.to_string());
-                mark_health_error("ibus_switch_to_handy_failed", &e.to_string());
+                mark_health_error("ibus_switch_to_dikt_failed", &e.to_string());
                 notify_toggle_failure(
                     "Cannot start recording",
-                    "Failed to switch input source to Handy (not confirmed active).",
+                    "Failed to switch input source to Dikt (not confirmed active).",
                 );
                 push_toggle_event(format!(
-                    "toggle:{} failed to switch to handy engine: {}",
+                    "toggle:{} failed to switch to dikt engine: {}",
                     toggle_session_id, e
                 ));
                 return;
@@ -880,7 +880,7 @@ fn start_toggle_recording(
             switch_started.elapsed().as_millis()
         ));
         info!(
-            "[toggle:{}] Pressed; switched to Handy source '{}' from '{}'",
+            "[toggle:{}] Pressed; switched to Dikt source '{}' from '{}'",
             toggle_session_id, switched_engine, current_engine_label
         );
     }
@@ -898,14 +898,14 @@ fn start_toggle_recording(
         }
         Err(e) => {
             warn!(
-                "[toggle:{}] Handy engine did not become focused in the target context: {}",
+                "[toggle:{}] Dikt engine did not become focused in the target context: {}",
                 toggle_session_id, e
             );
             mark_start_failure("focused_engine_unavailable", &e);
             mark_health_error("focused_engine_unavailable", &e);
             notify_toggle_failure(
                 "Cannot start recording",
-                "Handy input source is not focused in the target text field.",
+                "Dikt input source is not focused in the target text field.",
             );
             push_toggle_event(format!(
                 "toggle:{} blocked start because focused engine is unavailable: {}",
@@ -1133,7 +1133,7 @@ fn spawn_start_recording(
 ) {
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(START_RECORDING_ARM_DELAY_MS));
-        let result = call_handy_start_recording_session_for_target(target_engine_id);
+        let result = call_dikt_start_recording_session_for_target(target_engine_id);
         let _ = tx.send(InternalEvent::StartRecording {
             toggle_session_id,
             result,
@@ -1148,13 +1148,13 @@ fn spawn_stop_recording(
     tx: mpsc::UnboundedSender<InternalEvent>,
 ) {
     std::thread::spawn(move || {
-        let result = match call_handy_stop_recording_session_with_timeout(
+        let result = match call_dikt_stop_recording_session_with_timeout(
             daemon_session_id,
             Duration::from_millis(STOP_RECORDING_TIMEOUT_MS),
         ) {
             Ok(true) => StopRecordingOutcome::Acknowledged,
             Ok(false) => {
-                let cancel_result = call_handy_cancel_recording_session(daemon_session_id);
+                let cancel_result = call_dikt_cancel_recording_session(daemon_session_id);
                 StopRecordingOutcome::Failed(match cancel_result {
                     Ok(()) => {
                         "StopRecordingSession returned false; fallback CancelRecordingSession succeeded".to_string()
@@ -1166,7 +1166,7 @@ fn spawn_stop_recording(
                 })
             }
             Err(stop_err) => {
-                let is_recording = call_handy_get_state()
+                let is_recording = call_dikt_get_state()
                     .map(|(active, _)| active)
                     .unwrap_or(true);
 
@@ -1196,7 +1196,7 @@ fn spawn_stop_recording(
                         }
                         StopRecordingCallError::Failed(err) => err,
                     };
-                    let cancel_result = call_handy_cancel_recording_session(daemon_session_id);
+                    let cancel_result = call_dikt_cancel_recording_session(daemon_session_id);
                     StopRecordingOutcome::Failed(match cancel_result {
                         Ok(()) => format!(
                             "{}; fallback CancelRecordingSession({}) succeeded",
@@ -1221,7 +1221,7 @@ fn spawn_stop_recording(
 
 fn spawn_cancel_recording(session_id: u64, reason: &'static str) {
     std::thread::spawn(
-        move || match call_handy_cancel_recording_session(session_id) {
+        move || match call_dikt_cancel_recording_session(session_id) {
             Ok(()) => {
                 info!("[toggle:{}] Cancelled recording ({})", session_id, reason);
             }
@@ -1235,7 +1235,7 @@ fn spawn_cancel_recording(session_id: u64, reason: &'static str) {
     );
 }
 
-fn call_handy_cancel_recording_session(session_id: u64) -> std::result::Result<(), String> {
+fn call_dikt_cancel_recording_session(session_id: u64) -> std::result::Result<(), String> {
     let conn = zbus::blocking::Connection::session().map_err(|e| {
         let msg = format!("Failed to open session bus: {}", e);
         mark_dbus_error("CancelRecordingSession", &msg);
@@ -1243,9 +1243,9 @@ fn call_handy_cancel_recording_session(session_id: u64) -> std::result::Result<(
     })?;
     let reply = conn
         .call_method(
-            Some(HANDY_BUS_NAME),
-            HANDY_OBJECT_PATH,
-            Some(HANDY_INTERFACE),
+            Some(DIKT_BUS_NAME),
+            DIKT_OBJECT_PATH,
+            Some(DIKT_INTERFACE),
             "CancelRecordingSession",
             &(session_id,),
         )
@@ -1268,7 +1268,7 @@ fn call_handy_cancel_recording_session(session_id: u64) -> std::result::Result<(
     Ok(())
 }
 
-fn call_handy_start_recording_session_for_target(
+fn call_dikt_start_recording_session_for_target(
     target_engine_id: u64,
 ) -> std::result::Result<(u64, String), String> {
     let conn = zbus::blocking::Connection::session().map_err(|e| {
@@ -1278,9 +1278,9 @@ fn call_handy_start_recording_session_for_target(
     })?;
     let reply = conn
         .call_method(
-            Some(HANDY_BUS_NAME),
-            HANDY_OBJECT_PATH,
-            Some(HANDY_INTERFACE),
+            Some(DIKT_BUS_NAME),
+            DIKT_OBJECT_PATH,
+            Some(DIKT_INTERFACE),
             "StartRecordingSessionForTarget",
             &(target_engine_id,),
         )
@@ -1296,7 +1296,7 @@ fn call_handy_start_recording_session_for_target(
     })
 }
 
-fn call_handy_get_focused_engine() -> std::result::Result<(u64, u64), String> {
+fn call_dikt_get_focused_engine() -> std::result::Result<(u64, u64), String> {
     let conn = zbus::blocking::Connection::session().map_err(|e| {
         let msg = format!("Failed to open session bus: {}", e);
         mark_dbus_error("GetFocusedEngine", &msg);
@@ -1304,9 +1304,9 @@ fn call_handy_get_focused_engine() -> std::result::Result<(u64, u64), String> {
     })?;
     let reply = conn
         .call_method(
-            Some(HANDY_BUS_NAME),
-            HANDY_OBJECT_PATH,
-            Some(HANDY_INTERFACE),
+            Some(DIKT_BUS_NAME),
+            DIKT_OBJECT_PATH,
+            Some(DIKT_INTERFACE),
             "GetFocusedEngine",
             &(),
         )
@@ -1322,7 +1322,7 @@ fn call_handy_get_focused_engine() -> std::result::Result<(u64, u64), String> {
     })
 }
 
-fn call_handy_get_state() -> std::result::Result<(bool, bool), String> {
+fn call_dikt_get_state() -> std::result::Result<(bool, bool), String> {
     let conn = zbus::blocking::Connection::session().map_err(|e| {
         let msg = format!("Failed to open session bus: {}", e);
         mark_dbus_error("GetState", &msg);
@@ -1330,9 +1330,9 @@ fn call_handy_get_state() -> std::result::Result<(bool, bool), String> {
     })?;
     let reply = conn
         .call_method(
-            Some(HANDY_BUS_NAME),
-            HANDY_OBJECT_PATH,
-            Some(HANDY_INTERFACE),
+            Some(DIKT_BUS_NAME),
+            DIKT_OBJECT_PATH,
+            Some(DIKT_INTERFACE),
             "GetState",
             &(),
         )
@@ -1356,7 +1356,7 @@ fn wait_for_focused_engine(
     let mut last_focused_engine_id = 0_u64;
     let mut last_change_ms = 0_u64;
     let last_error = loop {
-        let error_text = match call_handy_get_focused_engine() {
+        let error_text = match call_dikt_get_focused_engine() {
             Ok((engine_id, change_ms)) => {
                 last_focused_engine_id = engine_id;
                 last_change_ms = change_ms;
@@ -1365,7 +1365,7 @@ fn wait_for_focused_engine(
                     return Ok((engine_id, change_ms));
                 }
                 format!(
-                    "Focused Handy engine is unavailable (last_change_ms={})",
+                    "Focused Dikt engine is unavailable (last_change_ms={})",
                     change_ms
                 )
             }
@@ -1380,7 +1380,7 @@ fn wait_for_focused_engine(
 
     mark_focused_engine_status(0, last_change_ms);
     Err(format!(
-        "Handy engine did not report a focused context within {} ms (last_focused_engine_id={} last_change_ms={} last_error='{}')",
+        "Dikt engine did not report a focused context within {} ms (last_focused_engine_id={} last_change_ms={} last_error='{}')",
         timeout.as_millis(),
         last_focused_engine_id,
         last_change_ms,
@@ -1388,7 +1388,7 @@ fn wait_for_focused_engine(
     ))
 }
 
-fn call_handy_stop_recording_session(session_id: u64) -> std::result::Result<bool, String> {
+fn call_dikt_stop_recording_session(session_id: u64) -> std::result::Result<bool, String> {
     let conn = zbus::blocking::Connection::session().map_err(|e| {
         let msg = format!("Failed to open session bus: {}", e);
         mark_dbus_error("StopRecordingSession", &msg);
@@ -1396,9 +1396,9 @@ fn call_handy_stop_recording_session(session_id: u64) -> std::result::Result<boo
     })?;
     let reply = conn
         .call_method(
-            Some(HANDY_BUS_NAME),
-            HANDY_OBJECT_PATH,
-            Some(HANDY_INTERFACE),
+            Some(DIKT_BUS_NAME),
+            DIKT_OBJECT_PATH,
+            Some(DIKT_INTERFACE),
             "StopRecordingSession",
             &(session_id,),
         )
@@ -1414,13 +1414,13 @@ fn call_handy_stop_recording_session(session_id: u64) -> std::result::Result<boo
     })
 }
 
-fn call_handy_stop_recording_session_with_timeout(
+fn call_dikt_stop_recording_session_with_timeout(
     session_id: u64,
     timeout: Duration,
 ) -> std::result::Result<bool, StopRecordingCallError> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(call_handy_stop_recording_session(session_id));
+        let _ = tx.send(call_dikt_stop_recording_session(session_id));
     });
 
     match rx.recv_timeout(timeout) {
@@ -1472,8 +1472,8 @@ fn notify_toggle_failure(summary: &str, body: &str) {
         if let Ok(handle) = notification {
             handle.wait_for_action(|action| {
                 if action == "default" || action == "clicked" {
-                    if let Err(e) = open_handy_ui(None) {
-                        error!("Failed to open Handy diagnostics UI: {}", e);
+                    if let Err(e) = open_dikt_ui(None) {
+                        error!("Failed to open Dikt diagnostics UI: {}", e);
                     }
                 }
             });

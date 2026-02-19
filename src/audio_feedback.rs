@@ -23,12 +23,12 @@ fn get_sound_path(settings: &Settings, sound_type: SoundType) -> PathBuf {
 
     if settings.sound_theme() == SoundTheme::Custom {
         let data_dir = std::env::var("XDG_DATA_HOME")
-            .map(|p| PathBuf::from(p).join("handy").join("sounds"))
-            .unwrap_or_else(|_| PathBuf::from("/usr/share/handy/sounds"));
+            .map(|p| PathBuf::from(p).join("dikt").join("sounds"))
+            .unwrap_or_else(|_| PathBuf::from("/usr/share/dikt/sounds"));
         return data_dir.join(filename);
     }
 
-    let system_path = PathBuf::from("/usr/share/handy/sounds").join(filename);
+    let system_path = PathBuf::from("/usr/share/dikt/sounds").join(filename);
     if system_path.exists() {
         return system_path;
     }

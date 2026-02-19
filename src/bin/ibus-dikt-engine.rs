@@ -1,7 +1,7 @@
 use clap::Parser;
 use log::{error, info};
 
-use handy_app_lib::ibus_engine::{cleanup, create_context, init, run_main_loop};
+use dikt_app_lib::ibus_engine::{cleanup, create_context, init, run_main_loop};
 
 #[derive(Debug, clap::Parser)]
 #[command(author, version, about, long_about = None)]
@@ -20,7 +20,7 @@ fn main() -> anyhow::Result<()> {
         .filter_level(args.verbose.log_level_filter())
         .init();
 
-    info!("Starting Handy IBus Engine");
+    info!("Starting Dikt IBus Engine");
 
     let context = create_context();
 

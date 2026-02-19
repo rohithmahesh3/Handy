@@ -32,9 +32,9 @@ if [[ -z "$dist" ]]; then
     dist="fc40"
 fi
 
-rpm_path="./x86_64/ibus-handy-${version}-${next_rev}.${dist}.x86_64.rpm"
+rpm_path="./x86_64/ibus-dikt-${version}-${next_rev}.${dist}.x86_64.rpm"
 if [[ ! -f "$rpm_path" ]]; then
-    rpm_path="$(find . -maxdepth 3 -type f -name "ibus-handy-${version}-${next_rev}.${dist}*.x86_64.rpm" | head -n1 || true)"
+    rpm_path="$(find . -maxdepth 3 -type f -name "ibus-dikt-${version}-${next_rev}.${dist}*.x86_64.rpm" | head -n1 || true)"
 fi
 
 if [[ -z "$rpm_path" || ! -f "$rpm_path" ]]; then
@@ -45,8 +45,8 @@ fi
 echo "Installing: $rpm_path"
 sudo dnf install -y "$rpm_path"
 
-echo "Restarting handy daemon and IBus..."
-systemctl --user restart handy.service
+echo "Restarting dikt daemon and IBus..."
+systemctl --user restart dikt.service
 ibus restart
 
 echo "Done."

@@ -388,7 +388,7 @@ impl ModelsPage {
 
         let custom_group = PreferencesGroup::builder()
             .title("Custom Models")
-            .description("Place Whisper .bin files in ~/.local/share/handy/models/")
+            .description("Place Whisper .bin files in ~/.local/share/dikt/models/")
             .build();
 
         let info_label = Label::builder()

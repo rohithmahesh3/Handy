@@ -2,7 +2,7 @@ use gtk4::prelude::*;
 use libadwaita::Application as AdwApplication;
 use std::sync::{Arc, Mutex};
 
-use crate::dbus::{self, HandyState};
+use crate::dbus::{self, DiktState};
 use crate::global_shortcuts::start_global_shortcuts_listener;
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::model::ModelManager;
@@ -10,7 +10,7 @@ use crate::managers::transcription::TranscriptionManager;
 use crate::settings::{LogLevel, Settings};
 use crate::ui::window::MainWindow;
 
-const UI_APP_ID: &str = "com.handy.Handy";
+const UI_APP_ID: &str = "io.dikt.Dikt";
 
 use crate::utils::logging::RingBufferLogger;
 use std::collections::VecDeque;
@@ -71,7 +71,7 @@ fn init_ui_state() -> Result<Arc<AppState>, String> {
     }))
 }
 
-fn init_runtime() -> Result<(Arc<RuntimeState>, Arc<HandyState>), String> {
+fn init_runtime() -> Result<(Arc<RuntimeState>, Arc<DiktState>), String> {
     let settings = Settings::new();
     let log_buffer = init_logging(&settings);
 
@@ -95,25 +95,25 @@ fn init_runtime() -> Result<(Arc<RuntimeState>, Arc<HandyState>), String> {
         transcription_manager: transcription_manager.clone(),
     });
 
-    let handy_state = Arc::new(HandyState::new(
+    let dikt_state = Arc::new(DiktState::new(
         recording_manager,
         transcription_manager,
         settings.selected_language(),
         log_buffer,
     ));
 
-    wire_settings_sync(&state, &handy_state);
+    wire_settings_sync(&state, &dikt_state);
 
-    Ok((state, handy_state))
+    Ok((state, dikt_state))
 }
 
-fn wire_settings_sync(state: &Arc<RuntimeState>, handy_state: &Arc<HandyState>) {
+fn wire_settings_sync(state: &Arc<RuntimeState>, dikt_state: &Arc<DiktState>) {
     state.settings.connect_changed(Some("selected-language"), {
         let settings = state.settings.clone();
-        let handy_state = handy_state.clone();
+        let dikt_state = dikt_state.clone();
         let tm = state.transcription_manager.clone();
         move |_| {
-            match handy_state.selected_language.lock() {
+            match dikt_state.selected_language.lock() {
                 Ok(mut selected_language) => {
                     *selected_language = settings.selected_language();
                 }
@@ -283,7 +283,7 @@ pub fn run_ui() {
     let state = match init_ui_state() {
         Ok(state) => state,
         Err(e) => {
-            eprintln!("Failed to initialize Handy UI state: {}", e);
+            eprintln!("Failed to initialize Dikt UI state: {}", e);
             std::process::exit(1);
         }
     };
@@ -302,16 +302,16 @@ pub fn run_ui() {
 pub fn run_daemon() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    let (_runtime_state, handy_state) = match init_runtime() {
+    let (_runtime_state, dikt_state) = match init_runtime() {
         Ok(state) => state,
         Err(e) => {
-            eprintln!("Failed to initialize Handy daemon runtime: {}", e);
+            eprintln!("Failed to initialize Dikt daemon runtime: {}", e);
             std::process::exit(1);
         }
     };
 
     let context = glib::MainContext::default();
-    match context.block_on(dbus::start_dbus_server(handy_state)) {
+    match context.block_on(dbus::start_dbus_server(dikt_state)) {
         Ok(dbus_state) => {
             start_global_shortcuts_listener();
             let main_loop = glib::MainLoop::new(None, false);

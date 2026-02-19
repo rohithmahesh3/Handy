@@ -1,5 +1,5 @@
-#ifndef IBUS_HANDY_WRAPPER_H
-#define IBUS_HANDY_WRAPPER_H
+#ifndef IBUS_DIKT_WRAPPER_H
+#define IBUS_DIKT_WRAPPER_H
 
 #include <ibus.h>
 #include <stdbool.h>
@@ -8,33 +8,33 @@
 extern "C" {
 #endif
 
-typedef gboolean (*ibus_handy_callback_key_event)(void* ctx, IBusEngine* engine, guint keyval, guint keycode, guint modifiers);
-typedef void (*ibus_handy_callback_focus_in)(void* ctx, IBusEngine* engine);
-typedef void (*ibus_handy_callback_focus_out)(void* ctx, IBusEngine* engine);
-typedef void (*ibus_handy_callback_reset)(void* ctx, IBusEngine* engine);
-typedef void (*ibus_handy_callback_enable)(void* ctx, IBusEngine* engine);
-typedef void (*ibus_handy_callback_disable)(void* ctx, IBusEngine* engine);
+typedef gboolean (*ibus_dikt_callback_key_event)(void* ctx, IBusEngine* engine, guint keyval, guint keycode, guint modifiers);
+typedef void (*ibus_dikt_callback_focus_in)(void* ctx, IBusEngine* engine);
+typedef void (*ibus_dikt_callback_focus_out)(void* ctx, IBusEngine* engine);
+typedef void (*ibus_dikt_callback_reset)(void* ctx, IBusEngine* engine);
+typedef void (*ibus_dikt_callback_enable)(void* ctx, IBusEngine* engine);
+typedef void (*ibus_dikt_callback_disable)(void* ctx, IBusEngine* engine);
 
-void ibus_handy_set_callback(
+void ibus_dikt_set_callback(
     void* ctx,
-    ibus_handy_callback_key_event key_event_cb,
-    ibus_handy_callback_focus_in focus_in_cb,
-    ibus_handy_callback_focus_out focus_out_cb,
-    ibus_handy_callback_reset reset_cb,
-    ibus_handy_callback_enable enable_cb,
-    ibus_handy_callback_disable disable_cb
+    ibus_dikt_callback_key_event key_event_cb,
+    ibus_dikt_callback_focus_in focus_in_cb,
+    ibus_dikt_callback_focus_out focus_out_cb,
+    ibus_dikt_callback_reset reset_cb,
+    ibus_dikt_callback_enable enable_cb,
+    ibus_dikt_callback_disable disable_cb
 );
 
-int ibus_handy_init(bool ibus_mode);
-void ibus_handy_cleanup(void);
-gboolean ibus_handy_set_global_engine(const gchar* engine_name);
-gchar* ibus_handy_get_global_engine_name(void);
-gboolean ibus_handy_daemon_set_global_engine(const gchar* engine_name);
-gchar* ibus_handy_daemon_get_global_engine_name(void);
+int ibus_dikt_init(bool ibus_mode);
+void ibus_dikt_cleanup(void);
+gboolean ibus_dikt_set_global_engine(const gchar* engine_name);
+gchar* ibus_dikt_get_global_engine_name(void);
+gboolean ibus_dikt_daemon_set_global_engine(const gchar* engine_name);
+gchar* ibus_dikt_daemon_get_global_engine_name(void);
 
 typedef struct {
     IBusEngine parent;
-} IBusHandyEngine;
+} IBusDiktEngine;
 
 #ifdef __cplusplus
 }

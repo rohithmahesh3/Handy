@@ -3,7 +3,7 @@ use gio::Settings as GioSettings;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-const SETTINGS_SCHEMA: &str = "com.handy.Transcription";
+const SETTINGS_SCHEMA: &str = "io.dikt.Transcription";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]

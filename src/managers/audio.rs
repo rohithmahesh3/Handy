@@ -164,7 +164,7 @@ Falling back to on-demand mode.",
     fn create_audio_recorder(&self) -> Result<AudioRecorder, anyhow::Error> {
         let vad_path = resolve_vad_model_path().ok_or_else(|| {
             anyhow::anyhow!(
-                "Silero VAD model not found. Expected /usr/share/handy/models/silero_vad_v4.onnx \
+                "Silero VAD model not found. Expected /usr/share/dikt/models/silero_vad_v4.onnx \
 or resources/models/silero_vad_v4.onnx"
             )
         })?;
@@ -462,7 +462,7 @@ or resources/models/silero_vad_v4.onnx"
 
 fn resolve_vad_model_path() -> Option<PathBuf> {
     let candidates = [
-        PathBuf::from("/usr/share/handy/models/silero_vad_v4.onnx"),
+        PathBuf::from("/usr/share/dikt/models/silero_vad_v4.onnx"),
         PathBuf::from("resources/models/silero_vad_v4.onnx"),
     ];
 

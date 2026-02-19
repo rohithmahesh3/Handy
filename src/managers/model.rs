@@ -164,11 +164,11 @@ impl ModelManager {
     pub fn new() -> Result<Self> {
         let settings = crate::settings::Settings::new();
         let models_dir = std::env::var("XDG_DATA_HOME")
-            .map(|p| PathBuf::from(p).join("handy").join("models"))
+            .map(|p| PathBuf::from(p).join("dikt").join("models"))
             .unwrap_or_else(|_| {
                 dirs::data_dir()
                     .unwrap_or_else(|| PathBuf::from("."))
-                    .join("handy")
+                    .join("dikt")
                     .join("models")
             });
 
@@ -199,7 +199,7 @@ impl ModelManager {
                 name: "Whisper Small".to_string(),
                 description: "Fast and fairly accurate.".to_string(),
                 filename: "ggml-small.bin".to_string(),
-                url: Some("https://blob.handy.computer/ggml-small.bin".to_string()),
+                url: Some("https://github.com/rohithmahesh3/Dikt/releases/download/models/ggml-small.bin".to_string()),
                 size_mb: 487,
                 is_downloaded: false,
                 is_downloading: false,
@@ -222,7 +222,7 @@ impl ModelManager {
                 name: "Whisper Medium".to_string(),
                 description: "Good accuracy, medium speed".to_string(),
                 filename: "whisper-medium-q4_1.bin".to_string(),
-                url: Some("https://blob.handy.computer/whisper-medium-q4_1.bin".to_string()),
+                url: Some("https://github.com/rohithmahesh3/Dikt/releases/download/models/whisper-medium-q4_1.bin".to_string()),
                 size_mb: 492,
                 is_downloaded: false,
                 is_downloading: false,
@@ -245,7 +245,7 @@ impl ModelManager {
                 name: "Whisper Turbo".to_string(),
                 description: "Balanced accuracy and speed.".to_string(),
                 filename: "ggml-large-v3-turbo.bin".to_string(),
-                url: Some("https://blob.handy.computer/ggml-large-v3-turbo.bin".to_string()),
+                url: Some("https://github.com/rohithmahesh3/Dikt/releases/download/models/ggml-large-v3-turbo.bin".to_string()),
                 size_mb: 1600,
                 is_downloaded: false,
                 is_downloading: false,
@@ -276,7 +276,7 @@ impl ModelManager {
                 name: "Parakeet V3".to_string(),
                 description: "Fast and accurate. Supports 25 European languages.".to_string(),
                 filename: "parakeet-tdt-0.6b-v3-int8".to_string(),
-                url: Some("https://blob.handy.computer/parakeet-v3-int8.tar.gz".to_string()),
+                url: Some("https://github.com/rohithmahesh3/Dikt/releases/download/models/parakeet-v3-int8.tar.gz".to_string()),
                 size_mb: 478,
                 is_downloaded: false,
                 is_downloading: false,
@@ -306,7 +306,7 @@ impl ModelManager {
                 description: "Very fast. Chinese, English, Japanese, Korean, Cantonese."
                     .to_string(),
                 filename: "sense-voice-int8".to_string(),
-                url: Some("https://blob.handy.computer/sense-voice-int8.tar.gz".to_string()),
+                url: Some("https://github.com/rohithmahesh3/Dikt/releases/download/models/sense-voice-int8.tar.gz".to_string()),
                 size_mb: 160,
                 is_downloaded: false,
                 is_downloading: false,
@@ -1216,7 +1216,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("handy-{}-{}", prefix, ts));
+        let dir = std::env::temp_dir().join(format!("dikt-{}-{}", prefix, ts));
         fs::create_dir_all(&dir).unwrap();
         dir
     }

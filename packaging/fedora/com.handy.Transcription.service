@@ -1,4 +1,0 @@
-[D-BUS Service]
-Name=com.handy.Transcription
-Exec=/usr/bin/handy --daemon
-SystemdService=handy.service

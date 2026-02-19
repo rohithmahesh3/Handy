@@ -1,13 +1,13 @@
 [Desktop Entry]
 Version=1.0
-Name=Handy
+Name=Dikt
 GenericName=Speech to Text
-Comment=Configure Handy speech-to-text settings
-Exec=handy
-Icon=handy
+Comment=Configure Dikt speech-to-text settings
+Exec=dikt
+Icon=dikt
 Terminal=false
 Type=Application
 Categories=Settings;Accessibility;GNOME;GTK;
 Keywords=speech;voice;dictation;ibus;input;accessibility;
-StartupWMClass=com.handy.Handy
+StartupWMClass=io.dikt.Dikt
 DBusActivatable=false

@@ -1,10 +1,8 @@
-# Handy - Speech to Text for Fedora/GNOME
+# Dikt - Speech to Text for Fedora/GNOME
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)]()
 
-Handy is a speech-to-text application for **Fedora Workstation on GNOME/Wayland**. It integrates natively with IBus, allowing you to dictate text into any application.
-
-This is a fork of [Handy](https://github.com/cjpais/Handy) specifically optimized for Fedora Workstation with native IBus integration.
+Dikt is a speech-to-text application for **Fedora Workstation on GNOME/Wayland**. It integrates natively with IBus, allowing you to dictate text into any application.
 
 ## Features
 
@@ -18,27 +16,27 @@ This is a fork of [Handy](https://github.com/cjpais/Handy) specifically optimize
 ## Installation
 
 ```bash
-sudo dnf install ibus-handy
+sudo dnf install ibus-dikt
 ```
 
-After installation, Handy automatically registers with IBus.
+After installation, Dikt automatically registers with IBus.
 
 ## Setup
 
 1. Open **Settings → Keyboard → Input Sources**
 2. Click the **+** button
-3. Select **Handy Speech-to-Text**
+3. Select **Dikt Speech-to-Text**
 4. Click **Add**
 
 ## Usage
 
-1. Configure your dictation shortcut in Handy preferences.
+1. Configure your dictation shortcut in Dikt preferences.
 2. Press the shortcut once to start recording.
 3. Press the shortcut again to stop recording and commit text.
 
 ### Preferences
 
-Open Handy from the application menu to configure:
+Open Dikt from the application menu to configure:
 
 - Language selection
 - Audio feedback
@@ -62,21 +60,21 @@ sudo dnf install -y \
     openssl-devel ibus-devel cmake clang-devel glslc
 
 # Clone and build
-git clone -b fedora-gnome https://github.com/rohithmahesh/Handy.git
-cd Handy
+git clone https://github.com/rohithmahesh3/Dikt.git
+cd Dikt
 cargo build --release
 ```
 
 ## How It Works
 
-1. **Daemon**: `handy --daemon` exports `com.handy.Transcription` on session D-Bus.
+1. **Daemon**: `dikt --daemon` exports `io.dikt.Transcription` on session D-Bus.
 2. **Global shortcut listener**: daemon listens to evdev keyboard events for the configured shortcut.
 3. **IBus bridge**: first press starts recording and next press stops; engine-side pending commit path commits text to the focused app.
 4. **Transcription**: audio is transcribed locally; optional post-processing can rewrite final output.
 
 ## Model Support
 
-Handy supports multiple speech recognition models:
+Dikt supports multiple speech recognition models:
 
 - **Whisper** (Small/Medium/Turbo) - OpenAI's speech recognition
 - **Parakeet V3** - CPU-optimized with automatic language detection
@@ -86,7 +84,7 @@ Models are downloaded from the preferences window.
 
 ## Troubleshooting
 
-### Handy not appearing in IBus
+### Dikt not appearing in IBus
 
 ```bash
 ibus write-cache
@@ -96,8 +94,8 @@ ibus restart
 ### Toggle dictation does not trigger
 
 ```bash
-systemctl --user status handy.service
-systemctl --user restart handy.service
+systemctl --user status dikt.service
+systemctl --user restart dikt.service
 ```
 
 ### No microphone access
@@ -111,15 +109,10 @@ sudo usermod -aG audio $USER
 
 ### Manual Model Installation
 
-Place models in `~/.local/share/handy/models/`:
+Place models in `~/.local/share/dikt/models/`:
 
 - Whisper: `.bin` files directly
 - Parakeet/SenseVoice: extract `.tar.gz` to subdirectory
-
-## Related Projects
-
-- **[Handy (upstream)](https://github.com/cjpais/Handy)** - The original cross-platform version
-- **[handy.computer](https://handy.computer)** - Project website
 
 ## License
 
@@ -127,6 +120,9 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
 
-- **Handy** by cjpais - The original application
 - **Whisper** by OpenAI - Speech recognition model
 - **IBus** - Intelligent Input Bus
+
+## Related Projects
+
+- **[Handy](https://github.com/cjpais/handy)** - Original speech-to-text application for Linux that inspired this project

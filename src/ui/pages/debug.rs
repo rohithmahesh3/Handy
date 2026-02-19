@@ -10,9 +10,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use zbus::blocking::Connection;
 
-const HANDY_BUS_NAME: &str = "com.handy.Transcription";
-const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
-const HANDY_INTERFACE: &str = "com.handy.Transcription";
+const DIKT_BUS_NAME: &str = "io.dikt.Transcription";
+const DIKT_OBJECT_PATH: &str = "/io/dikt/Transcription";
+const DIKT_INTERFACE: &str = "io.dikt.Transcription";
 const MAX_LOG_LINES: usize = 400;
 const UI_POLL_INTERVAL_MS: u64 = 80;
 const DEBUG_ENGINE_ID: u64 = u64::MAX - 1;
@@ -446,9 +446,9 @@ fn fetch_daemon_logs(limit: usize) -> Result<Vec<String>, String> {
         Connection::session().map_err(|e| format!("Cannot connect to session bus: {}", e))?;
     let reply = conn
         .call_method(
-            Some(HANDY_BUS_NAME),
-            HANDY_OBJECT_PATH,
-            Some(HANDY_INTERFACE),
+            Some(DIKT_BUS_NAME),
+            DIKT_OBJECT_PATH,
+            Some(DIKT_INTERFACE),
             "GetRecentLogs",
             &(),
         )
@@ -468,9 +468,9 @@ fn fetch_toggle_diagnostics_summary() -> Result<String, String> {
         Connection::session().map_err(|e| format!("Cannot connect to session bus: {}", e))?;
     let reply = conn
         .call_method(
-            Some(HANDY_BUS_NAME),
-            HANDY_OBJECT_PATH,
-            Some(HANDY_INTERFACE),
+            Some(DIKT_BUS_NAME),
+            DIKT_OBJECT_PATH,
+            Some(DIKT_INTERFACE),
             "GetToggleDiagnosticsVerbose",
             &(),
         )
@@ -507,8 +507,8 @@ fn fetch_toggle_diagnostics_summary() -> Result<String, String> {
         .get("bind_fail_count")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    let press_while_handy_count = diagnostics
-        .get("press_while_handy_count")
+    let press_while_dikt_count = diagnostics
+        .get("press_while_dikt_count")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
     let stop_timeout_fallback_count = diagnostics
@@ -562,9 +562,9 @@ fn fetch_toggle_diagnostics_summary() -> Result<String, String> {
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
     if let Ok(reply) = conn.call_method(
-        Some(HANDY_BUS_NAME),
-        HANDY_OBJECT_PATH,
-        Some(HANDY_INTERFACE),
+        Some(DIKT_BUS_NAME),
+        DIKT_OBJECT_PATH,
+        Some(DIKT_INTERFACE),
         "GetPendingCommitStats",
         &(),
     ) {
@@ -580,7 +580,7 @@ fn fetch_toggle_diagnostics_summary() -> Result<String, String> {
     }
 
     Ok(format!(
-        "healthy={} code={} message={} state={} shortcut='{}' listener_ok={} shortcut_bound={} bind_failures={} press_while_handy={} stop_timeouts={} start_failure_code={} start_failure_message={} stop_failure_message={} switch_confirm_latency_ms={} switch_failure_message={} engine_active={} focused_engine_id={} engine_last_change_ms={} pending_queue_len={} pending_oldest_age_ms={} last_dbus_error={}",
+        "healthy={} code={} message={} state={} shortcut='{}' listener_ok={} shortcut_bound={} bind_failures={} press_while_dikt={} stop_timeouts={} start_failure_code={} start_failure_message={} stop_failure_message={} switch_confirm_latency_ms={} switch_failure_message={} engine_active={} focused_engine_id={} engine_last_change_ms={} pending_queue_len={} pending_oldest_age_ms={} last_dbus_error={}",
         healthy,
         code,
         message,
@@ -589,7 +589,7 @@ fn fetch_toggle_diagnostics_summary() -> Result<String, String> {
         listener_session_ok,
         shortcut_bound,
         bind_fail_count,
-        press_while_handy_count,
+        press_while_dikt_count,
         stop_timeout_fallback_count,
         last_start_failure_code,
         last_start_failure_message,
@@ -610,9 +610,9 @@ fn fetch_toggle_recent_events() -> Result<Vec<String>, String> {
         Connection::session().map_err(|e| format!("Cannot connect to session bus: {}", e))?;
     let reply = conn
         .call_method(
-            Some(HANDY_BUS_NAME),
-            HANDY_OBJECT_PATH,
-            Some(HANDY_INTERFACE),
+            Some(DIKT_BUS_NAME),
+            DIKT_OBJECT_PATH,
+            Some(DIKT_INTERFACE),
             "GetToggleRecentEvents",
             &(),
         )
@@ -701,9 +701,9 @@ fn call_start_recording() -> Result<DebugSessionClaim, String> {
     let conn = Connection::session().map_err(|e| format!("Session bus unavailable: {}", e))?;
     let reply = conn
         .call_method(
-            Some(HANDY_BUS_NAME),
-            HANDY_OBJECT_PATH,
-            Some(HANDY_INTERFACE),
+            Some(DIKT_BUS_NAME),
+            DIKT_OBJECT_PATH,
+            Some(DIKT_INTERFACE),
             "StartRecordingSessionForTarget",
             &(DEBUG_ENGINE_ID,),
         )
@@ -724,9 +724,9 @@ fn call_stop_recording(session_id: u64) -> Result<bool, String> {
     let conn = Connection::session().map_err(|e| format!("Session bus unavailable: {}", e))?;
     let reply = conn
         .call_method(
-            Some(HANDY_BUS_NAME),
-            HANDY_OBJECT_PATH,
-            Some(HANDY_INTERFACE),
+            Some(DIKT_BUS_NAME),
+            DIKT_OBJECT_PATH,
+            Some(DIKT_INTERFACE),
             "StopRecordingSession",
             &(session_id,),
         )
@@ -777,9 +777,9 @@ fn call_session_status(session_id: u64) -> Result<(String, String, u64), String>
     let conn = Connection::session().map_err(|e| format!("Session bus unavailable: {}", e))?;
     let reply = conn
         .call_method(
-            Some(HANDY_BUS_NAME),
-            HANDY_OBJECT_PATH,
-            Some(HANDY_INTERFACE),
+            Some(DIKT_BUS_NAME),
+            DIKT_OBJECT_PATH,
+            Some(DIKT_INTERFACE),
             "GetSessionStatus",
             &(session_id,),
         )
@@ -797,9 +797,9 @@ fn call_take_pending_commit_for_session(
     let conn = Connection::session().map_err(|e| format!("Session bus unavailable: {}", e))?;
     let reply = conn
         .call_method(
-            Some(HANDY_BUS_NAME),
-            HANDY_OBJECT_PATH,
-            Some(HANDY_INTERFACE),
+            Some(DIKT_BUS_NAME),
+            DIKT_OBJECT_PATH,
+            Some(DIKT_INTERFACE),
             "TakePendingCommitForSession",
             &(session_id, claim_token.to_string()),
         )
@@ -816,9 +816,9 @@ fn call_cancel_recording(session_id: u64) -> Result<(), String> {
     let conn = Connection::session().map_err(|e| format!("Session bus unavailable: {}", e))?;
     let reply = conn
         .call_method(
-            Some(HANDY_BUS_NAME),
-            HANDY_OBJECT_PATH,
-            Some(HANDY_INTERFACE),
+            Some(DIKT_BUS_NAME),
+            DIKT_OBJECT_PATH,
+            Some(DIKT_INTERFACE),
             "CancelRecordingSession",
             &(session_id,),
         )
@@ -840,9 +840,9 @@ fn call_recording_state() -> Result<bool, String> {
     let conn = Connection::session().map_err(|e| format!("Session bus unavailable: {}", e))?;
     let reply = conn
         .call_method(
-            Some(HANDY_BUS_NAME),
-            HANDY_OBJECT_PATH,
-            Some(HANDY_INTERFACE),
+            Some(DIKT_BUS_NAME),
+            DIKT_OBJECT_PATH,
+            Some(DIKT_INTERFACE),
             "GetState",
             &(),
         )

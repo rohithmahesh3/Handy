@@ -9,7 +9,7 @@ if [ -z "$DIST" ]; then
     DIST="fc40"
 fi
 
-echo "=== Building ibus-handy ${VERSION}-${RELEASE}.${DIST} ==="
+echo "=== Building ibus-dikt ${VERSION}-${RELEASE}.${DIST} ==="
 
 # Check for required commands
 command -v cargo >/dev/null 2>&1 || { echo "Error: cargo not found. Please install Rust."; exit 1; }
@@ -24,29 +24,29 @@ cd "$SCRIPT_DIR"
 echo "Generating spec file from template..."
 sed -e "s/@VERSION@/$VERSION/g" \
     -e "s/@RELEASE@/$RELEASE/g" \
-    packaging/fedora/ibus-handy.spec.in > packaging/fedora/ibus-handy.spec
-echo "Generated packaging/fedora/ibus-handy.spec"
+    packaging/fedora/ibus-dikt.spec.in > packaging/fedora/ibus-dikt.spec
+echo "Generated packaging/fedora/ibus-dikt.spec"
 
-# Generate handy.xml from template
-echo "Generating handy.xml from template..."
+# Generate dikt.xml from template
+echo "Generating dikt.xml from template..."
 sed -e "s/@VERSION@/$VERSION/g" \
-    packaging/fedora/handy.xml.in > packaging/fedora/handy.xml
-echo "Generated packaging/fedora/handy.xml"
+    packaging/fedora/dikt.xml.in > packaging/fedora/dikt.xml
+echo "Generated packaging/fedora/dikt.xml"
 
 # Create source tarball
 echo "Creating source tarball..."
-TARBALL="ibus-handy-${VERSION}.tar.gz"
+TARBALL="ibus-dikt-${VERSION}.tar.gz"
 STAGE_DIR="$(mktemp -d)"
-mkdir -p "${STAGE_DIR}/ibus-handy-${VERSION}"
+mkdir -p "${STAGE_DIR}/ibus-dikt-${VERSION}"
 rsync -a \
     --exclude='.git' \
     --exclude='target' \
     --exclude='x86_64' \
     --exclude='*.rpm' \
     --exclude='*.src.rpm' \
-    --exclude='ibus-handy-*.tar.gz' \
-    ./ "${STAGE_DIR}/ibus-handy-${VERSION}/"
-tar -C "${STAGE_DIR}" -czf "$TARBALL" "ibus-handy-${VERSION}"
+    --exclude='ibus-dikt-*.tar.gz' \
+    ./ "${STAGE_DIR}/ibus-dikt-${VERSION}/"
+tar -C "${STAGE_DIR}" -czf "$TARBALL" "ibus-dikt-${VERSION}"
 rm -rf "${STAGE_DIR}"
 echo "Created $TARBALL"
 
@@ -58,9 +58,9 @@ rpmbuild -bs \
     --define "_specdir $(pwd)" \
     --define "_srcrpmdir $(pwd)" \
     --define "_rpmdir $(pwd)" \
-    packaging/fedora/ibus-handy.spec
+    packaging/fedora/ibus-dikt.spec
 
-SRPM=$(ls ibus-handy-${VERSION}-${RELEASE}*.src.rpm 2>/dev/null | head -1)
+SRPM=$(ls ibus-dikt-${VERSION}-${RELEASE}*.src.rpm 2>/dev/null | head -1)
 if [ -n "$SRPM" ]; then
     echo "Created SRPM: $SRPM"
 else
@@ -77,16 +77,16 @@ rpmbuild -bb \
     --define "_srcrpmdir $(pwd)" \
     --define "_rpmdir $(pwd)" \
     --define "dist .${DIST}" \
-    packaging/fedora/ibus-handy.spec
+    packaging/fedora/ibus-dikt.spec
 
 echo ""
 echo "=== Build Complete ==="
 echo "SRPM: $SRPM"
 echo "RPM packages:"
-find . -name "ibus-handy-${VERSION}-${RELEASE}.${DIST}*.rpm" -type f 2>/dev/null | while read rpm; do
+find . -name "ibus-dikt-${VERSION}-${RELEASE}.${DIST}*.rpm" -type f 2>/dev/null | while read rpm; do
     echo "  - $rpm"
 done
 
 echo ""
 echo "To install:"
-echo "  sudo dnf install ./ibus-handy-${VERSION}-${RELEASE}.${DIST}.x86_64.rpm"
+echo "  sudo dnf install ./ibus-dikt-${VERSION}-${RELEASE}.${DIST}.x86_64.rpm"

@@ -27,11 +27,11 @@ impl AboutPage {
             .halign(Align::Center)
             .build();
 
-        let logo = Image::builder().icon_name("handy").pixel_size(128).build();
+        let logo = Image::builder().icon_name("dikt").pixel_size(128).build();
         vbox.append(&logo);
 
         let name = Label::builder()
-            .label("Handy")
+            .label("Dikt")
             .css_classes(["title-1"])
             .build();
         vbox.append(&name);
@@ -63,7 +63,7 @@ impl AboutPage {
         website_btn.connect_clicked(|_| {
             gtk4::show_uri(
                 None::<&gtk4::Window>,
-                "https://github.com/rohithmahesh/Handy",
+                "https://github.com/rohithmahesh3/Dikt",
                 0,
             );
         });
@@ -76,7 +76,7 @@ impl AboutPage {
         issue_btn.connect_clicked(|_| {
             gtk4::show_uri(
                 None::<&gtk4::Window>,
-                "https://github.com/rohithmahesh/Handy/issues",
+                "https://github.com/rohithmahesh3/Dikt/issues",
                 0,
             );
         });

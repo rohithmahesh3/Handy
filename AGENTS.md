@@ -4,12 +4,12 @@ Source-of-truth instructions for coding agents in this repository.
 
 ## Project Scope
 
-Handy is a **Fedora Workstation + GNOME + Wayland** speech-to-text project with IBus integration.
+Dikt is a **Fedora Workstation + GNOME + Wayland** speech-to-text project with IBus integration.
 
 Targets in scope:
-- `handy` (GTK4/libadwaita preferences UI)
-- `handy --daemon` (recording/transcription D-Bus runtime)
-- `ibus-handy-engine` (IBus engine process)
+- `dikt` (GTK4/libadwaita preferences UI)
+- `dikt --daemon` (recording/transcription D-Bus runtime)
+- `ibus-dikt-engine` (IBus engine process)
 
 Out of scope unless explicitly requested:
 - Non-GNOME desktop support
@@ -54,14 +54,14 @@ cargo run --release
 cargo run --release -- --daemon
 
 # Run IBus engine (dev/testing)
-cargo run --release --bin ibus-handy-engine --features cli -- --ibus
+cargo run --release --bin ibus-dikt-engine --features cli -- --ibus
 ```
 
 ### Model bootstrap for development
 
 ```bash
 mkdir -p resources/models
-curl -o resources/models/silero_vad_v4.onnx https://blob.handy.computer/silero_vad_v4.onnx
+curl -o resources/models/silero_vad_v4.onnx https://github.com/rohithmahesh3/Dikt/releases/download/models/silero_vad_v4.onnx
 ```
 
 ## Packaging Workflow
@@ -73,8 +73,8 @@ RPM build entrypoint:
 ```
 
 `build-rpm.sh` generates these files from templates at build time:
-- `packaging/fedora/ibus-handy.spec` from `packaging/fedora/ibus-handy.spec.in`
-- `packaging/fedora/handy.xml` from `packaging/fedora/handy.xml.in`
+- `packaging/fedora/ibus-dikt.spec` from `packaging/fedora/ibus-dikt.spec.in`
+- `packaging/fedora/dikt.xml` from `packaging/fedora/dikt.xml.in`
 
 Generated files are not intended to be committed.
 
@@ -82,16 +82,16 @@ Generated files are not intended to be committed.
 
 ### Process model
 
-- `handy`: preferences UI only.
-- `handy --daemon`: owns recording state, transcription, D-Bus API, global toggle shortcut runtime, evdev keyboard monitoring.
-- `ibus-handy-engine`: IBus callbacks and commit path to focused app.
+- `dikt`: preferences UI only.
+- `dikt --daemon`: owns recording state, transcription, D-Bus API, global toggle shortcut runtime, evdev keyboard monitoring.
+- `ibus-dikt-engine`: IBus callbacks and commit path to focused app.
 
 ### D-Bus contract
 
 Service:
-- Bus: `com.handy.Transcription`
-- Path: `/com/handy/Transcription`
-- Interface: `com.handy.Transcription`
+- Bus: `io.dikt.Transcription`
+- Path: `/io/dikt/Transcription`
+- Interface: `io.dikt.Transcription`
 
 Methods:
 - `StartRecordingSessionForTarget(u64 target_engine_id) -> (u64 session_id, string claim_token)`
@@ -119,7 +119,7 @@ Signals:
 
 ### Pending commit handoff
 
-`HandyState` stores final transcripts in a bounded `pending_commit` queue consumed via
+`DiktState` stores final transcripts in a bounded `pending_commit` queue consumed via
 `TakePendingCommitForSession`.
 
 Important behavior:
@@ -132,7 +132,7 @@ Important behavior:
 
 ### Shortcut behavior
 
-Handy uses a global press-to-toggle dictation shortcut.
+Dikt uses a global press-to-toggle dictation shortcut.
 
 Settings keys used for the global shortcut:
 - `dictation-shortcut-keyval` (GDK keyval stored in GSettings)
@@ -142,7 +142,7 @@ Global toggle flow uses **evdev** (`src/global_shortcuts.rs`):
 1. Discover keyboard devices in `/dev/input/event*`, open event streams.
 2. Resolve GDK keyval+modifiers to evdev keycodes (`src/key_mapping.rs`).
 3. On press while idle:
-   - switch to Handy engine (verified),
+   - switch to Dikt engine (verified),
    - verify focused-context activation via daemon `GetFocusedEngine`,
    - call `StartRecordingSessionForTarget(focused_engine_id)` and store `(session_id, claim_token)`.
 4. On next press while recording:
@@ -158,7 +158,7 @@ Global toggle flow uses **evdev** (`src/global_shortcuts.rs`):
 This architecture intentionally avoids autoswitch restore races.
 
 This approach requires read access to `/dev/input/event*` devices. A udev rule
-(`packaging/fedora/90-handy-input.rules`) ensures `uaccess` for the active desktop user.
+(`packaging/fedora/90-dikt-input.rules`) ensures `uaccess` for the active desktop user.
 
 ## Critical Constraints
 
@@ -182,7 +182,7 @@ This approach requires read access to `/dev/input/event*` devices. A udev rule
 
 ## Settings and Feature Notes
 
-Schema file: `data/com.handy.Transcription.gschema.xml`.
+Schema file: `data/io.dikt.Transcription.gschema.xml`.
 
 Current active behavior:
 - Toggle dictation recording
@@ -205,7 +205,7 @@ IBus and toggle path:
 - `src/key_mapping.rs`
 - `src/ibus_engine/context.rs`
 - `src/ibus_control.rs`
-- `src/bin/ibus-handy-engine.rs`
+- `src/bin/ibus-dikt-engine.rs`
 - `ibus-sys/wrapper.c`
 - `ibus-sys/wrapper.h`
 
@@ -225,11 +225,11 @@ UI:
 
 Packaging:
 - `build-rpm.sh`
-- `packaging/fedora/ibus-handy.spec.in`
-- `packaging/fedora/handy.xml.in`
-- `packaging/fedora/handy.service`
-- `packaging/fedora/com.handy.Transcription.service`
-- `packaging/fedora/90-handy-input.rules`
+- `packaging/fedora/ibus-dikt.spec.in`
+- `packaging/fedora/dikt.xml.in`
+- `packaging/fedora/dikt.service`
+- `packaging/fedora/io.dikt.Transcription.service`
+- `packaging/fedora/90-dikt-input.rules`
 
 ## Definition of Done for Agent Changes
 

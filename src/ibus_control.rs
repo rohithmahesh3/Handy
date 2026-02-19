@@ -4,23 +4,23 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use ibus_sys::{
-    gboolean, gchar, ibus_handy_daemon_get_global_engine_name, ibus_handy_daemon_set_global_engine,
+    gboolean, gchar, ibus_dikt_daemon_get_global_engine_name, ibus_dikt_daemon_set_global_engine,
 };
 
-pub const HANDY_ENGINE_NAME: &str = "handy";
-const HANDY_ENGINE_FALLBACK_NAME: &str = "other:handy";
+pub const DIKT_ENGINE_NAME: &str = "dikt";
+const DIKT_ENGINE_FALLBACK_NAME: &str = "other:dikt";
 const ENGINE_SWITCH_POLL_MS: u64 = 20;
 
 fn engine_matches_target(current: &str, target: &str) -> bool {
-    if is_handy_engine(target) {
-        is_handy_engine(current)
+    if is_dikt_engine(target) {
+        is_dikt_engine(current)
     } else {
         current == target
     }
 }
 
 pub fn get_current_engine() -> Result<String> {
-    let engine_ptr = unsafe { ibus_handy_daemon_get_global_engine_name() };
+    let engine_ptr = unsafe { ibus_dikt_daemon_get_global_engine_name() };
     if engine_ptr.is_null() {
         return Err(anyhow!("IBus returned empty global engine"));
     }
@@ -49,7 +49,7 @@ pub fn set_global_engine(engine_name: &str) -> Result<()> {
         .map_err(|e| anyhow!("Invalid engine name '{}': {}", engine_name, e))?;
 
     let result: gboolean =
-        unsafe { ibus_handy_daemon_set_global_engine(c_engine.as_ptr() as *const gchar) };
+        unsafe { ibus_dikt_daemon_set_global_engine(c_engine.as_ptr() as *const gchar) };
     if result == ibus_sys::TRUE {
         Ok(())
     } else {
@@ -60,20 +60,20 @@ pub fn set_global_engine(engine_name: &str) -> Result<()> {
     }
 }
 
-pub fn is_handy_engine(engine_name: &str) -> bool {
-    engine_name == HANDY_ENGINE_NAME || engine_name.ends_with(":handy")
+pub fn is_dikt_engine(engine_name: &str) -> bool {
+    engine_name == DIKT_ENGINE_NAME || engine_name.ends_with(":dikt")
 }
 
-pub fn switch_to_handy_engine_verified(timeout_ms: u64) -> Result<String> {
+pub fn switch_to_dikt_engine_verified(timeout_ms: u64) -> Result<String> {
     if let Ok(engine) = get_current_engine() {
-        if is_handy_engine(&engine) {
+        if is_dikt_engine(&engine) {
             return Ok(engine);
         }
     }
 
     let mut attempts = Vec::new();
 
-    for candidate in [HANDY_ENGINE_NAME, HANDY_ENGINE_FALLBACK_NAME] {
+    for candidate in [DIKT_ENGINE_NAME, DIKT_ENGINE_FALLBACK_NAME] {
         match switch_engine_verified(candidate, timeout_ms) {
             Ok(engine) => return Ok(engine),
             Err(e) => attempts.push(format!("{} ({})", candidate, e)),
@@ -81,7 +81,7 @@ pub fn switch_to_handy_engine_verified(timeout_ms: u64) -> Result<String> {
     }
 
     Err(anyhow!(
-        "Failed to switch to Handy input source with confirmation. Tried: {}",
+        "Failed to switch to Dikt input source with confirmation. Tried: {}",
         attempts.join(", ")
     ))
 }

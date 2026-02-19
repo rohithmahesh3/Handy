@@ -16,7 +16,7 @@ impl MainWindow {
     pub fn new(app: &AdwApplication, state: Arc<AppState>) -> Self {
         let window = ApplicationWindow::builder()
             .application(app)
-            .title("Handy")
+            .title("Dikt")
             .default_width(960)
             .default_height(680)
             .build();
@@ -30,7 +30,7 @@ impl MainWindow {
             .hexpand(true)
             .build();
 
-        let window_title = WindowTitle::new("Handy", "General");
+        let window_title = WindowTitle::new("Dikt", "General");
         let header = HeaderBar::builder().title_widget(&window_title).build();
         content_box.append(&header);
 

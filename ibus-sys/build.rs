@@ -37,8 +37,8 @@ fn main() {
         build.include(path);
     }
 
-    build.define("PKGDATADIR", Some("\"/usr/share/handy\""));
-    build.compile("ibus_handy_wrapper");
+    build.define("PKGDATADIR", Some("\"/usr/share/dikt\""));
+    build.compile("ibus_dikt_wrapper");
 
     println!("cargo:rustc-link-lib=ibus-1.0");
     println!("cargo:rustc-link-lib=glib-2.0");
@@ -56,10 +56,10 @@ fn extract_version() {
             let start = trimmed.find('"').unwrap_or(0) + 1;
             let end = trimmed.rfind('"').unwrap_or(trimmed.len());
             let version = &trimmed[start..end];
-            println!("cargo:rustc-env=HANDY_VERSION={}", version);
+            println!("cargo:rustc-env=DIKT_VERSION={}", version);
             return;
         }
     }
 
-    println!("cargo:rustc-env=HANDY_VERSION=unknown");
+    println!("cargo:rustc-env=DIKT_VERSION=unknown");
 }

@@ -1,12 +1,12 @@
 [Unit]
-Description=Handy Speech-to-Text Service
+Description=Dikt Speech-to-Text Service
 After=graphical-session.target
 Requires=graphical-session.target
 
 [Service]
 Type=dbus
-BusName=com.handy.Transcription
-ExecStart=/usr/bin/handy --daemon
+BusName=io.dikt.Transcription
+ExecStart=/usr/bin/dikt --daemon
 Restart=on-failure
 RestartSec=5
 

@@ -18,9 +18,9 @@ pub struct AdvancedPage {
     container: ScrolledWindow,
 }
 
-const HANDY_BUS_NAME: &str = "com.handy.Transcription";
-const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
-const HANDY_INTERFACE: &str = "com.handy.Transcription";
+const DIKT_BUS_NAME: &str = "io.dikt.Transcription";
+const DIKT_OBJECT_PATH: &str = "/io/dikt/Transcription";
+const DIKT_INTERFACE: &str = "io.dikt.Transcription";
 
 impl AdvancedPage {
     pub fn new(state: &Arc<AppState>) -> Self {
@@ -151,7 +151,7 @@ impl AdvancedPage {
 
         let help_row = ActionRow::builder()
             .title("Recovery Hint")
-            .subtitle("If unhealthy, ensure the Handy daemon is running and your user has access to /dev/input.")
+            .subtitle("If unhealthy, ensure the Dikt daemon is running and your user has access to /dev/input.")
             .build();
         diagnostics_group.add(&help_row);
 
@@ -272,9 +272,9 @@ fn load_toggle_diagnostics_subtitle() -> String {
     };
 
     let verbose_reply = conn.call_method(
-        Some(HANDY_BUS_NAME),
-        HANDY_OBJECT_PATH,
-        Some(HANDY_INTERFACE),
+        Some(DIKT_BUS_NAME),
+        DIKT_OBJECT_PATH,
+        Some(DIKT_INTERFACE),
         "GetToggleDiagnosticsVerbose",
         &(),
     );
@@ -316,8 +316,8 @@ fn load_toggle_diagnostics_subtitle() -> String {
             .get("bind_fail_count")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        let press_while_handy_count = diagnostics
-            .get("press_while_handy_count")
+        let press_while_dikt_count = diagnostics
+            .get("press_while_dikt_count")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
         let stop_timeout_fallback_count = diagnostics
@@ -367,9 +367,9 @@ fn load_toggle_diagnostics_subtitle() -> String {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         if let Ok(reply) = conn.call_method(
-            Some(HANDY_BUS_NAME),
-            HANDY_OBJECT_PATH,
-            Some(HANDY_INTERFACE),
+            Some(DIKT_BUS_NAME),
+            DIKT_OBJECT_PATH,
+            Some(DIKT_INTERFACE),
             "GetPendingCommitStats",
             &(),
         ) {
@@ -473,7 +473,7 @@ fn load_toggle_diagnostics_subtitle() -> String {
         }
 
         return format!(
-            "Unhealthy ({}) | {} | state={} | start_fail={} | stop_fail={} | focused_engine_id={} | switch={} | pending_commit={} | dbus={} | bind_failures={} press_while_handy={} stop_timeouts={}",
+            "Unhealthy ({}) | {} | state={} | start_fail={} | stop_fail={} | focused_engine_id={} | switch={} | pending_commit={} | dbus={} | bind_failures={} press_while_dikt={} stop_timeouts={}",
             code,
             message,
             current_state,
@@ -484,15 +484,15 @@ fn load_toggle_diagnostics_subtitle() -> String {
             pending_commit_suffix,
             dbus_suffix,
             bind_fail_count,
-            press_while_handy_count,
+            press_while_dikt_count,
             stop_timeout_fallback_count
         );
     }
 
     let reply = match conn.call_method(
-        Some(HANDY_BUS_NAME),
-        HANDY_OBJECT_PATH,
-        Some(HANDY_INTERFACE),
+        Some(DIKT_BUS_NAME),
+        DIKT_OBJECT_PATH,
+        Some(DIKT_INTERFACE),
         "GetToggleDiagnostics",
         &(),
     ) {
@@ -515,7 +515,7 @@ fn load_toggle_diagnostics_subtitle() -> String {
         listener_session_ok,
         shortcut_bound,
         bind_fail_count,
-        press_while_handy_count,
+        press_while_dikt_count,
         stop_timeout_fallback_count,
     ) = diagnostics;
 
@@ -542,8 +542,8 @@ fn load_toggle_diagnostics_subtitle() -> String {
         }
     } else {
         format!(
-            "Unhealthy ({}) | {} | bind_failures={} press_while_handy={} stop_timeouts={}",
-            code, message, bind_fail_count, press_while_handy_count, stop_timeout_fallback_count
+            "Unhealthy ({}) | {} | bind_failures={} press_while_dikt={} stop_timeouts={}",
+            code, message, bind_fail_count, press_while_dikt_count, stop_timeout_fallback_count
         )
     }
 }

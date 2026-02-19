@@ -1,10 +1,10 @@
 use std::process::Command;
 
-pub fn open_handy_ui(_preferred_page: Option<&str>) -> Result<(), String> {
+pub fn open_dikt_ui(_preferred_page: Option<&str>) -> Result<(), String> {
     let launch_attempts: [(&str, &[&str]); 3] = [
-        ("gtk-launch", &["com.handy.Handy"]),
-        ("handy", &[]),
-        ("/usr/bin/handy", &[]),
+        ("gtk-launch", &["io.dikt.Dikt"]),
+        ("dikt", &[]),
+        ("/usr/bin/dikt", &[]),
     ];
 
     let mut errors = Vec::new();
@@ -16,7 +16,7 @@ pub fn open_handy_ui(_preferred_page: Option<&str>) -> Result<(), String> {
     }
 
     Err(format!(
-        "Unable to launch Handy UI. Attempted: {}",
+        "Unable to launch Dikt UI. Attempted: {}",
         errors.join(" | ")
     ))
 }

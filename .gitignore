@@ -32,5 +32,5 @@ recording_*
 *.tar.gz
 
 # Generated files
-packaging/fedora/ibus-handy.spec
-packaging/fedora/handy.xml
+packaging/fedora/ibus-dikt.spec
+packaging/fedora/dikt.xml

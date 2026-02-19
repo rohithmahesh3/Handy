@@ -8,7 +8,7 @@ use log::{debug, error, info, warn};
 use notify_rust::Notification;
 use zbus::blocking::Connection;
 
-use crate::utils::launch::open_handy_ui;
+use crate::utils::launch::open_dikt_ui;
 
 /// Owned reference to IBusEngine used by the command timer.
 /// We hold an explicit GObject ref while the engine is active to prevent
@@ -49,9 +49,9 @@ struct SessionClaim {
     claim_token: String,
 }
 
-const HANDY_BUS_NAME: &str = "com.handy.Transcription";
-const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
-const HANDY_INTERFACE: &str = "com.handy.Transcription";
+const DIKT_BUS_NAME: &str = "io.dikt.Transcription";
+const DIKT_OBJECT_PATH: &str = "/io/dikt/Transcription";
+const DIKT_INTERFACE: &str = "io.dikt.Transcription";
 const PENDING_COMMIT_POLL_MS: u64 = 60;
 const PENDING_COMMIT_FAILURE_RECONNECT_THRESHOLD: u64 = 5;
 const LIVE_PREEDIT_POLL_TICKS: u64 = 4;
@@ -243,7 +243,7 @@ fn drain_engine_commands_for_disable(engine: *mut IBusEngine, engine_id: u64) ->
     commits.len()
 }
 
-pub struct HandyContext {
+pub struct DiktContext {
     connection: Option<Connection>,
     is_focused: bool,
     is_enabled: bool,
@@ -253,7 +253,7 @@ pub struct HandyContext {
     last_session_claim: Arc<Mutex<Option<SessionClaim>>>,
 }
 
-impl HandyContext {
+impl DiktContext {
     pub fn new() -> Self {
         Self {
             connection: None,
@@ -332,28 +332,28 @@ impl HandyContext {
                     Ok(conn) => conn,
                     Err(e) => {
                         warn!("Failed to open D-Bus session for GetState: {}", e);
-                        HandyContext::show_service_notification();
+                        DiktContext::show_service_notification();
                         return;
                     }
                 };
 
                 match conn.call_method(
-                    Some(HANDY_BUS_NAME),
-                    HANDY_OBJECT_PATH,
-                    Some(HANDY_INTERFACE),
+                    Some(DIKT_BUS_NAME),
+                    DIKT_OBJECT_PATH,
+                    Some(DIKT_INTERFACE),
                     "GetState",
                     &(),
                 ) {
                     Ok(reply) => {
                         if let Ok((_, has_model)) = reply.body().deserialize::<(bool, bool)>() {
                             if !has_model {
-                                HandyContext::show_model_notification();
+                                DiktContext::show_model_notification();
                             }
                         }
                     }
                     Err(e) => {
                         warn!("Failed to get state from daemon: {}", e);
-                        HandyContext::show_service_notification();
+                        DiktContext::show_service_notification();
                     }
                 }
             });
@@ -405,9 +405,9 @@ impl HandyContext {
                 poll_tick = poll_tick.wrapping_add(1);
 
                 let active_reply = conn.call_method(
-                    Some(HANDY_BUS_NAME),
-                    HANDY_OBJECT_PATH,
-                    Some(HANDY_INTERFACE),
+                    Some(DIKT_BUS_NAME),
+                    DIKT_OBJECT_PATH,
+                    Some(DIKT_INTERFACE),
                     "GetActiveSessionForEngine",
                     &(engine_id,),
                 );
@@ -491,9 +491,9 @@ impl HandyContext {
                     && poll_tick.is_multiple_of(LIVE_PREEDIT_POLL_TICKS)
                 {
                     match conn.call_method(
-                        Some(HANDY_BUS_NAME),
-                        HANDY_OBJECT_PATH,
-                        Some(HANDY_INTERFACE),
+                        Some(DIKT_BUS_NAME),
+                        DIKT_OBJECT_PATH,
+                        Some(DIKT_INTERFACE),
                         "GetLivePreeditForSession",
                         &(active_session_id, active_claim_token.clone()),
                     ) {
@@ -562,9 +562,9 @@ impl HandyContext {
                 }
 
                 let reply = conn.call_method(
-                    Some(HANDY_BUS_NAME),
-                    HANDY_OBJECT_PATH,
-                    Some(HANDY_INTERFACE),
+                    Some(DIKT_BUS_NAME),
+                    DIKT_OBJECT_PATH,
+                    Some(DIKT_INTERFACE),
                     "TakePendingCommitForSession",
                     &(active_session_id, active_claim_token.clone()),
                 );
@@ -663,9 +663,9 @@ impl HandyContext {
             };
 
             if let Err(e) = conn.call_method(
-                Some(HANDY_BUS_NAME),
-                HANDY_OBJECT_PATH,
-                Some(HANDY_INTERFACE),
+                Some(DIKT_BUS_NAME),
+                DIKT_OBJECT_PATH,
+                Some(DIKT_INTERFACE),
                 "SetFocusedEngine",
                 &(engine_id, focused),
             ) {
@@ -682,7 +682,7 @@ impl HandyContext {
 
         std::thread::spawn(|| {
             let notification = Notification::new()
-                .summary("Handy Speech-to-Text")
+                .summary("Dikt Speech-to-Text")
                 .body("No speech model configured. Click to open preferences.")
                 .timeout(notify_rust::Timeout::Never)
                 .action("default", "Open Preferences")
@@ -692,9 +692,9 @@ impl HandyContext {
                 Ok(handle) => {
                     handle.wait_for_action(|action| {
                         if action == "default" || action == "clicked" {
-                            info!("Notification clicked, opening Handy GUI");
-                            if let Err(e) = open_handy_ui(None) {
-                                error!("Failed to spawn handy: {}", e);
+                            info!("Notification clicked, opening Dikt GUI");
+                            if let Err(e) = open_dikt_ui(None) {
+                                error!("Failed to spawn dikt: {}", e);
                             }
                         }
                     });
@@ -711,8 +711,8 @@ impl HandyContext {
 
         std::thread::spawn(|| {
             let notification = Notification::new()
-                .summary("Handy Speech-to-Text")
-                .body("Handy service is not running. Click to open preferences and start it.")
+                .summary("Dikt Speech-to-Text")
+                .body("Dikt service is not running. Click to open preferences and start it.")
                 .timeout(notify_rust::Timeout::Never)
                 .action("default", "Open Preferences")
                 .show();
@@ -721,9 +721,9 @@ impl HandyContext {
                 Ok(handle) => {
                     handle.wait_for_action(|action| {
                         if action == "default" || action == "clicked" {
-                            info!("Service notification clicked, opening Handy GUI");
-                            if let Err(e) = open_handy_ui(None) {
-                                error!("Failed to spawn handy: {}", e);
+                            info!("Service notification clicked, opening Dikt GUI");
+                            if let Err(e) = open_dikt_ui(None) {
+                                error!("Failed to spawn dikt: {}", e);
                             }
                         }
                     });
@@ -797,9 +797,9 @@ impl HandyContext {
                 .ok()
                 .and_then(|conn| {
                     conn.call_method(
-                        Some(HANDY_BUS_NAME),
-                        HANDY_OBJECT_PATH,
-                        Some(HANDY_INTERFACE),
+                        Some(DIKT_BUS_NAME),
+                        DIKT_OBJECT_PATH,
+                        Some(DIKT_INTERFACE),
                         "TakePendingCommitForSession",
                         &(session_claim.session_id, session_claim.claim_token.clone()),
                     )
@@ -899,11 +899,11 @@ fn commit_text_to_engine(engine: *mut IBusEngine, text: &str) {
     }
 }
 
-pub type SharedContext = Arc<Mutex<HandyContext>>;
+pub type SharedContext = Arc<Mutex<DiktContext>>;
 
 #[allow(clippy::arc_with_non_send_sync)]
 pub fn create_context() -> SharedContext {
-    Arc::new(Mutex::new(HandyContext::new()))
+    Arc::new(Mutex::new(DiktContext::new()))
 }
 
 unsafe extern "C" fn process_key_event_callback(
@@ -916,7 +916,7 @@ unsafe extern "C" fn process_key_event_callback(
     if context.is_null() || engine.is_null() {
         return 0;
     }
-    let context = &*(context as *const Mutex<HandyContext>);
+    let context = &*(context as *const Mutex<DiktContext>);
     if let Ok(mut ctx) = context.lock() {
         ctx.process_key_event(engine, keyval, keycode, modifiers)
     } else {
@@ -928,7 +928,7 @@ unsafe extern "C" fn focus_in_callback(context: *mut c_void, engine: *mut IBusEn
     if context.is_null() || engine.is_null() {
         return;
     }
-    let context = &*(context as *const Mutex<HandyContext>);
+    let context = &*(context as *const Mutex<DiktContext>);
     if let Ok(mut ctx) = context.lock() {
         ctx.focus_in(engine);
     }
@@ -938,7 +938,7 @@ unsafe extern "C" fn focus_out_callback(context: *mut c_void, engine: *mut IBusE
     if context.is_null() || engine.is_null() {
         return;
     }
-    let context = &*(context as *const Mutex<HandyContext>);
+    let context = &*(context as *const Mutex<DiktContext>);
     if let Ok(mut ctx) = context.lock() {
         ctx.focus_out(engine);
     }
@@ -948,7 +948,7 @@ unsafe extern "C" fn reset_callback(context: *mut c_void, engine: *mut IBusEngin
     if context.is_null() || engine.is_null() {
         return;
     }
-    let context = &*(context as *const Mutex<HandyContext>);
+    let context = &*(context as *const Mutex<DiktContext>);
     if let Ok(mut ctx) = context.lock() {
         ctx.reset(engine);
     }
@@ -958,7 +958,7 @@ unsafe extern "C" fn enable_callback(context: *mut c_void, engine: *mut IBusEngi
     if context.is_null() || engine.is_null() {
         return;
     }
-    let context = &*(context as *const Mutex<HandyContext>);
+    let context = &*(context as *const Mutex<DiktContext>);
     if let Ok(mut ctx) = context.lock() {
         ctx.enable(engine);
     }
@@ -968,14 +968,14 @@ unsafe extern "C" fn disable_callback(context: *mut c_void, engine: *mut IBusEng
     if context.is_null() || engine.is_null() {
         return;
     }
-    let context = &*(context as *const Mutex<HandyContext>);
+    let context = &*(context as *const Mutex<DiktContext>);
     if let Ok(mut ctx) = context.lock() {
         ctx.disable(engine);
     }
 }
 
 extern "C" {
-    fn ibus_handy_set_callback(
+    fn ibus_dikt_set_callback(
         ctx: *mut c_void,
         key_event_cb: unsafe extern "C" fn(
             *mut c_void,
@@ -994,7 +994,7 @@ extern "C" {
 
 pub fn init(context: &SharedContext) {
     unsafe {
-        ibus_handy_set_callback(
+        ibus_dikt_set_callback(
             Arc::as_ptr(context) as *mut c_void,
             process_key_event_callback,
             focus_in_callback,
