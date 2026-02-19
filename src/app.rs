@@ -163,6 +163,38 @@ fn wire_settings_sync(state: &Arc<RuntimeState>, handy_state: &Arc<HandyState>) 
             }
         });
 
+    state
+        .settings
+        .connect_changed(Some("inference-device-policy"), {
+            let settings = state.settings.clone();
+            let tm = state.transcription_manager.clone();
+            move |_| {
+                if let Err(e) = tm.unload_model() {
+                    log::error!(
+                        "Failed to unload model after inference policy change: {}",
+                        e
+                    );
+                }
+                tm.refresh_config_from_settings(&settings);
+            }
+        });
+
+    state
+        .settings
+        .connect_changed(Some("inference-gpu-device-id"), {
+            let settings = state.settings.clone();
+            let tm = state.transcription_manager.clone();
+            move |_| {
+                if let Err(e) = tm.unload_model() {
+                    log::error!(
+                        "Failed to unload model after inference GPU device change: {}",
+                        e
+                    );
+                }
+                tm.refresh_config_from_settings(&settings);
+            }
+        });
+
     state.settings.connect_changed(Some("selected-model"), {
         let settings = state.settings.clone();
         let model_manager = state.model_manager.clone();

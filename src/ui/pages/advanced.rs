@@ -1,10 +1,14 @@
 use gtk4::prelude::*;
-use gtk4::{Align, Box, ComboBoxText, Orientation, PolicyType, ScrolledWindow, Switch, Widget};
+use gtk4::{
+    Align, Box, ComboBoxText, Orientation, PolicyType, ScrolledWindow, SpinButton, Switch, Widget,
+};
 use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt};
 use libadwaita::{ActionRow, Clamp, PreferencesGroup};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use transcribe_rs::onnx_execution::detect_onnx_execution_capabilities;
 use zbus::blocking::Connection;
 
 use super::Page;
@@ -12,7 +16,7 @@ use crate::app::AppState;
 use crate::global_shortcuts::{
     authorize_shortcut_interactively_from_ui, request_shortcut_listener_rebind,
 };
-use crate::settings::ModelUnloadTimeout;
+use crate::settings::{InferenceDevicePolicy, ModelUnloadTimeout};
 
 pub struct AdvancedPage {
     container: ScrolledWindow,
@@ -78,6 +82,93 @@ impl AdvancedPage {
         });
         timeout_row.add_suffix(&timeout_combo);
         model_group.add(&timeout_row);
+
+        let inference_row = ActionRow::builder()
+            .title("Inference Device")
+            .subtitle("Controls ONNX model execution backend")
+            .build();
+
+        let inference_combo = ComboBoxText::new();
+        let inference_options = [
+            (InferenceDevicePolicy::Auto, "Auto (Recommended)"),
+            (InferenceDevicePolicy::Cpu, "CPU Only"),
+            (InferenceDevicePolicy::Gpu, "GPU Preferred"),
+        ];
+        let mut inference_index = 0_u32;
+        let current_inference_policy = state.settings.inference_device_policy();
+        for (idx, (policy, label)) in inference_options.iter().enumerate() {
+            inference_combo.append(Some(&idx.to_string()), label);
+            if *policy == current_inference_policy {
+                inference_index = idx as u32;
+            }
+        }
+        inference_combo.set_active(Some(inference_index));
+        inference_row.add_suffix(&inference_combo);
+        model_group.add(&inference_row);
+
+        let gpu_device_row = ActionRow::builder()
+            .title("GPU Device ID")
+            .subtitle("Used when GPU is preferred")
+            .build();
+        let gpu_device_spin = SpinButton::with_range(0.0, 31.0, 1.0);
+        gpu_device_spin.set_valign(Align::Center);
+        gpu_device_spin.set_value(state.settings.inference_gpu_device_id() as f64);
+        gpu_device_spin.set_sensitive(current_inference_policy != InferenceDevicePolicy::Cpu);
+        gpu_device_row.add_suffix(&gpu_device_spin);
+        model_group.add(&gpu_device_row);
+
+        let inference_runtime_row = ActionRow::builder()
+            .title("Inference Runtime")
+            .subtitle(build_inference_runtime_subtitle(
+                state.settings.inference_device_policy(),
+                state.settings.inference_gpu_device_id(),
+            ))
+            .build();
+        let inference_refresh_button = gtk4::Button::with_label("Rescan");
+        inference_refresh_button.add_css_class("flat");
+        let inference_runtime_row_for_refresh = inference_runtime_row.clone();
+        let state_for_refresh = state.clone();
+        inference_refresh_button.connect_clicked(move |_| {
+            inference_runtime_row_for_refresh.set_subtitle(&build_inference_runtime_subtitle(
+                state_for_refresh.settings.inference_device_policy(),
+                state_for_refresh.settings.inference_gpu_device_id(),
+            ));
+        });
+        inference_runtime_row.add_suffix(&inference_refresh_button);
+        model_group.add(&inference_runtime_row);
+
+        let state_clone = state.clone();
+        let gpu_device_spin_for_policy = gpu_device_spin.clone();
+        let inference_runtime_row_for_policy = inference_runtime_row.clone();
+        inference_combo.connect_changed(move |combo| {
+            if let Some(id) = combo.active_id() {
+                if let Ok(idx) = id.parse::<usize>() {
+                    if idx < inference_options.len() {
+                        let policy = inference_options[idx].0;
+                        state_clone.settings.set_inference_device_policy(policy);
+                        gpu_device_spin_for_policy
+                            .set_sensitive(policy != InferenceDevicePolicy::Cpu);
+                        inference_runtime_row_for_policy.set_subtitle(
+                            &build_inference_runtime_subtitle(
+                                policy,
+                                state_clone.settings.inference_gpu_device_id(),
+                            ),
+                        );
+                    }
+                }
+            }
+        });
+
+        let state_clone = state.clone();
+        let inference_runtime_row_for_gpu = inference_runtime_row.clone();
+        gpu_device_spin.connect_value_changed(move |spin| {
+            let value = spin.value() as i32;
+            state_clone.settings.set_inference_gpu_device_id(value);
+            inference_runtime_row_for_gpu.set_subtitle(&build_inference_runtime_subtitle(
+                state_clone.settings.inference_device_policy(),
+                value,
+            ));
+        });
 
         main_box.append(&model_group);
 
@@ -546,4 +637,72 @@ fn load_toggle_diagnostics_subtitle() -> String {
             code, message, bind_fail_count, press_while_handy_count, stop_timeout_fallback_count
         )
     }
+}
+
+fn build_inference_runtime_subtitle(policy: InferenceDevicePolicy, gpu_device_id: i32) -> String {
+    let caps = detect_onnx_execution_capabilities();
+    let detected_gpus = detect_nvidia_gpus();
+    let detected_gpu_text = if detected_gpus.is_empty() {
+        "no CUDA GPUs detected".to_string()
+    } else {
+        format!("detected {}", detected_gpus.join(", "))
+    };
+
+    match policy {
+        InferenceDevicePolicy::Cpu => format!(
+            "CPU only | CUDA provider={} | {}",
+            caps.cuda_available, detected_gpu_text
+        ),
+        InferenceDevicePolicy::Gpu => {
+            if caps.cuda_available {
+                format!(
+                    "GPU preferred (device {}) | CUDA provider=true | {}",
+                    gpu_device_id, detected_gpu_text
+                )
+            } else {
+                format!(
+                    "GPU preferred but ONNX Runtime CUDA provider is unavailable; CPU fallback | {}",
+                    detected_gpu_text
+                )
+            }
+        }
+        InferenceDevicePolicy::Auto => {
+            if caps.cuda_available {
+                format!(
+                    "Auto: GPU preferred (device {}) with CPU fallback | {}",
+                    gpu_device_id, detected_gpu_text
+                )
+            } else if detected_gpus.is_empty() {
+                "Auto: CPU fallback (no NVIDIA GPU detected)".to_string()
+            } else {
+                "Auto: CPU fallback (NVIDIA GPU found but ONNX Runtime CUDA provider unavailable)"
+                    .to_string()
+            }
+        }
+    }
+}
+
+fn detect_nvidia_gpus() -> Vec<String> {
+    let output = match Command::new("nvidia-smi")
+        .args(["--query-gpu=index,name", "--format=csv,noheader"])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(2, ',');
+            let index = parts.next()?.trim();
+            let name = parts.next()?.trim();
+            if index.is_empty() || name.is_empty() {
+                None
+            } else {
+                Some(format!("{}:{}", index, name))
+            }
+        })
+        .collect()
 }

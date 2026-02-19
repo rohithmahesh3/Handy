@@ -34,3 +34,4 @@ recording_*
 # Generated files
 packaging/fedora/ibus-handy.spec
 packaging/fedora/handy.xml
+data/gschemas.compiled

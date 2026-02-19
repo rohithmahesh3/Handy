@@ -42,7 +42,7 @@ futures-util = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 
 # Transcription
-transcribe-rs = { version = "0.2.3", features = ["whisper", "parakeet", "moonshine", "sense_voice"] }
+transcribe-rs = { path = "vendor/transcribe-rs", features = ["whisper", "parakeet", "moonshine", "sense_voice"] }
 vad-rs = { git = "https://github.com/cjpais/vad-rs", default-features = false }
 
 # D-Bus for IBus

@@ -1,6 +1,6 @@
 use crate::audio_toolkit::{apply_custom_words, filter_transcription_output};
 use crate::managers::model::{EngineType, ModelManager};
-use crate::settings::{ModelUnloadTimeout, Settings};
+use crate::settings::{InferenceDevicePolicy, ModelUnloadTimeout, Settings};
 use anyhow::Result;
 use log::{debug, error, info, warn};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -14,6 +14,7 @@ use transcribe_rs::{
         sense_voice::{SenseVoiceEngine, SenseVoiceModelParams},
         whisper::{WhisperEngine, WhisperInferenceParams},
     },
+    onnx_execution::{OnnxExecutionDevice, OnnxExecutionParams},
     TranscriptionEngine,
 };
 
@@ -39,6 +40,8 @@ pub struct TranscriptionConfig {
     pub translate_to_english: bool,
     pub custom_words: Vec<String>,
     pub word_correction_threshold: f64,
+    pub inference_device_policy: InferenceDevicePolicy,
+    pub inference_gpu_device_id: i32,
 }
 
 impl TranscriptionConfig {
@@ -49,6 +52,8 @@ impl TranscriptionConfig {
             translate_to_english: settings.translate_to_english(),
             custom_words: settings.custom_words(),
             word_correction_threshold: settings.word_correction_threshold(),
+            inference_device_policy: settings.inference_device_policy(),
+            inference_gpu_device_id: settings.inference_gpu_device_id(),
         }
     }
 }
@@ -216,8 +221,18 @@ impl TranscriptionManager {
             .get_model_path(model_id)
             .ok_or_else(|| anyhow::anyhow!("Model path not found"))?;
 
+        let onnx_execution = {
+            let config = self.shared.config.lock().unwrap();
+            Self::onnx_execution_params_from_config(&config)
+        };
+
         let loaded_engine = match model_info.engine_type {
             EngineType::Whisper => {
+                if matches!(onnx_execution.device, OnnxExecutionDevice::Gpu) {
+                    info!(
+                        "Whisper engine ignores ONNX GPU settings; using whisper backend defaults"
+                    );
+                }
                 let mut engine = WhisperEngine::new();
                 engine
                     .load_model(&model_path)
@@ -226,25 +241,28 @@ impl TranscriptionManager {
             }
             EngineType::Parakeet => {
                 let mut engine = ParakeetEngine::new();
+                let mut params = ParakeetModelParams::int8();
+                params.execution = onnx_execution.clone();
                 engine
-                    .load_model_with_params(&model_path, ParakeetModelParams::int8())
+                    .load_model_with_params(&model_path, params)
                     .map_err(|e| anyhow::anyhow!("Failed to load Parakeet model: {}", e))?;
                 LoadedEngine::Parakeet(engine)
             }
             EngineType::Moonshine => {
                 let mut engine = MoonshineEngine::new();
+                let mut params = MoonshineModelParams::variant(ModelVariant::Base);
+                params.execution = onnx_execution.clone();
                 engine
-                    .load_model_with_params(
-                        &model_path,
-                        MoonshineModelParams::variant(ModelVariant::Base),
-                    )
+                    .load_model_with_params(&model_path, params)
                     .map_err(|e| anyhow::anyhow!("Failed to load Moonshine model: {}", e))?;
                 LoadedEngine::Moonshine(engine)
             }
             EngineType::SenseVoice => {
                 let mut engine = SenseVoiceEngine::new();
+                let mut params = SenseVoiceModelParams::int8();
+                params.execution = onnx_execution;
                 engine
-                    .load_model_with_params(&model_path, SenseVoiceModelParams::int8())
+                    .load_model_with_params(&model_path, params)
                     .map_err(|e| anyhow::anyhow!("Failed to load SenseVoice model: {}", e))?;
                 LoadedEngine::SenseVoice(engine)
             }
@@ -316,9 +334,18 @@ impl TranscriptionManager {
 
             let model_path = model_path.unwrap();
             let model_info = model_info.unwrap();
+            let onnx_execution = {
+                let config = shared.config.lock().unwrap();
+                Self::onnx_execution_params_from_config(&config)
+            };
 
             let load_result: Result<LoadedEngine> = match model_info.engine_type {
                 EngineType::Whisper => {
+                    if matches!(onnx_execution.device, OnnxExecutionDevice::Gpu) {
+                        info!(
+                            "Whisper engine ignores ONNX GPU settings; using whisper backend defaults"
+                        );
+                    }
                     let mut engine = WhisperEngine::new();
                     if let Err(e) = engine.load_model(&model_path) {
                         Err(anyhow::anyhow!("Failed to load Whisper model: {}", e))
@@ -328,9 +355,9 @@ impl TranscriptionManager {
                 }
                 EngineType::Parakeet => {
                     let mut engine = ParakeetEngine::new();
-                    if let Err(e) =
-                        engine.load_model_with_params(&model_path, ParakeetModelParams::int8())
-                    {
+                    let mut params = ParakeetModelParams::int8();
+                    params.execution = onnx_execution.clone();
+                    if let Err(e) = engine.load_model_with_params(&model_path, params) {
                         Err(anyhow::anyhow!("Failed to load Parakeet model: {}", e))
                     } else {
                         Ok(LoadedEngine::Parakeet(engine))
@@ -338,10 +365,9 @@ impl TranscriptionManager {
                 }
                 EngineType::Moonshine => {
                     let mut engine = MoonshineEngine::new();
-                    if let Err(e) = engine.load_model_with_params(
-                        &model_path,
-                        MoonshineModelParams::variant(ModelVariant::Base),
-                    ) {
+                    let mut params = MoonshineModelParams::variant(ModelVariant::Base);
+                    params.execution = onnx_execution.clone();
+                    if let Err(e) = engine.load_model_with_params(&model_path, params) {
                         Err(anyhow::anyhow!("Failed to load Moonshine model: {}", e))
                     } else {
                         Ok(LoadedEngine::Moonshine(engine))
@@ -349,9 +375,9 @@ impl TranscriptionManager {
                 }
                 EngineType::SenseVoice => {
                     let mut engine = SenseVoiceEngine::new();
-                    if let Err(e) =
-                        engine.load_model_with_params(&model_path, SenseVoiceModelParams::int8())
-                    {
+                    let mut params = SenseVoiceModelParams::int8();
+                    params.execution = onnx_execution;
+                    if let Err(e) = engine.load_model_with_params(&model_path, params) {
                         Err(anyhow::anyhow!("Failed to load SenseVoice model: {}", e))
                     } else {
                         Ok(LoadedEngine::SenseVoice(engine))
@@ -540,6 +566,19 @@ impl TranscriptionManager {
                 None
             }
         })
+    }
+
+    fn onnx_execution_params_from_config(config: &TranscriptionConfig) -> OnnxExecutionParams {
+        let device = match config.inference_device_policy {
+            InferenceDevicePolicy::Auto => OnnxExecutionDevice::Auto,
+            InferenceDevicePolicy::Cpu => OnnxExecutionDevice::Cpu,
+            InferenceDevicePolicy::Gpu => OnnxExecutionDevice::Gpu,
+        };
+        OnnxExecutionParams {
+            device,
+            gpu_device_id: config.inference_gpu_device_id.max(0),
+            allow_cpu_fallback: true,
+        }
     }
 }
 

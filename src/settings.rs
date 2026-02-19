@@ -64,6 +64,25 @@ impl ModelUnloadTimeout {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum InferenceDevicePolicy {
+    #[default]
+    Auto,
+    Cpu,
+    Gpu,
+}
+
+impl InferenceDevicePolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InferenceDevicePolicy::Auto => "auto",
+            InferenceDevicePolicy::Cpu => "cpu",
+            InferenceDevicePolicy::Gpu => "gpu",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LLMPrompt {
     pub id: String,
@@ -248,6 +267,30 @@ impl Settings {
         };
         self.gio_settings
             .set_enum("model-unload-timeout", value)
+            .ok();
+    }
+
+    pub fn inference_device_policy(&self) -> InferenceDevicePolicy {
+        match self.gio_settings.string("inference-device-policy").as_str() {
+            "cpu" => InferenceDevicePolicy::Cpu,
+            "gpu" => InferenceDevicePolicy::Gpu,
+            _ => InferenceDevicePolicy::Auto,
+        }
+    }
+
+    pub fn set_inference_device_policy(&self, policy: InferenceDevicePolicy) {
+        self.gio_settings
+            .set_string("inference-device-policy", policy.as_str())
+            .ok();
+    }
+
+    pub fn inference_gpu_device_id(&self) -> i32 {
+        self.gio_settings.int("inference-gpu-device-id")
+    }
+
+    pub fn set_inference_gpu_device_id(&self, value: i32) {
+        self.gio_settings
+            .set_int("inference-gpu-device-id", value.max(0))
             .ok();
     }
 

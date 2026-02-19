@@ -91,6 +91,17 @@
       <default>'never'</default>
       <summary>Time to keep model loaded in memory</summary>
     </key>
+
+    <key name="inference-device-policy" type="s">
+      <default>'auto'</default>
+      <summary>Inference execution policy: auto, cpu, or gpu</summary>
+    </key>
+
+    <key name="inference-gpu-device-id" type="i">
+      <default>0</default>
+      <range min="0" max="31"/>
+      <summary>Preferred GPU device id when GPU inference is selected</summary>
+    </key>
     
     <!-- Custom Words -->
     <key name="custom-words" type="as">
