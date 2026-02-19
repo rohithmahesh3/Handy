@@ -56,29 +56,35 @@ fn init_logging(settings: &Settings) -> Arc<Mutex<VecDeque<String>>> {
     buffer
 }
 
-fn init_ui_state() -> Arc<AppState> {
+fn init_ui_state() -> Result<Arc<AppState>, String> {
     let settings = Settings::new();
     let log_buffer = init_logging(&settings);
-    let model_manager = Arc::new(ModelManager::new().expect("Failed to initialize model manager"));
+    let model_manager = Arc::new(
+        ModelManager::new().map_err(|e| format!("Failed to initialize model manager: {}", e))?,
+    );
 
     #[allow(clippy::arc_with_non_send_sync)]
-    Arc::new(AppState {
+    Ok(Arc::new(AppState {
         settings,
         model_manager,
         log_buffer,
-    })
+    }))
 }
 
-fn init_runtime() -> (Arc<RuntimeState>, Arc<HandyState>) {
+fn init_runtime() -> Result<(Arc<RuntimeState>, Arc<HandyState>), String> {
     let settings = Settings::new();
     let log_buffer = init_logging(&settings);
 
-    let recording_manager =
-        Arc::new(AudioRecordingManager::new().expect("Failed to initialize recording manager"));
-    let model_manager = Arc::new(ModelManager::new().expect("Failed to initialize model manager"));
+    let recording_manager = Arc::new(
+        AudioRecordingManager::new()
+            .map_err(|e| format!("Failed to initialize recording manager: {}", e))?,
+    );
+    let model_manager = Arc::new(
+        ModelManager::new().map_err(|e| format!("Failed to initialize model manager: {}", e))?,
+    );
     let transcription_manager = Arc::new(
         TranscriptionManager::new(model_manager.clone())
-            .expect("Failed to initialize transcription manager"),
+            .map_err(|e| format!("Failed to initialize transcription manager: {}", e))?,
     );
 
     #[allow(clippy::arc_with_non_send_sync)]
@@ -98,7 +104,7 @@ fn init_runtime() -> (Arc<RuntimeState>, Arc<HandyState>) {
 
     wire_settings_sync(&state, &handy_state);
 
-    (state, handy_state)
+    Ok((state, handy_state))
 }
 
 fn wire_settings_sync(state: &Arc<RuntimeState>, handy_state: &Arc<HandyState>) {
@@ -107,7 +113,14 @@ fn wire_settings_sync(state: &Arc<RuntimeState>, handy_state: &Arc<HandyState>) 
         let handy_state = handy_state.clone();
         let tm = state.transcription_manager.clone();
         move |_| {
-            *handy_state.selected_language.lock().unwrap() = settings.selected_language();
+            match handy_state.selected_language.lock() {
+                Ok(mut selected_language) => {
+                    *selected_language = settings.selected_language();
+                }
+                Err(e) => {
+                    log::error!("Failed to update selected language from settings: {}", e);
+                }
+            }
             tm.refresh_config_from_settings(&settings);
         }
     });
@@ -261,10 +274,19 @@ fn wire_settings_sync(state: &Arc<RuntimeState>, handy_state: &Arc<HandyState>) 
 }
 
 pub fn run_ui() {
-    gtk4::init().expect("Failed to initialize GTK");
+    if let Err(e) = gtk4::init() {
+        eprintln!("Failed to initialize GTK: {}", e);
+        std::process::exit(1);
+    }
     let _ = libadwaita::init();
 
-    let state = init_ui_state();
+    let state = match init_ui_state() {
+        Ok(state) => state,
+        Err(e) => {
+            eprintln!("Failed to initialize Handy UI state: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     let app = AdwApplication::builder().application_id(UI_APP_ID).build();
 
@@ -280,7 +302,13 @@ pub fn run_ui() {
 pub fn run_daemon() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    let (_runtime_state, handy_state) = init_runtime();
+    let (_runtime_state, handy_state) = match init_runtime() {
+        Ok(state) => state,
+        Err(e) => {
+            eprintln!("Failed to initialize Handy daemon runtime: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     let context = glib::MainContext::default();
     match context.block_on(dbus::start_dbus_server(handy_state)) {

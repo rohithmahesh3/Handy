@@ -3,18 +3,45 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use ibus_sys::{g_object_unref, gboolean, gpointer, guint, IBusEngine};
+use ibus_sys::{g_object_ref, g_object_unref, gboolean, gpointer, guint, IBusEngine};
 use log::{debug, error, info, warn};
 use notify_rust::Notification;
 use zbus::blocking::Connection;
 
 use crate::utils::launch::open_handy_ui;
 
-/// Wrapper to make *mut IBusEngine Send-safe.
-/// This is safe because we ONLY access the pointer from the main thread
-/// via the timer callback, never from background threads.
-struct EnginePtr(*mut IBusEngine);
-unsafe impl Send for EnginePtr {}
+/// Owned reference to IBusEngine used by the command timer.
+/// We hold an explicit GObject ref while the engine is active to prevent
+/// use-after-free if callbacks race with engine teardown.
+#[derive(Debug)]
+struct EngineRef {
+    ptr: *mut IBusEngine,
+    engine_id: u64,
+}
+
+unsafe impl Send for EngineRef {}
+
+impl EngineRef {
+    fn new(ptr: *mut IBusEngine, engine_id: u64) -> Option<Self> {
+        if ptr.is_null() {
+            return None;
+        }
+        unsafe {
+            g_object_ref(ptr as gpointer);
+        }
+        Some(Self { ptr, engine_id })
+    }
+}
+
+impl Drop for EngineRef {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe {
+                g_object_unref(self.ptr as gpointer);
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct SessionClaim {
@@ -68,7 +95,7 @@ fn get_command_queue() -> &'static Mutex<CommandQueue> {
 
 /// Current engine pointer and ID, only accessed from main thread via timer callback.
 /// Set in enable(), cleared in disable().
-static CURRENT_ENGINE: Mutex<Option<(EnginePtr, u64)>> = Mutex::new(None);
+static CURRENT_ENGINE: Mutex<Option<EngineRef>> = Mutex::new(None);
 
 /// Ensures timer is only started once.
 static TIMER_STARTED: AtomicBool = AtomicBool::new(false);
@@ -91,7 +118,9 @@ unsafe extern "C" fn process_commands_callback(_data: gpointer) -> gboolean {
         Err(_) => return 1, // G_SOURCE_CONTINUE
     };
 
-    if let Some((EnginePtr(engine_ptr), current_engine_id)) = *engine_guard {
+    if let Some(engine_ref) = engine_guard.as_ref() {
+        let engine_ptr = engine_ref.ptr;
+        let current_engine_id = engine_ref.engine_id;
         for cmd in commands {
             match cmd {
                 EngineCommand::UpdatePreedit {
@@ -281,7 +310,9 @@ impl HandyContext {
 
         // Store current engine in static for timer callback access
         if let Ok(mut current) = CURRENT_ENGINE.lock() {
-            *current = Some((EnginePtr(engine), engine_id));
+            *current = EngineRef::new(engine, engine_id);
+        } else {
+            warn!("Failed to store active engine reference: lock poisoned");
         }
 
         // Ensure command processing timer is running
@@ -725,6 +756,8 @@ impl HandyContext {
         // Clear current engine in static after draining pending commands.
         if let Ok(mut current) = CURRENT_ENGINE.lock() {
             *current = None;
+        } else {
+            warn!("Failed to clear active engine reference: lock poisoned");
         }
 
         hide_preedit_text(engine);

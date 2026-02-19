@@ -318,14 +318,16 @@ impl DebugPage {
 
         let log_buffer = state.log_buffer.clone();
         let text_buffer = gtk4::TextBuffer::new(None);
+        let refresh_in_flight = Arc::new(AtomicBool::new(false));
 
-        refresh_debug_view(&text_buffer, &log_buffer);
+        refresh_debug_view_async(&text_buffer, &log_buffer, &refresh_in_flight);
 
         refresh_btn.connect_clicked({
             let log_buffer = log_buffer.clone();
             let text_buffer = text_buffer.clone();
+            let refresh_in_flight = refresh_in_flight.clone();
             move |_| {
-                refresh_debug_view(&text_buffer, &log_buffer);
+                refresh_debug_view_async(&text_buffer, &log_buffer, &refresh_in_flight);
             }
         });
 
@@ -351,8 +353,13 @@ impl DebugPage {
 
         let log_buffer_clone = log_buffer.clone();
         let text_buffer_clone = text_buffer.clone();
+        let refresh_in_flight_clone = refresh_in_flight.clone();
         glib::timeout_add_local(std::time::Duration::from_secs(2), move || {
-            refresh_debug_view(&text_buffer_clone, &log_buffer_clone);
+            refresh_debug_view_async(
+                &text_buffer_clone,
+                &log_buffer_clone,
+                &refresh_in_flight_clone,
+            );
             glib::ControlFlow::Continue
         });
 
@@ -387,21 +394,51 @@ impl Drop for DebugPage {
     }
 }
 
-fn refresh_debug_view(
+fn refresh_debug_view_async(
     text_buffer: &gtk4::TextBuffer,
     ui_log_buffer: &Arc<Mutex<VecDeque<String>>>,
+    refresh_in_flight: &Arc<AtomicBool>,
 ) {
-    let ui_logs = read_recent_logs(ui_log_buffer, MAX_LOG_LINES);
-    let daemon_logs = fetch_daemon_logs(MAX_LOG_LINES);
-    let toggle_diagnostics = fetch_toggle_diagnostics_summary();
-    let toggle_recent_events = fetch_toggle_recent_events();
-    let rendered = render_debug_text(
-        &ui_logs,
-        daemon_logs.as_ref(),
-        toggle_diagnostics.as_ref(),
-        toggle_recent_events.as_ref(),
+    if refresh_in_flight
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+
+    let text_buffer = text_buffer.clone();
+    let ui_log_buffer = ui_log_buffer.clone();
+    let refresh_in_flight = refresh_in_flight.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let ui_logs = read_recent_logs(&ui_log_buffer, MAX_LOG_LINES);
+        let daemon_logs = fetch_daemon_logs(MAX_LOG_LINES);
+        let toggle_diagnostics = fetch_toggle_diagnostics_summary();
+        let toggle_recent_events = fetch_toggle_recent_events();
+        let rendered = render_debug_text(
+            &ui_logs,
+            daemon_logs.as_ref(),
+            toggle_diagnostics.as_ref(),
+            toggle_recent_events.as_ref(),
+        );
+        let _ = tx.send(rendered);
+    });
+
+    glib::timeout_add_local(
+        std::time::Duration::from_millis(UI_POLL_INTERVAL_MS),
+        move || match rx.try_recv() {
+            Ok(rendered) => {
+                text_buffer.set_text(&rendered);
+                refresh_in_flight.store(false, Ordering::SeqCst);
+                glib::ControlFlow::Break
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                refresh_in_flight.store(false, Ordering::SeqCst);
+                glib::ControlFlow::Break
+            }
+        },
     );
-    text_buffer.set_text(&rendered);
 }
 
 fn fetch_daemon_logs(limit: usize) -> Result<Vec<String>, String> {

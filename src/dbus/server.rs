@@ -714,12 +714,30 @@ impl HandyTranscription {
 
     /// Get the currently selected language
     async fn get_language(&self) -> fdo::Result<String> {
-        Ok(self.state.selected_language.lock().unwrap().clone())
+        match self.state.selected_language.lock() {
+            Ok(language) => Ok(language.clone()),
+            Err(e) => {
+                error!("GetLanguage failed: selected_language lock poisoned: {}", e);
+                Err(fdo::Error::Failed(
+                    "Internal state error (selected language unavailable)".to_string(),
+                ))
+            }
+        }
     }
 
     /// Set the language for transcription
     async fn set_language(&self, language: String) -> fdo::Result<()> {
-        *self.state.selected_language.lock().unwrap() = language.clone();
+        match self.state.selected_language.lock() {
+            Ok(mut selected_language) => {
+                *selected_language = language.clone();
+            }
+            Err(e) => {
+                error!("SetLanguage failed: selected_language lock poisoned: {}", e);
+                return Err(fdo::Error::Failed(
+                    "Internal state error (cannot update selected language)".to_string(),
+                ));
+            }
+        }
         let settings = Settings::new();
         settings.set_selected_language(&language);
         self.state
@@ -948,8 +966,42 @@ impl HandyTranscription {
         };
 
         let worker = HandyTranscription::new(self.state.clone(), self.dbus_state.clone());
-        tokio::spawn(async move {
-            worker.finalize_stop_recording(session_id, samples).await;
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            match runtime {
+                Ok(rt) => {
+                    let finalize_result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            rt.block_on(worker.finalize_stop_recording(session_id, samples))
+                        }));
+                    if finalize_result.is_err() {
+                        error!(
+                            "finalize_stop_recording(session={}) panicked; marking session failed",
+                            session_id
+                        );
+                        worker.state.set_session_status(
+                            session_id,
+                            "failed",
+                            "Internal transcription panic",
+                        );
+                        worker.state.clear_session_stopping(session_id);
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to create runtime for finalize_stop_recording(session={}): {}",
+                        session_id, e
+                    );
+                    worker.state.set_session_status(
+                        session_id,
+                        "failed",
+                        "Internal runtime initialization failed",
+                    );
+                    worker.state.clear_session_stopping(session_id);
+                }
+            }
         });
         Ok(true)
     }
@@ -979,7 +1031,16 @@ impl HandyTranscription {
                     session_id,
                     transcription_time.elapsed()
                 );
-                let lang = self.state.selected_language.lock().unwrap().clone();
+                let lang = match self.state.selected_language.lock() {
+                    Ok(selected_language) => selected_language.clone(),
+                    Err(e) => {
+                        error!(
+                            "selected_language lock poisoned while finalizing session {}: {}",
+                            session_id, e
+                        );
+                        Settings::new().selected_language()
+                    }
+                };
                 let converted_text = convert_chinese_variant(&transcription, &lang);
                 let output_text = match post_process_transcription_if_enabled(&converted_text).await
                 {
@@ -1196,7 +1257,16 @@ fn spawn_live_preedit_worker(
                 }
             };
 
-            let lang = state.selected_language.lock().unwrap().clone();
+            let lang = match state.selected_language.lock() {
+                Ok(selected_language) => selected_language.clone(),
+                Err(e) => {
+                    error!(
+                        "selected_language lock poisoned in live preedit worker (session={}): {}",
+                        session_id, e
+                    );
+                    Settings::new().selected_language()
+                }
+            };
             let live_text = convert_chinese_variant(&transcription, &lang)
                 .trim()
                 .to_string();
