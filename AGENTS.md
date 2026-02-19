@@ -32,7 +32,8 @@ sudo dnf install -y \
     ibus-devel \
     cmake \
     clang-devel \
-    glslc
+    glslc \
+    patchelf
 ```
 
 ### Developer commands
@@ -78,6 +79,12 @@ RPM build entrypoint:
 
 Generated files are not intended to be committed.
 
+Website RPM builds also require a staged CUDA runtime payload:
+- `packaging/cuda-runtime/lib64/` contains redistributable CUDA/cuDNN runtime `.so` files.
+- `packaging/cuda-runtime/MANIFEST.sha256` must match files under `lib64/`.
+- `./scripts/stage-cuda-runtime-from-wheels.sh` is the default staging command.
+- `build-rpm.sh` validates payload checksums and required SONAME coverage before building.
+
 ## Runtime Architecture
 
 ### Process model
@@ -109,6 +116,7 @@ Methods:
 - `SetFocusedEngine(u64 engine_id, bool focused)`
 - `GetFocusedEngine() -> (u64 focused_engine_id, u64 last_change_ms)`
 - `GetRecentLogs() -> array<string>`
+- `GetInferenceRuntimeStatus() -> string` (JSON)
 - `GetLanguage() -> string`
 - `SetLanguage(string)`
 
@@ -225,6 +233,7 @@ UI:
 
 Packaging:
 - `build-rpm.sh`
+- `scripts/stage-cuda-runtime-from-wheels.sh`
 - `packaging/fedora/ibus-handy.spec.in`
 - `packaging/fedora/handy.xml.in`
 - `packaging/fedora/handy.service`

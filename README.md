@@ -67,6 +67,25 @@ cd Handy
 cargo build --release
 ```
 
+## Website RPM GPU Runtime Bundle
+
+Handy's website RPM is designed to install on Fedora 43 without requiring users to add
+NVIDIA CUDA package repositories. GPU userspace runtime libraries are bundled in the RPM
+under `/usr/lib64/handy/cuda`.
+
+For maintainers building that RPM, stage runtime files in:
+
+- `packaging/cuda-runtime/lib64/`
+- `packaging/cuda-runtime/MANIFEST.sha256`
+
+Preferred staging command:
+
+```bash
+./scripts/stage-cuda-runtime-from-wheels.sh
+```
+
+`./build-rpm.sh` validates this payload before packaging.
+
 ## How It Works
 
 1. **Daemon**: `handy --daemon` exports `com.handy.Transcription` on session D-Bus.

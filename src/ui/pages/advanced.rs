@@ -4,6 +4,7 @@ use gtk4::{
 };
 use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt};
 use libadwaita::{ActionRow, Clamp, PreferencesGroup};
+use serde_json::Value;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -640,6 +641,10 @@ fn load_toggle_diagnostics_subtitle() -> String {
 }
 
 fn build_inference_runtime_subtitle(policy: InferenceDevicePolicy, gpu_device_id: i32) -> String {
+    if let Some(subtitle) = fetch_inference_runtime_subtitle_from_daemon() {
+        return subtitle;
+    }
+
     let caps = detect_onnx_execution_capabilities();
     let detected_gpus = detect_nvidia_gpus();
     let detected_gpu_text = if detected_gpus.is_empty() {
@@ -680,6 +685,74 @@ fn build_inference_runtime_subtitle(policy: InferenceDevicePolicy, gpu_device_id
             }
         }
     }
+}
+
+fn fetch_inference_runtime_subtitle_from_daemon() -> Option<String> {
+    let conn = Connection::session().ok()?;
+    let reply = conn
+        .call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "GetInferenceRuntimeStatus",
+            &(),
+        )
+        .ok()?;
+    let payload: String = reply.body().deserialize().ok()?;
+    let parsed: Value = serde_json::from_str(&payload).ok()?;
+
+    let policy = parsed
+        .get("policy")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let requested_device = parsed
+        .get("requested_device")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let requested_gpu_id = parsed
+        .get("requested_gpu_device_id")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let effective_device = parsed
+        .get("effective_device")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let fallback_used = parsed
+        .get("fallback_used")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let cuda_available = parsed
+        .get("cuda_available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let reason = parsed
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("no runtime reason");
+    let model = parsed
+        .get("model_id")
+        .and_then(Value::as_str)
+        .unwrap_or("none");
+    let last_error = parsed.get("last_error").and_then(Value::as_str);
+
+    let mut subtitle = format!(
+        "policy={} requested={}({}) | effective={} fallback={} | CUDA provider={} | model={} | {}",
+        policy,
+        requested_device,
+        requested_gpu_id,
+        effective_device,
+        fallback_used,
+        cuda_available,
+        model,
+        reason
+    );
+
+    if let Some(error_text) = last_error {
+        subtitle.push_str(" | last_error=");
+        subtitle.push_str(error_text);
+    }
+
+    Some(subtitle)
 }
 
 fn detect_nvidia_gpus() -> Vec<String> {

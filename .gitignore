@@ -35,3 +35,8 @@ recording_*
 packaging/fedora/ibus-handy.spec
 packaging/fedora/handy.xml
 data/gschemas.compiled
+
+# Staged CUDA runtime payload (website RPM build input)
+packaging/cuda-runtime/lib64/*
+!packaging/cuda-runtime/lib64/.gitkeep
+packaging/cuda-runtime/STAGING_REPORT.json

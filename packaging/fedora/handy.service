@@ -6,6 +6,7 @@ Requires=graphical-session.target
 [Service]
 Type=dbus
 BusName=com.handy.Transcription
+Environment=LD_LIBRARY_PATH=/usr/lib64/handy/onnxruntime:/usr/lib64/handy/cuda:/usr/lib/handy/onnxruntime:/usr/lib/handy/cuda
 ExecStart=/usr/bin/handy --daemon
 Restart=on-failure
 RestartSec=5

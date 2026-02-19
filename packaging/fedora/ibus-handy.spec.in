@@ -2,6 +2,8 @@ Name:           ibus-handy
 Version:        @VERSION@
 Release:        @RELEASE@%{?dist}
 Summary:        Speech-to-text for GNOME/Wayland via IBus
+%global __requires_exclude_from ^%{_libdir}/handy/(onnxruntime|cuda)/.*\\.so(\\..*)?$
+%global __provides_exclude_from ^%{_libdir}/handy/(onnxruntime|cuda)/.*\\.so(\\..*)?$
 
 License:        MIT
 URL:            https://github.com/rohithmahesh/Handy
@@ -19,6 +21,7 @@ BuildRequires:  openssl-devel
 BuildRequires:  cmake
 BuildRequires:  clang-devel
 BuildRequires:  glslc
+BuildRequires:  patchelf
 
 Requires:       ibus >= 1.5.0
 Supplements:    (gnome-shell and fedora-release-workstation)
@@ -37,6 +40,69 @@ cargo build --release --features cli
 %install
 install -Dm755 target/release/handy %{buildroot}%{_bindir}/handy
 install -Dm755 target/release/ibus-handy-engine %{buildroot}%{_libexecdir}/ibus-handy-engine
+
+install -d %{buildroot}%{_libdir}/handy/onnxruntime
+install -d %{buildroot}%{_libdir}/handy/cuda
+
+cuda_payload_dir="packaging/cuda-runtime/lib64"
+if [ ! -d "${cuda_payload_dir}" ]; then
+    echo "ERROR: missing CUDA runtime payload directory: ${cuda_payload_dir}" >&2
+    exit 1
+fi
+
+for required_soname in libcudart.so.12 libcublas.so.12 libcublasLt.so.12 libcufft.so.11 libcudnn.so.9; do
+    if ! find "${cuda_payload_dir}" -maxdepth 1 -name "${required_soname}*" | grep -q .; then
+        echo "ERROR: CUDA payload is missing ${required_soname}" >&2
+        exit 1
+    fi
+done
+
+find "${cuda_payload_dir}" -maxdepth 1 -mindepth 1 ! -name '.gitkeep' -exec cp -a {} "%{buildroot}%{_libdir}/handy/cuda/" \;
+
+provider_search_dirs=""
+for ort_output in target/release/build/ort-sys-*/output; do
+    [ -f "${ort_output}" ] || continue
+    while IFS= read -r line; do
+        case "${line}" in
+            cargo:rustc-link-search=native=*)
+                candidate_dir="${line#cargo:rustc-link-search=native=}"
+                if [ -d "${candidate_dir}" ]; then
+                    provider_search_dirs="${provider_search_dirs} ${candidate_dir}"
+                fi
+                ;;
+        esac
+    done < "${ort_output}"
+done
+
+for provider_lib in libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so; do
+    provider_src="$(find target/release target/release/deps -maxdepth 2 -type f -name "${provider_lib}" | head -n 1)"
+    if [ -z "${provider_src}" ]; then
+        for candidate_dir in ${provider_search_dirs}; do
+            if [ -f "${candidate_dir}/${provider_lib}" ]; then
+                provider_src="${candidate_dir}/${provider_lib}"
+                break
+            fi
+        done
+    fi
+    if [ -z "${provider_src}" ]; then
+        echo "ERROR: missing required ONNX Runtime provider library: ${provider_lib}" >&2
+        exit 1
+    fi
+    provider_dest="%{buildroot}%{_libdir}/handy/onnxruntime/${provider_lib}"
+    install -Dm755 "${provider_src}" "${provider_dest}"
+    if ! command -v patchelf >/dev/null 2>&1; then
+        echo "ERROR: patchelf is required to sanitize ONNX provider RUNPATHs" >&2
+        exit 1
+    fi
+    case "${provider_lib}" in
+        libonnxruntime_providers_shared.so)
+            patchelf --set-rpath '$ORIGIN' "${provider_dest}"
+            ;;
+        libonnxruntime_providers_cuda.so)
+            patchelf --set-rpath '$ORIGIN:$ORIGIN/../cuda' "${provider_dest}"
+            ;;
+    esac
+done
 
 install -Dm644 packaging/fedora/handy.desktop %{buildroot}%{_datadir}/applications/com.handy.Handy.desktop
 install -Dm644 resources/icons/handy.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/handy.svg
@@ -81,6 +147,9 @@ glib-compile-schemas %{_datadir}/glib-2.0/schemas 2>/dev/null || :
 %{_datadir}/dbus-1/services/com.handy.Transcription.service
 %{_datadir}/glib-2.0/schemas/com.handy.Transcription.gschema.xml
 %{_userunitdir}/handy.service
+%{_libdir}/handy/onnxruntime/libonnxruntime_providers_shared.so
+%{_libdir}/handy/onnxruntime/libonnxruntime_providers_cuda.so
+%{_libdir}/handy/cuda/*
 
 %changelog
 * Tue Feb 17 2026 Handy Team <handy@example.com> - 0.7.5-10

@@ -10,6 +10,16 @@ pub enum OnnxExecutionDevice {
     Gpu,
 }
 
+impl OnnxExecutionDevice {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OnnxExecutionDevice::Auto => "auto",
+            OnnxExecutionDevice::Cpu => "cpu",
+            OnnxExecutionDevice::Gpu => "gpu",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct OnnxExecutionParams {
     pub device: OnnxExecutionDevice,
@@ -84,7 +94,7 @@ pub fn resolve_onnx_execution(params: &OnnxExecutionParams) -> OnnxExecutionReso
                 let mut providers = vec![CUDAExecutionProvider::default()
                     .with_device_id(params.gpu_device_id)
                     .build()
-                    .fail_silently()];
+                    .error_on_failure()];
                 if params.allow_cpu_fallback {
                     providers.push(cpu_provider);
                 }
@@ -111,7 +121,7 @@ pub fn resolve_onnx_execution(params: &OnnxExecutionParams) -> OnnxExecutionReso
                 let mut providers = vec![CUDAExecutionProvider::default()
                     .with_device_id(params.gpu_device_id)
                     .build()
-                    .fail_silently()];
+                    .error_on_failure()];
                 if params.allow_cpu_fallback {
                     providers.push(cpu_provider);
                 }

@@ -712,6 +712,14 @@ impl HandyTranscription {
         Ok(self.state.recent_logs(400))
     }
 
+    /// Get effective inference runtime status as JSON.
+    async fn get_inference_runtime_status(&self) -> fdo::Result<String> {
+        Ok(self
+            .state
+            .transcription_manager
+            .inference_runtime_status_json())
+    }
+
     /// Get the currently selected language
     async fn get_language(&self) -> fdo::Result<String> {
         match self.state.selected_language.lock() {
