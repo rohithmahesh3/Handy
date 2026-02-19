@@ -16,6 +16,12 @@ use crate::utils::launch::open_handy_ui;
 struct EnginePtr(*mut IBusEngine);
 unsafe impl Send for EnginePtr {}
 
+#[derive(Debug, Clone)]
+struct SessionClaim {
+    session_id: u64,
+    claim_token: String,
+}
+
 const HANDY_BUS_NAME: &str = "com.handy.Transcription";
 const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
 const HANDY_INTERFACE: &str = "com.handy.Transcription";
@@ -215,6 +221,7 @@ pub struct HandyContext {
     notification_shown: bool,
     pending_commit_cancel: Option<Arc<AtomicBool>>,
     current_engine_id: Option<u64>,
+    last_session_claim: Arc<Mutex<Option<SessionClaim>>>,
 }
 
 impl HandyContext {
@@ -226,6 +233,7 @@ impl HandyContext {
             notification_shown: false,
             pending_commit_cancel: None,
             current_engine_id: None,
+            last_session_claim: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -330,6 +338,7 @@ impl HandyContext {
         }
 
         let cancel = Arc::new(AtomicBool::new(false));
+        let last_session_claim = self.last_session_claim.clone();
 
         self.pending_commit_cancel = Some(cancel.clone());
 
@@ -353,6 +362,8 @@ impl HandyContext {
             let mut last_live_visible = false;
             let mut last_live_text = String::new();
             let mut live_refresh_tick: u64 = 0;
+            let mut active_session_id: u64 = 0;
+            let mut active_claim_token = String::new();
 
             while !cancel.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(PENDING_COMMIT_POLL_MS));
@@ -362,17 +373,102 @@ impl HandyContext {
 
                 poll_tick = poll_tick.wrapping_add(1);
 
-                if live_preedit_supported && poll_tick.is_multiple_of(LIVE_PREEDIT_POLL_TICKS) {
+                let active_reply = conn.call_method(
+                    Some(HANDY_BUS_NAME),
+                    HANDY_OBJECT_PATH,
+                    Some(HANDY_INTERFACE),
+                    "GetActiveSessionForEngine",
+                    &(engine_id,),
+                );
+
+                let (next_session_id, next_claim_token, next_allow_preedit) = match active_reply {
+                    Ok(reply) => match reply.body().deserialize::<(u64, String, bool)>() {
+                        Ok(payload) => payload,
+                        Err(_) => {
+                            warn!("GetActiveSessionForEngine returned an invalid payload");
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        failure_streak = failure_streak.saturating_add(1);
+                        if failure_streak == 1 || failure_streak.is_multiple_of(10) {
+                            warn!(
+                                "GetActiveSessionForEngine call failed (streak={}): {}",
+                                failure_streak, e
+                            );
+                        }
+                        if failure_streak >= PENDING_COMMIT_FAILURE_RECONNECT_THRESHOLD {
+                            match Connection::session() {
+                                Ok(new_conn) => {
+                                    warn!(
+                                        "Reconnected pending commit listener DBus session after {} failures",
+                                        failure_streak
+                                    );
+                                    conn = new_conn;
+                                    failure_streak = 0;
+                                }
+                                Err(reconnect_err) => {
+                                    warn!(
+                                        "Pending commit listener reconnect failed after {} errors: {}",
+                                        failure_streak, reconnect_err
+                                    );
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                };
+
+                if failure_streak > 0 {
+                    info!(
+                        "Pending commit listener recovered after {} consecutive errors",
+                        failure_streak
+                    );
+                    failure_streak = 0;
+                }
+
+                if next_session_id != active_session_id || next_claim_token != active_claim_token {
+                    if last_live_visible {
+                        send_command(EngineCommand::HidePreedit { engine_id });
+                        last_live_visible = false;
+                    }
+                    last_live_revision = 0;
+                    last_live_text.clear();
+                    live_refresh_tick = 0;
+                }
+
+                active_session_id = next_session_id;
+                active_claim_token = next_claim_token;
+
+                if let Ok(mut guard) = last_session_claim.lock() {
+                    *guard = if active_session_id != 0 && !active_claim_token.is_empty() {
+                        Some(SessionClaim {
+                            session_id: active_session_id,
+                            claim_token: active_claim_token.clone(),
+                        })
+                    } else {
+                        None
+                    };
+                }
+
+                if active_session_id == 0 || active_claim_token.is_empty() {
+                    continue;
+                }
+
+                if live_preedit_supported
+                    && next_allow_preedit
+                    && poll_tick.is_multiple_of(LIVE_PREEDIT_POLL_TICKS)
+                {
                     match conn.call_method(
                         Some(HANDY_BUS_NAME),
                         HANDY_OBJECT_PATH,
                         Some(HANDY_INTERFACE),
-                        "GetLivePreeditForEngine",
-                        &(engine_id,),
+                        "GetLivePreeditForSession",
+                        &(active_session_id, active_claim_token.clone()),
                     ) {
                         Ok(live_reply) => {
-                            match live_reply.body().deserialize::<(u64, u64, bool, String)>() {
-                                Ok((_, revision, visible, text)) => {
+                            match live_reply.body().deserialize::<(u64, bool, String)>() {
+                                Ok((revision, visible, text)) => {
                                     let preedit_text = text.trim().to_string();
                                     let should_show = visible && !preedit_text.is_empty();
                                     let should_apply = should_show
@@ -382,11 +478,6 @@ impl HandyContext {
                                             || live_refresh_tick >= LIVE_PREEDIT_REFRESH_TICKS);
                                     let should_hide = !should_show
                                         && (last_live_visible || revision > last_live_revision);
-
-                                    debug!(
-                                        "IBus poll: engine={}, rev={}, visible={}, text_len={}, should_show={}, should_hide={}",
-                                        engine_id, revision, visible, preedit_text.len(), should_show, should_hide
-                                    );
 
                                     if cancel.load(Ordering::SeqCst) {
                                         break;
@@ -416,7 +507,7 @@ impl HandyContext {
                                     }
                                 }
                                 Err(_) => {
-                                    warn!("GetLivePreeditForEngine returned an invalid payload");
+                                    warn!("GetLivePreeditForSession returned an invalid payload");
                                 }
                             }
                         }
@@ -424,22 +515,27 @@ impl HandyContext {
                             let detail = e.to_string();
                             if detail.contains("UnknownMethod") {
                                 warn!(
-                                    "GetLivePreeditForEngine unavailable; disabling live preedit polling"
+                                    "GetLivePreeditForSession unavailable; disabling live preedit polling"
                                 );
                                 live_preedit_supported = false;
                             } else if poll_tick == 1 || poll_tick.is_multiple_of(50) {
-                                warn!("GetLivePreeditForEngine call failed: {}", detail);
+                                warn!("GetLivePreeditForSession call failed: {}", detail);
                             }
                         }
                     }
+                } else if !next_allow_preedit && last_live_visible {
+                    send_command(EngineCommand::HidePreedit { engine_id });
+                    last_live_visible = false;
+                    last_live_text.clear();
+                    live_refresh_tick = 0;
                 }
 
                 let reply = conn.call_method(
                     Some(HANDY_BUS_NAME),
                     HANDY_OBJECT_PATH,
                     Some(HANDY_INTERFACE),
-                    "TakePendingCommitForEngine",
-                    &(engine_id,),
+                    "TakePendingCommitForSession",
+                    &(active_session_id, active_claim_token.clone()),
                 );
 
                 let reply = match reply {
@@ -448,7 +544,7 @@ impl HandyContext {
                         failure_streak = failure_streak.saturating_add(1);
                         if failure_streak == 1 || failure_streak.is_multiple_of(10) {
                             warn!(
-                                "TakePendingCommitForEngine call failed (streak={}): {}",
+                                "TakePendingCommitForSession call failed (streak={}): {}",
                                 failure_streak, e
                             );
                         }
@@ -480,13 +576,17 @@ impl HandyContext {
                     );
                     failure_streak = 0;
                 }
-                let Ok((session_id, text)) = reply.body().deserialize::<(u64, String)>() else {
-                    warn!("TakePendingCommitForEngine returned an invalid payload");
+                let Ok((has_text, text)) = reply.body().deserialize::<(bool, String)>() else {
+                    warn!("TakePendingCommitForSession returned an invalid payload");
                     continue;
                 };
 
+                if !has_text {
+                    continue;
+                }
+
                 let final_text = text.trim().to_string();
-                if session_id == 0 || final_text.is_empty() {
+                if final_text.is_empty() {
                     continue;
                 }
 
@@ -496,11 +596,10 @@ impl HandyContext {
 
                 info!(
                     "Pending commit ready: session={}, text_len={}",
-                    session_id,
+                    active_session_id,
                     final_text.len()
                 );
 
-                // Send commit command via queue - main thread will process it
                 send_command(EngineCommand::CommitText {
                     engine_id,
                     text: final_text,
@@ -633,6 +732,9 @@ impl HandyContext {
         self.is_focused = false;
         self.notification_shown = false;
         self.current_engine_id = None;
+        if let Ok(mut claim) = self.last_session_claim.lock() {
+            *claim = None;
+        }
     }
 
     pub fn process_key_event(
@@ -646,7 +748,16 @@ impl HandyContext {
     }
 
     fn commit_pending_transcription(&mut self, engine: *mut IBusEngine) {
-        let engine_id = engine as usize as u64;
+        let session_claim = self
+            .last_session_claim
+            .lock()
+            .ok()
+            .and_then(|claim| claim.clone());
+        let Some(session_claim) = session_claim else {
+            debug!("No session claim available on engine disable");
+            return;
+        };
+
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let result = Connection::session()
@@ -656,27 +767,32 @@ impl HandyContext {
                         Some(HANDY_BUS_NAME),
                         HANDY_OBJECT_PATH,
                         Some(HANDY_INTERFACE),
-                        "TakePendingCommitForEngine",
-                        &(engine_id,),
+                        "TakePendingCommitForSession",
+                        &(session_claim.session_id, session_claim.claim_token.clone()),
                     )
                     .ok()
                 })
-                .and_then(|reply| reply.body().deserialize::<(u64, String)>().ok())
-                .unwrap_or((0, String::new()));
+                .and_then(|reply| reply.body().deserialize::<(bool, String)>().ok())
+                .unwrap_or((false, String::new()));
             let _ = tx.send(result);
         });
 
-        let (session_id, text) =
+        let (has_text, text) =
             match rx.recv_timeout(Duration::from_millis(DISABLE_PENDING_COMMIT_TIMEOUT_MS)) {
                 Ok(value) => value,
                 Err(_) => {
                     debug!(
-                        "TakePendingCommitForEngine timed out on disable after {} ms",
+                        "TakePendingCommitForSession timed out on disable after {} ms",
                         DISABLE_PENDING_COMMIT_TIMEOUT_MS
                     );
                     return;
                 }
             };
+
+        if !has_text {
+            debug!("No pending commit payload found on engine disable");
+            return;
+        }
 
         let trimmed = text.trim();
         if trimmed.is_empty() {
@@ -686,7 +802,7 @@ impl HandyContext {
 
         info!(
             "Committing pending transcription from session {} ({} chars)",
-            session_id,
+            session_claim.session_id,
             trimmed.chars().count()
         );
         hide_preedit_text(engine);

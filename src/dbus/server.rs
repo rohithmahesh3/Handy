@@ -12,7 +12,7 @@ use crate::settings::{PostProcessProvider, Settings};
 use crate::text_utils::convert_chinese_variant;
 use crate::utils::logging::read_recent_logs;
 use crate::{audio_feedback::play_feedback_sound, audio_feedback::SoundType};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use serde_json::json;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -25,18 +25,18 @@ use zbus::Connection;
 const HANDY_BUS_NAME: &str = "com.handy.Transcription";
 const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
 
-const DEFAULT_BINDING_ID: &str = "ibus";
 const MAX_PENDING_COMMIT_QUEUE: usize = 32;
 const LIVE_PREEDIT_POLL_MS: u64 = 600;
 const LIVE_PREEDIT_MIN_NEW_SAMPLES: usize = 3200;
 const LIVE_PREEDIT_MIN_TOTAL_SAMPLES: usize = 8000;
 const LIVE_PREEDIT_MAX_WINDOW_SAMPLES: usize = 16000 * 8;
 const LIVE_PREEDIT_SNAPSHOT_WARN_EVERY: u64 = 10;
+const SESSION_TTL_MS: u64 = 5 * 60 * 1000;
 
 #[derive(Clone, Debug)]
 struct PendingCommit {
     session_id: u64,
-    target_engine_id: u64,
+    claim_token: String,
     text: String,
     created_ms: u64,
 }
@@ -56,7 +56,7 @@ impl Default for PendingCommitStore {
 }
 
 impl PendingCommitStore {
-    fn store(&self, session_id: u64, target_engine_id: u64, text: String) {
+    fn store(&self, session_id: u64, claim_token: String, text: String) {
         if let Ok(mut queue) = self.inner.lock() {
             if queue.len() >= MAX_PENDING_COMMIT_QUEUE {
                 let _ = queue.pop_front();
@@ -64,27 +64,27 @@ impl PendingCommitStore {
             }
             queue.push_back(PendingCommit {
                 session_id,
-                target_engine_id,
+                claim_token,
                 text,
                 created_ms: now_millis(),
             });
         }
     }
 
-    fn take_for_engine(&self, target_engine_id: u64) -> (u64, String) {
+    fn take_for_session(&self, session_id: u64, claim_token: &str) -> (bool, String) {
         let Ok(mut queue) = self.inner.lock() else {
-            return (0, String::new());
+            return (false, String::new());
         };
-        let Some(index) = queue
+        if let Some(index) = queue
             .iter()
-            .position(|entry| entry.target_engine_id == target_engine_id)
-        else {
-            return (0, String::new());
-        };
-        queue
-            .remove(index)
-            .map(|pending| (pending.session_id, pending.text))
-            .unwrap_or_else(|| (0, String::new()))
+            .position(|entry| entry.session_id == session_id && entry.claim_token == claim_token)
+        {
+            return queue
+                .remove(index)
+                .map(|pending| (true, pending.text))
+                .unwrap_or_else(|| (false, String::new()));
+        }
+        (false, String::new())
     }
 
     fn stats_json(&self) -> String {
@@ -98,7 +98,7 @@ impl PendingCommitStore {
             let targets = queue
                 .iter()
                 .fold(HashMap::<u64, u64>::new(), |mut acc, item| {
-                    *acc.entry(item.target_engine_id).or_insert(0) += 1;
+                    *acc.entry(item.session_id).or_insert(0) += 1;
                     acc
                 });
             json!({
@@ -123,7 +123,6 @@ impl PendingCommitStore {
 
 #[derive(Clone, Debug)]
 struct LivePreeditEntry {
-    session_id: u64,
     revision: u64,
     visible: bool,
     text: String,
@@ -142,31 +141,26 @@ impl Default for LivePreeditStore {
 }
 
 impl LivePreeditStore {
-    fn set(&self, target_engine_id: u64, session_id: u64, revision: u64, text: String) {
+    fn set(&self, session_id: u64, revision: u64, text: String) {
         let Ok(mut entries) = self.inner.lock() else {
             return;
         };
 
-        if let Some(existing) = entries.get(&target_engine_id) {
-            if existing.session_id > session_id {
-                return;
-            }
-            if existing.session_id == session_id && existing.revision >= revision {
+        if let Some(existing) = entries.get(&session_id) {
+            if existing.revision >= revision {
                 return;
             }
         }
 
         info!(
-            "set_live_preedit: engine={}, session={}, rev={}, text_len={}",
-            target_engine_id,
+            "set_live_preedit: session={}, rev={}, text_len={}",
             session_id,
             revision,
             text.len()
         );
         entries.insert(
-            target_engine_id,
+            session_id,
             LivePreeditEntry {
-                session_id,
                 revision,
                 visible: true,
                 text,
@@ -174,28 +168,24 @@ impl LivePreeditStore {
         );
     }
 
-    fn clear(&self, target_engine_id: u64, session_id: u64, revision: u64) {
+    fn clear(&self, session_id: u64, revision: u64) {
         let Ok(mut entries) = self.inner.lock() else {
             return;
         };
 
-        if let Some(existing) = entries.get(&target_engine_id) {
-            if existing.session_id > session_id {
-                return;
-            }
-            if existing.session_id == session_id && existing.revision >= revision {
+        if let Some(existing) = entries.get(&session_id) {
+            if existing.revision >= revision {
                 return;
             }
         }
 
         info!(
-            "clear_live_preedit: engine={}, session={}, rev={}",
-            target_engine_id, session_id, revision
+            "clear_live_preedit: session={}, rev={}",
+            session_id, revision
         );
         entries.insert(
-            target_engine_id,
+            session_id,
             LivePreeditEntry {
-                session_id,
                 revision,
                 visible: false,
                 text: String::new(),
@@ -203,22 +193,32 @@ impl LivePreeditStore {
         );
     }
 
-    fn get_for_engine(&self, target_engine_id: u64) -> (u64, u64, bool, String) {
+    fn get_for_session(&self, session_id: u64) -> (u64, bool, String) {
         let Ok(entries) = self.inner.lock() else {
-            return (0, 0, false, String::new());
+            return (0, false, String::new());
         };
 
         entries
-            .get(&target_engine_id)
-            .map(|entry| {
-                (
-                    entry.session_id,
-                    entry.revision,
-                    entry.visible,
-                    entry.text.clone(),
-                )
-            })
-            .unwrap_or((0, 0, false, String::new()))
+            .get(&session_id)
+            .map(|entry| (entry.revision, entry.visible, entry.text.clone()))
+            .unwrap_or((0, false, String::new()))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SessionStatusEntry {
+    state: String,
+    message: String,
+    updated_ms: u64,
+}
+
+impl SessionStatusEntry {
+    fn new(state: &str, message: &str) -> Self {
+        Self {
+            state: state.to_string(),
+            message: message.to_string(),
+            updated_ms: now_millis(),
+        }
     }
 }
 
@@ -230,16 +230,15 @@ pub struct HandyState {
     pub is_recording: AtomicBool,
     stopping_sessions: Mutex<HashSet<u64>>,
     session_counter: AtomicU64,
-    /// Compatibility cache for legacy StopRecording callers.
-    /// Toggle dictation commit handoff now uses `pending_commit`.
-    last_transcription_cache: Mutex<Option<String>>,
+    claim_counter: AtomicU64,
     pending_commit: PendingCommitStore,
     live_preedit: LivePreeditStore,
     live_preedit_revision: AtomicU64,
     focused_engine_id: AtomicU64,
     focused_engine_last_change_ms: AtomicU64,
-    session_targets: Mutex<HashMap<u64, u64>>,
-    compat_session_id: Mutex<Option<u64>>,
+    session_bindings: Mutex<HashMap<u64, u64>>,
+    session_claim_tokens: Mutex<HashMap<u64, String>>,
+    session_statuses: Mutex<HashMap<u64, SessionStatusEntry>>,
     log_buffer: Arc<Mutex<VecDeque<String>>>,
 }
 
@@ -257,14 +256,15 @@ impl HandyState {
             is_recording: AtomicBool::new(false),
             stopping_sessions: Mutex::new(HashSet::new()),
             session_counter: AtomicU64::new(1),
-            last_transcription_cache: Mutex::new(None),
+            claim_counter: AtomicU64::new(1),
             pending_commit: PendingCommitStore::default(),
             live_preedit: LivePreeditStore::default(),
             live_preedit_revision: AtomicU64::new(1),
             focused_engine_id: AtomicU64::new(0),
             focused_engine_last_change_ms: AtomicU64::new(now_millis()),
-            session_targets: Mutex::new(HashMap::new()),
-            compat_session_id: Mutex::new(None),
+            session_bindings: Mutex::new(HashMap::new()),
+            session_claim_tokens: Mutex::new(HashMap::new()),
+            session_statuses: Mutex::new(HashMap::new()),
             log_buffer,
         }
     }
@@ -277,13 +277,185 @@ impl HandyState {
         read_recent_logs(&self.log_buffer, limit)
     }
 
-    fn store_pending_commit(&self, session_id: u64, target_engine_id: u64, text: String) {
-        self.pending_commit
-            .store(session_id, target_engine_id, text);
+    fn next_claim_token(&self, session_id: u64) -> String {
+        let claim_nonce = self.claim_counter.fetch_add(1, Ordering::SeqCst);
+        format!(
+            "{:016x}{:016x}{:016x}",
+            now_millis(),
+            session_id,
+            claim_nonce
+        )
     }
 
-    fn take_pending_commit_for_engine(&self, target_engine_id: u64) -> (u64, String) {
-        self.pending_commit.take_for_engine(target_engine_id)
+    fn create_session(&self, target_engine_id: u64) -> (u64, String) {
+        let session_id = self.next_session_id();
+        let claim_token = self.next_claim_token(session_id);
+        if let Ok(mut bindings) = self.session_bindings.lock() {
+            bindings.insert(session_id, target_engine_id);
+        }
+        if let Ok(mut claims) = self.session_claim_tokens.lock() {
+            claims.insert(session_id, claim_token.clone());
+        }
+        self.set_session_status(session_id, "created", "Session created");
+        (session_id, claim_token)
+    }
+
+    fn session_binding(&self, session_id: u64) -> Option<u64> {
+        self.session_bindings
+            .lock()
+            .ok()
+            .and_then(|bindings| bindings.get(&session_id).copied())
+    }
+
+    fn session_claim_token(&self, session_id: u64) -> Option<String> {
+        self.session_claim_tokens
+            .lock()
+            .ok()
+            .and_then(|claims| claims.get(&session_id).cloned())
+    }
+
+    fn validate_session_claim(&self, session_id: u64, claim_token: &str) -> bool {
+        self.session_claim_tokens
+            .lock()
+            .ok()
+            .and_then(|claims| claims.get(&session_id).cloned())
+            .is_some_and(|token| token == claim_token)
+    }
+
+    fn set_session_status(&self, session_id: u64, state: &str, message: &str) {
+        if session_id == 0 {
+            return;
+        }
+        if let Ok(mut statuses) = self.session_statuses.lock() {
+            statuses.insert(session_id, SessionStatusEntry::new(state, message));
+        }
+    }
+
+    fn session_status(&self, session_id: u64) -> Option<SessionStatusEntry> {
+        self.session_statuses
+            .lock()
+            .ok()
+            .and_then(|statuses| statuses.get(&session_id).cloned())
+    }
+
+    fn remove_session(&self, session_id: u64) {
+        if let Ok(mut bindings) = self.session_bindings.lock() {
+            bindings.remove(&session_id);
+        }
+        if let Ok(mut claims) = self.session_claim_tokens.lock() {
+            claims.remove(&session_id);
+        }
+        if let Ok(mut statuses) = self.session_statuses.lock() {
+            statuses.remove(&session_id);
+        }
+        self.clear_session_stopping(session_id);
+    }
+
+    fn cleanup_expired_sessions(&self) {
+        let now = now_millis();
+        let mut expired = Vec::new();
+        if let Ok(statuses) = self.session_statuses.lock() {
+            for (session_id, status) in statuses.iter() {
+                let is_terminal = matches!(
+                    status.state.as_str(),
+                    "ready" | "failed" | "cancelled" | "committed"
+                );
+                if is_terminal && now.saturating_sub(status.updated_ms) > SESSION_TTL_MS {
+                    expired.push(*session_id);
+                }
+            }
+        }
+        for session_id in expired {
+            self.remove_session(session_id);
+        }
+    }
+
+    fn active_session_for_engine(&self, engine_id: u64) -> (u64, String, bool) {
+        if engine_id == 0 {
+            return (0, String::new(), false);
+        }
+        self.cleanup_expired_sessions();
+        let Ok(bindings) = self.session_bindings.lock() else {
+            return (0, String::new(), false);
+        };
+        let Ok(claims) = self.session_claim_tokens.lock() else {
+            return (0, String::new(), false);
+        };
+        let Ok(statuses) = self.session_statuses.lock() else {
+            return (0, String::new(), false);
+        };
+
+        let mut best: Option<(u8, u64, u64, String, bool)> = None;
+        for (session_id, bound_engine_id) in bindings.iter() {
+            if *bound_engine_id != engine_id {
+                continue;
+            }
+            let Some(status) = statuses.get(session_id) else {
+                continue;
+            };
+            let Some(claim_token) = claims.get(session_id) else {
+                continue;
+            };
+            let (priority, allow_preedit) = match status.state.as_str() {
+                "recording" => (3, true),
+                "finalizing" => (2, false),
+                "ready" => (1, false),
+                _ => (0, false),
+            };
+            if priority == 0 {
+                continue;
+            }
+            let candidate = (
+                priority,
+                status.updated_ms,
+                *session_id,
+                claim_token.clone(),
+                allow_preedit,
+            );
+            if let Some(current) = &best {
+                if candidate.0 > current.0
+                    || (candidate.0 == current.0 && candidate.1 > current.1)
+                    || (candidate.0 == current.0
+                        && candidate.1 == current.1
+                        && candidate.2 > current.2)
+                {
+                    best = Some(candidate);
+                }
+            } else {
+                best = Some(candidate);
+            }
+        }
+
+        if let Some((_, _, session_id, claim_token, allow_preedit)) = best {
+            (session_id, claim_token, allow_preedit)
+        } else {
+            (0, String::new(), false)
+        }
+    }
+
+    fn store_pending_commit(&self, session_id: u64, text: String) {
+        let Some(claim_token) = self.session_claim_token(session_id) else {
+            warn!(
+                "Dropping pending commit for unknown session {} (no claim token)",
+                session_id
+            );
+            return;
+        };
+        self.pending_commit.store(session_id, claim_token, text);
+    }
+
+    fn take_pending_commit_for_session(
+        &self,
+        session_id: u64,
+        claim_token: &str,
+    ) -> (bool, String) {
+        let result = self
+            .pending_commit
+            .take_for_session(session_id, claim_token);
+        if result.0 {
+            self.set_session_status(session_id, "committed", "Final commit delivered");
+        }
+        result
     }
 
     fn pending_commit_stats_json(&self) -> String {
@@ -294,30 +466,29 @@ impl HandyState {
         self.live_preedit_revision.fetch_add(1, Ordering::SeqCst)
     }
 
-    fn set_live_preedit(
+    fn set_live_preedit(&self, session_id: u64, revision: u64, text: String) {
+        if session_id == 0 {
+            return;
+        }
+        self.live_preedit.set(session_id, revision, text);
+    }
+
+    fn clear_live_preedit(&self, session_id: u64, revision: u64) {
+        if session_id == 0 {
+            return;
+        }
+        self.live_preedit.clear(session_id, revision);
+    }
+
+    fn get_live_preedit_for_session(
         &self,
-        target_engine_id: u64,
         session_id: u64,
-        revision: u64,
-        text: String,
-    ) {
-        if target_engine_id == 0 || session_id == 0 {
-            return;
+        claim_token: &str,
+    ) -> (u64, bool, String) {
+        if !self.validate_session_claim(session_id, claim_token) {
+            return (0, false, String::new());
         }
-        self.live_preedit
-            .set(target_engine_id, session_id, revision, text);
-    }
-
-    fn clear_live_preedit(&self, target_engine_id: u64, session_id: u64, revision: u64) {
-        if target_engine_id == 0 || session_id == 0 {
-            return;
-        }
-        self.live_preedit
-            .clear(target_engine_id, session_id, revision);
-    }
-
-    fn get_live_preedit_for_engine(&self, target_engine_id: u64) -> (u64, u64, bool, String) {
-        self.live_preedit.get_for_engine(target_engine_id)
+        self.live_preedit.get_for_session(session_id)
     }
 
     fn set_focused_engine(&self, engine_id: u64, focused: bool) {
@@ -343,81 +514,6 @@ impl HandyState {
         )
     }
 
-    fn register_session_target(&self, session_id: u64, target_engine_id: u64) {
-        if let Ok(mut targets) = self.session_targets.lock() {
-            info!(
-                "register_session_target: session {} -> engine {}",
-                session_id, target_engine_id
-            );
-            targets.insert(session_id, target_engine_id);
-        }
-    }
-
-    fn session_target(&self, session_id: u64) -> Option<u64> {
-        let result = self
-            .session_targets
-            .lock()
-            .ok()
-            .and_then(|targets| targets.get(&session_id).copied());
-        debug!(
-            "session_target lookup: session {} -> {:?}",
-            session_id, result
-        );
-        result
-    }
-
-    fn take_session_target(&self, session_id: u64) -> u64 {
-        let result = self
-            .session_targets
-            .lock()
-            .ok()
-            .and_then(|mut targets| {
-                let val = targets.remove(&session_id);
-                info!(
-                    "take_session_target: session {} removed, value={:?}",
-                    session_id, val
-                );
-                val
-            })
-            .unwrap_or(0);
-        result
-    }
-
-    fn session_targets_snapshot(&self) -> Vec<(u64, u64)> {
-        self.session_targets
-            .lock()
-            .map(|targets| targets.iter().map(|(k, v)| (*k, *v)).collect())
-            .unwrap_or_default()
-    }
-
-    fn clear_session_targets(&self) {
-        info!("clear_session_targets: clearing ALL session targets");
-        if let Ok(mut targets) = self.session_targets.lock() {
-            targets.clear();
-        }
-    }
-
-    fn set_compat_session(&self, session_id: Option<u64>) {
-        if let Ok(mut compat) = self.compat_session_id.lock() {
-            *compat = session_id;
-        }
-    }
-
-    fn take_compat_session(&self) -> Option<u64> {
-        self.compat_session_id
-            .lock()
-            .ok()
-            .and_then(|mut compat| compat.take())
-    }
-
-    fn clear_compat_session_if(&self, session_id: u64) {
-        if let Ok(mut compat) = self.compat_session_id.lock() {
-            if compat.as_ref().copied() == Some(session_id) {
-                *compat = None;
-            }
-        }
-    }
-
     fn mark_session_stopping(&self, session_id: u64) {
         if session_id == 0 {
             return;
@@ -433,12 +529,6 @@ impl HandyState {
         }
         if let Ok(mut sessions) = self.stopping_sessions.lock() {
             sessions.remove(&session_id);
-        }
-    }
-
-    fn clear_all_session_stopping(&self) {
-        if let Ok(mut sessions) = self.stopping_sessions.lock() {
-            sessions.clear();
         }
     }
 
@@ -486,121 +576,54 @@ struct HandyTranscription {
 
 #[zbus::interface(name = "com.handy.Transcription")]
 impl HandyTranscription {
-    /// Start recording audio (compatibility method)
-    async fn start_recording(&self) -> fdo::Result<()> {
-        let session_id = self.state.next_session_id();
-        let (target_engine_id, _) = self.state.focused_engine_status();
-        self.state
-            .register_session_target(session_id, target_engine_id);
-        let binding_id = binding_id_for_session(session_id);
-        match self
-            .start_recording_internal(&binding_id, Some(session_id))
-            .await
-        {
-            Ok(()) => {
-                self.state.set_compat_session(Some(session_id));
-                Ok(())
-            }
-            Err(e) => {
-                let _ = self.state.take_session_target(session_id);
-                self.state.set_compat_session(None);
-                Err(e)
-            }
-        }
-    }
-
-    /// Stop recording and return transcribed text (compatibility method)
-    async fn stop_recording(&self) -> fdo::Result<String> {
-        let Some(session_id) = self.state.take_compat_session() else {
-            return self.stop_recording_internal(DEFAULT_BINDING_ID, None).await;
-        };
-        let binding_id = binding_id_for_session(session_id);
-        match self
-            .stop_recording_internal(&binding_id, Some(session_id))
-            .await
-        {
-            Ok(text) => Ok(text),
-            Err(e) => {
-                if self.state.is_recording.load(Ordering::SeqCst) {
-                    self.state.set_compat_session(Some(session_id));
-                }
-                Err(e)
-            }
-        }
-    }
-
-    /// Start a recording session and return session id
-    async fn start_recording_session(&self) -> fdo::Result<u64> {
-        let session_id = self.state.next_session_id();
-        let (target_engine_id, _) = self.state.focused_engine_status();
-        self.state
-            .register_session_target(session_id, target_engine_id);
-        let binding_id = binding_id_for_session(session_id);
-        if let Err(e) = self
-            .start_recording_internal(&binding_id, Some(session_id))
-            .await
-        {
-            let _ = self.state.take_session_target(session_id);
-            return Err(e);
-        }
-        Ok(session_id)
-    }
-
-    /// Start a recording session and bind commit routing to a focused engine id.
-    async fn start_recording_session_for_target(&self, target_engine_id: u64) -> fdo::Result<u64> {
+    /// Start a recording session and bind commit routing to an engine id.
+    async fn start_recording_session_for_target(
+        &self,
+        target_engine_id: u64,
+    ) -> fdo::Result<(u64, String)> {
+        self.state.cleanup_expired_sessions();
         if target_engine_id == 0 {
             return Err(fdo::Error::Failed(
                 "Invalid target engine id 0 for session routing".to_string(),
             ));
         }
-        let session_id = self.state.next_session_id();
-        self.state
-            .register_session_target(session_id, target_engine_id);
+        let (session_id, claim_token) = self.state.create_session(target_engine_id);
         let binding_id = binding_id_for_session(session_id);
-        if let Err(e) = self
-            .start_recording_internal(&binding_id, Some(session_id))
-            .await
-        {
-            let _ = self.state.take_session_target(session_id);
+        self.state
+            .set_session_status(session_id, "starting", "Starting recording");
+        if let Err(e) = self.start_recording_internal(&binding_id, session_id).await {
+            self.state.remove_session(session_id);
             return Err(e);
         }
-        Ok(session_id)
+        self.state
+            .set_session_status(session_id, "recording", "Recording in progress");
+        Ok((session_id, claim_token))
     }
 
-    /// Stop a specific recording session and return final text
-    async fn stop_recording_session(&self, session_id: u64) -> fdo::Result<String> {
-        let binding_id = binding_id_for_session(session_id);
-        let result = self
-            .stop_recording_internal(&binding_id, Some(session_id))
-            .await;
-        if result.is_ok() || !self.state.is_recording.load(Ordering::SeqCst) {
-            self.state.clear_compat_session_if(session_id);
-        }
-        result
+    /// Stop a specific recording session; final text is delivered via pending commit path.
+    async fn stop_recording_session(&self, session_id: u64) -> fdo::Result<bool> {
+        self.stop_recording_internal(session_id).await
     }
 
-    /// Cancel current recording without transcription
-    async fn cancel_recording(&self) -> fdo::Result<()> {
-        debug!("D-Bus: CancelRecording called");
-
-        for (session_id, target_engine_id) in self.state.session_targets_snapshot() {
-            if target_engine_id != 0 {
-                let revision = self.state.next_live_preedit_revision();
-                self.state
-                    .clear_live_preedit(target_engine_id, session_id, revision);
-            }
+    /// Cancel one recording session and clear live preview for that session.
+    async fn cancel_recording_session(&self, session_id: u64) -> fdo::Result<bool> {
+        self.state.cleanup_expired_sessions();
+        if self.state.session_claim_token(session_id).is_none() {
+            return Ok(false);
         }
 
-        self.state.recording_manager.cancel_recording();
-        self.state.clear_session_targets();
-        self.state.clear_all_session_stopping();
-        self.state.set_compat_session(None);
+        self.state
+            .set_session_status(session_id, "cancelled", "Session cancelled");
+        let revision = self.state.next_live_preedit_revision();
+        self.state.clear_live_preedit(session_id, revision);
+        self.state.clear_session_stopping(session_id);
 
-        self.state.is_recording.store(false, Ordering::SeqCst);
-        self.emit_recording_state_changed(false).await?;
+        if self.state.is_recording.swap(false, Ordering::SeqCst) {
+            self.state.recording_manager.cancel_recording();
+            self.emit_recording_state_changed(false).await?;
+        }
 
-        info!("D-Bus: Recording cancelled");
-        Ok(())
+        Ok(true)
     }
 
     /// Get current state: (is_recording, has_model_selected)
@@ -628,9 +651,15 @@ impl HandyTranscription {
         Ok(toggle_recent_events())
     }
 
-    /// Atomically consume pending final text for a specific engine id.
-    async fn take_pending_commit_for_engine(&self, engine_id: u64) -> fdo::Result<(u64, String)> {
-        Ok(self.state.take_pending_commit_for_engine(engine_id))
+    /// Atomically consume pending final text for a specific session claim.
+    async fn take_pending_commit_for_session(
+        &self,
+        session_id: u64,
+        claim_token: String,
+    ) -> fdo::Result<(bool, String)> {
+        Ok(self
+            .state
+            .take_pending_commit_for_session(session_id, claim_token.as_str()))
     }
 
     /// Get aggregate pending commit queue stats as JSON.
@@ -638,12 +667,33 @@ impl HandyTranscription {
         Ok(self.state.pending_commit_stats_json())
     }
 
-    /// Read latest live preedit payload for the engine.
-    async fn get_live_preedit_for_engine(
+    /// Read latest live preedit payload for a specific session claim.
+    async fn get_live_preedit_for_session(
+        &self,
+        session_id: u64,
+        claim_token: String,
+    ) -> fdo::Result<(u64, bool, String)> {
+        Ok(self
+            .state
+            .get_live_preedit_for_session(session_id, claim_token.as_str()))
+    }
+
+    /// Get latest known session bound to an engine id.
+    async fn get_active_session_for_engine(
         &self,
         engine_id: u64,
-    ) -> fdo::Result<(u64, u64, bool, String)> {
-        Ok(self.state.get_live_preedit_for_engine(engine_id))
+    ) -> fdo::Result<(u64, String, bool)> {
+        Ok(self.state.active_session_for_engine(engine_id))
+    }
+
+    /// Get current status of a session.
+    async fn get_session_status(&self, session_id: u64) -> fdo::Result<(String, String, u64)> {
+        self.state.cleanup_expired_sessions();
+        if let Some(entry) = self.state.session_status(session_id) {
+            Ok((entry.state, entry.message, entry.updated_ms))
+        } else {
+            Ok(("missing".to_string(), "Session not found".to_string(), 0))
+        }
     }
 
     /// Report focused engine transitions from IBus callbacks.
@@ -777,18 +827,12 @@ impl HandyTranscription {
         Self { state, dbus_state }
     }
 
-    async fn start_recording_internal(
-        &self,
-        binding_id: &str,
-        session_id: Option<u64>,
-    ) -> fdo::Result<()> {
-        let session_id_value = session_id.unwrap_or(0);
-        if session_id_value != 0 {
-            self.state.clear_session_stopping(session_id_value);
-        }
+    async fn start_recording_internal(&self, binding_id: &str, session_id: u64) -> fdo::Result<()> {
+        self.state.cleanup_expired_sessions();
+        self.state.clear_session_stopping(session_id);
         debug!(
             "D-Bus: StartRecording called (binding='{}', session={})",
-            binding_id, session_id_value
+            binding_id, session_id
         );
         let start_time = Instant::now();
 
@@ -797,6 +841,8 @@ impl HandyTranscription {
                 "No model selected. Open Handy preferences to download and select a model.",
             )
             .await?;
+            self.state
+                .set_session_status(session_id, "failed", "No model selected");
             return Err(fdo::Error::Failed("No model selected".to_string()));
         }
 
@@ -815,22 +861,16 @@ impl HandyTranscription {
                 });
 
                 if Settings::new().experimental_enabled() {
-                    if let Some(session_id) = session_id {
-                        if let Some(target_engine_id) = self.state.session_target(session_id) {
-                            if target_engine_id != 0 {
-                                let revision = self.state.next_live_preedit_revision();
-                                self.state.clear_live_preedit(
-                                    target_engine_id,
-                                    session_id,
-                                    revision,
-                                );
-                                spawn_live_preedit_worker(
-                                    self.state.clone(),
-                                    binding_id.to_string(),
-                                    session_id,
-                                    target_engine_id,
-                                );
-                            }
+                    let revision = self.state.next_live_preedit_revision();
+                    self.state.clear_live_preedit(session_id, revision);
+                    if let Some(target_engine_id) = self.state.session_binding(session_id) {
+                        if target_engine_id != 0 {
+                            spawn_live_preedit_worker(
+                                self.state.clone(),
+                                binding_id.to_string(),
+                                session_id,
+                                target_engine_id,
+                            );
                         }
                     }
                 }
@@ -845,138 +885,136 @@ impl HandyTranscription {
                 let message = format!("Failed to start recording ({}): {}", err.code(), detail);
                 error!(
                     "D-Bus: StartRecording failed (binding='{}', session={}): {}",
-                    binding_id, session_id_value, message
+                    binding_id, session_id, message
                 );
+                self.state
+                    .set_session_status(session_id, "failed", &message);
                 self.emit_error(&message).await?;
                 Err(fdo::Error::Failed(message))
             }
         }
     }
 
-    async fn stop_recording_internal(
-        &self,
-        binding_id: &str,
-        session_id: Option<u64>,
-    ) -> fdo::Result<String> {
-        debug!("D-Bus: StopRecording called for binding '{}'", binding_id);
-        let stop_time = Instant::now();
-        let live_session_id = session_id.unwrap_or(0);
-        if live_session_id != 0 {
-            // Mark only this session as stopping so live-preedit worker does
-            // not clear preview while graceful stop/transcription is in progress.
-            self.state.mark_session_stopping(live_session_id);
+    async fn stop_recording_internal(&self, session_id: u64) -> fdo::Result<bool> {
+        self.state.cleanup_expired_sessions();
+        let Some(status) = self.state.session_status(session_id) else {
+            return Ok(false);
+        };
+
+        if matches!(status.state.as_str(), "finalizing" | "ready" | "committed") {
+            return Ok(true);
+        }
+        if matches!(status.state.as_str(), "failed" | "cancelled") {
+            return Ok(false);
         }
 
-        let target_engine_id = session_id
-            .map(|sid| self.state.take_session_target(sid))
-            .unwrap_or(0);
+        if self.state.session_binding(session_id).is_none() {
+            self.state.set_session_status(
+                session_id,
+                "failed",
+                "Cannot stop recording: no target binding",
+            );
+            return Ok(false);
+        }
 
-        let was_recording = self.state.is_recording.swap(false, Ordering::SeqCst);
-        if was_recording {
-            if let Err(e) = self.emit_recording_state_changed(false).await {
-                self.state.clear_session_stopping(live_session_id);
-                return Err(e);
-            }
+        let binding_id = binding_id_for_session(session_id);
+        debug!(
+            "D-Bus: StopRecordingSession called for binding '{}' (session={})",
+            binding_id, session_id
+        );
+
+        self.state.mark_session_stopping(session_id);
+        self.state
+            .set_session_status(session_id, "finalizing", "Stopping recorder");
+
+        if self.state.is_recording.swap(false, Ordering::SeqCst) {
+            self.emit_recording_state_changed(false).await?;
         }
 
         play_feedback_sound(&Settings::new(), SoundType::Stop);
         self.state.recording_manager.remove_mute();
 
-        if let Some(samples) = self.state.recording_manager.stop_recording(binding_id) {
-            debug!(
-                "D-Bus: Recording stopped, {} samples retrieved in {:?}",
-                samples.len(),
-                stop_time.elapsed()
+        let revision = self.state.next_live_preedit_revision();
+        self.state.clear_live_preedit(session_id, revision);
+
+        let Some(samples) = self.state.recording_manager.stop_recording(&binding_id) else {
+            self.state.clear_session_stopping(session_id);
+            self.state.set_session_status(
+                session_id,
+                "failed",
+                "Stop requested for inactive recording session",
             );
+            return Ok(false);
+        };
 
-            let transcription_time = Instant::now();
-            match self.state.transcription_manager.transcribe(samples) {
-                Ok(transcription) => {
-                    debug!(
-                        "D-Bus: Transcription completed in {:?}: '{}'",
-                        transcription_time.elapsed(),
-                        transcription
-                    );
+        let worker = HandyTranscription::new(self.state.clone(), self.dbus_state.clone());
+        tokio::spawn(async move {
+            worker.finalize_stop_recording(session_id, samples).await;
+        });
+        Ok(true)
+    }
 
-                    let lang = self.state.selected_language.lock().unwrap().clone();
-                    let converted_text = convert_chinese_variant(&transcription, &lang);
-                    let output_text =
-                        match post_process_transcription_if_enabled(&converted_text).await {
-                            Some(text) => text,
-                            None => converted_text,
-                        };
+    async fn finalize_stop_recording(&self, session_id: u64, samples: Vec<f32>) {
+        let stop_time = Instant::now();
+        if samples.is_empty() {
+            self.state
+                .set_session_status(session_id, "ready", "No speech detected");
+            self.state.clear_session_stopping(session_id);
+            let _ = self.emit_transcription_ready("").await;
+            return;
+        }
 
-                    // Cache transcription for engine process's subsequent stop_and_commit
-                    if let Ok(mut cache) = self.state.last_transcription_cache.lock() {
-                        *cache = Some(output_text.clone());
-                    }
-                    if let Some(session_id) = session_id {
-                        if target_engine_id != 0 {
-                            self.state.store_pending_commit(
-                                session_id,
-                                target_engine_id,
-                                output_text.clone(),
-                            );
-                        }
-                    }
-                    if live_session_id != 0 && target_engine_id != 0 {
-                        let revision = self.state.next_live_preedit_revision();
-                        self.state
-                            .clear_live_preedit(target_engine_id, live_session_id, revision);
-                    }
-                    if let Err(e) = self.emit_transcription_ready(&output_text).await {
-                        self.state.clear_session_stopping(live_session_id);
-                        return Err(e);
-                    }
-                    self.state.clear_session_stopping(live_session_id);
-                    Ok(output_text)
+        debug!(
+            "D-Bus: Stop finalized, {} samples captured for session {} in {:?}",
+            samples.len(),
+            session_id,
+            stop_time.elapsed()
+        );
+
+        let transcription_time = Instant::now();
+        match self.state.transcription_manager.transcribe(samples) {
+            Ok(transcription) => {
+                debug!(
+                    "D-Bus: Transcription completed for session {} in {:?}",
+                    session_id,
+                    transcription_time.elapsed()
+                );
+                let lang = self.state.selected_language.lock().unwrap().clone();
+                let converted_text = convert_chinese_variant(&transcription, &lang);
+                let output_text = match post_process_transcription_if_enabled(&converted_text).await
+                {
+                    Some(text) => text,
+                    None => converted_text,
+                };
+
+                if !output_text.trim().is_empty() {
+                    self.state
+                        .store_pending_commit(session_id, output_text.clone());
                 }
-                Err(err) => {
-                    if live_session_id != 0 && target_engine_id != 0 {
-                        let revision = self.state.next_live_preedit_revision();
-                        self.state
-                            .clear_live_preedit(target_engine_id, live_session_id, revision);
-                    }
-                    error!("D-Bus: Transcription error: {}", err);
-                    if let Err(e) = self
-                        .emit_error(&format!("Transcription failed: {}", err))
-                        .await
-                    {
-                        self.state.clear_session_stopping(live_session_id);
-                        return Err(e);
-                    }
-                    self.state.clear_session_stopping(live_session_id);
-                    Err(fdo::Error::Failed(format!("Transcription failed: {}", err)))
-                }
-            }
-        } else {
-            // Recording already stopped — return cached text from previous stop
-            let cached = self
-                .state
-                .last_transcription_cache
-                .lock()
-                .ok()
-                .and_then(|mut c| c.take())
-                .unwrap_or_default();
-            if !cached.is_empty() {
-                debug!("D-Bus: Returning cached transcription text");
-                if let Some(session_id) = session_id {
-                    if target_engine_id != 0 {
-                        self.state.store_pending_commit(
-                            session_id,
-                            target_engine_id,
-                            cached.clone(),
-                        );
-                    }
-                }
-            }
-            if live_session_id != 0 && target_engine_id != 0 {
-                let revision = self.state.next_live_preedit_revision();
                 self.state
-                    .clear_live_preedit(target_engine_id, live_session_id, revision);
+                    .set_session_status(session_id, "ready", "Transcription ready");
+                self.state.clear_session_stopping(session_id);
+
+                if let Err(e) = self.emit_transcription_ready(&output_text).await {
+                    error!(
+                        "Failed to emit transcription_ready for session {}: {}",
+                        session_id, e
+                    );
+                }
             }
-            self.state.clear_session_stopping(live_session_id);
-            Ok(cached)
+            Err(err) => {
+                let message = format!("Transcription failed: {}", err);
+                error!("D-Bus: {}", message);
+                self.state
+                    .set_session_status(session_id, "failed", &message);
+                self.state.clear_session_stopping(session_id);
+                if let Err(e) = self.emit_error(&message).await {
+                    error!(
+                        "Failed to emit error signal for session {}: {}",
+                        session_id, e
+                    );
+                }
+            }
         }
     }
 
@@ -1063,7 +1101,7 @@ fn spawn_live_preedit_worker(
             if !Settings::new().experimental_enabled() {
                 if !published_text.is_empty() {
                     let revision = state.next_live_preedit_revision();
-                    state.clear_live_preedit(target_engine_id, session_id, revision);
+                    state.clear_live_preedit(session_id, revision);
                     published_text.clear();
                 }
                 info!(
@@ -1087,7 +1125,7 @@ fn spawn_live_preedit_worker(
             }
 
             // During graceful stop, keep looping even after session-target removal.
-            let current_target = state.session_target(session_id);
+            let current_target = state.session_binding(session_id);
             if !session_stopping && current_target != Some(target_engine_id) {
                 info!(
                     "Live preedit worker exiting: session_target mismatch (session_id={}, expected={}, got={:?})",
@@ -1106,13 +1144,13 @@ fn spawn_live_preedit_worker(
                 // and continue retrying while this session is still active.
                 // Only break if NOT in graceful stop mode.
                 if !state.session_is_stopping(session_id)
-                    && (state.session_target(session_id) != Some(target_engine_id)
+                    && (state.session_binding(session_id) != Some(target_engine_id)
                         || !state.is_recording.load(Ordering::SeqCst))
                 {
                     info!(
                         "Live preedit worker exiting: snapshot failure path (is_recording={}, session_target={:?})",
                         state.is_recording.load(Ordering::SeqCst),
-                        state.session_target(session_id)
+                        state.session_binding(session_id)
                     );
                     break;
                 }
@@ -1164,7 +1202,7 @@ fn spawn_live_preedit_worker(
                 .to_string();
 
             // During graceful stop, stop_recording_internal handles the clear.
-            let post_transcribe_target = state.session_target(session_id);
+            let post_transcribe_target = state.session_binding(session_id);
             if !state.session_is_stopping(session_id)
                 && post_transcribe_target != Some(target_engine_id)
             {
@@ -1189,12 +1227,7 @@ fn spawn_live_preedit_worker(
 
             if accumulated_text != published_text {
                 let revision = state.next_live_preedit_revision();
-                state.set_live_preedit(
-                    target_engine_id,
-                    session_id,
-                    revision,
-                    accumulated_text.clone(),
-                );
+                state.set_live_preedit(session_id, revision, accumulated_text.clone());
                 published_text = accumulated_text.clone();
             }
         }
@@ -1202,7 +1235,7 @@ fn spawn_live_preedit_worker(
         // Only clear preview if NOT in graceful stop mode (i.e. cancelled).
         if !published_text.is_empty() && !state.session_is_stopping(session_id) {
             let revision = state.next_live_preedit_revision();
-            state.clear_live_preedit(target_engine_id, session_id, revision);
+            state.clear_live_preedit(session_id, revision);
         }
     });
 }
@@ -1353,23 +1386,37 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn pending_commit_store_take_for_engine_consumes_target_only() {
+    fn pending_commit_store_take_for_session_claim_consumes_exact_match() {
         let store = PendingCommitStore::default();
-        store.store(42, 11, "hello".to_string());
-        store.store(43, 22, "world".to_string());
+        store.store(42, "claim-a".to_string(), "hello".to_string());
+        store.store(43, "claim-b".to_string(), "world".to_string());
 
-        let (session_id, text) = store.take_for_engine(11);
-        assert_eq!(session_id, 42);
-        assert_eq!(text, "hello");
-        let (remaining_sid, remaining_text) = store.take_for_engine(22);
-        assert_eq!(remaining_sid, 43);
-        assert_eq!(remaining_text, "world");
+        let (ok_first, text_first) = store.take_for_session(42, "claim-a");
+        assert!(ok_first);
+        assert_eq!(text_first, "hello");
+
+        let (ok_second, text_second) = store.take_for_session(43, "claim-b");
+        assert!(ok_second);
+        assert_eq!(text_second, "world");
+    }
+
+    #[test]
+    fn pending_commit_store_rejects_wrong_claim() {
+        let store = PendingCommitStore::default();
+        store.store(61, "claim-ok".to_string(), "payload".to_string());
+
+        let (ok, text) = store.take_for_session(61, "claim-wrong");
+        assert!(!ok);
+        assert!(text.is_empty());
+        let (ok_again, text_again) = store.take_for_session(61, "claim-ok");
+        assert!(ok_again);
+        assert_eq!(text_again, "payload");
     }
 
     #[test]
     fn pending_commit_store_stats_reports_oldest_age() {
         let store = PendingCommitStore::default();
-        store.store(99, 17, "payload".to_string());
+        store.store(99, "claim-99".to_string(), "payload".to_string());
         std::thread::sleep(Duration::from_millis(2));
         let parsed: serde_json::Value =
             serde_json::from_str(&store.stats_json()).expect("valid stats json");
@@ -1388,55 +1435,54 @@ mod tests {
     #[test]
     fn pending_commit_store_keeps_independent_queue_order() {
         let store = PendingCommitStore::default();
-        store.store(10, 1, "first".to_string());
-        store.store(11, 1, "second".to_string());
-        store.store(12, 2, "third".to_string());
+        store.store(10, "claim-10".to_string(), "first".to_string());
+        store.store(11, "claim-11".to_string(), "second".to_string());
+        store.store(12, "claim-12".to_string(), "third".to_string());
 
-        let (sid1, text1) = store.take_for_engine(1);
-        let (sid2, text2) = store.take_for_engine(1);
-        let (sid3, text3) = store.take_for_engine(2);
-        assert_eq!((sid1, text1), (10, "first".to_string()));
-        assert_eq!((sid2, text2), (11, "second".to_string()));
-        assert_eq!((sid3, text3), (12, "third".to_string()));
+        let first = store.take_for_session(10, "claim-10");
+        let second = store.take_for_session(11, "claim-11");
+        let third = store.take_for_session(12, "claim-12");
+
+        assert_eq!(first, (true, "first".to_string()));
+        assert_eq!(second, (true, "second".to_string()));
+        assert_eq!(third, (true, "third".to_string()));
     }
 
     #[test]
-    fn live_preedit_store_tracks_latest_per_engine() {
+    fn live_preedit_store_tracks_latest_per_session() {
         let store = LivePreeditStore::default();
-        store.set(11, 42, 1, "alpha".to_string());
-        store.set(11, 42, 2, "bravo".to_string());
+        store.set(42, 1, "alpha".to_string());
+        store.set(42, 2, "bravo".to_string());
 
-        let (session_id, revision, visible, text) = store.get_for_engine(11);
-        assert_eq!(session_id, 42);
+        let (revision, visible, text) = store.get_for_session(42);
         assert_eq!(revision, 2);
         assert!(visible);
         assert_eq!(text, "bravo");
     }
 
     #[test]
-    fn live_preedit_store_keeps_engine_isolation() {
+    fn live_preedit_store_keeps_session_isolation() {
         let store = LivePreeditStore::default();
-        store.set(11, 21, 7, "left".to_string());
-        store.set(22, 22, 9, "right".to_string());
+        store.set(21, 7, "left".to_string());
+        store.set(22, 9, "right".to_string());
 
-        let left = store.get_for_engine(11);
-        let right = store.get_for_engine(22);
-        assert_eq!(left.0, 21);
-        assert_eq!(left.1, 7);
-        assert_eq!(left.3, "left");
-        assert_eq!(right.0, 22);
-        assert_eq!(right.1, 9);
-        assert_eq!(right.3, "right");
+        let left = store.get_for_session(21);
+        let right = store.get_for_session(22);
+        assert_eq!(left.0, 7);
+        assert!(left.1);
+        assert_eq!(left.2, "left");
+        assert_eq!(right.0, 9);
+        assert!(right.1);
+        assert_eq!(right.2, "right");
     }
 
     #[test]
     fn live_preedit_store_clear_hides_entry() {
         let store = LivePreeditStore::default();
-        store.set(44, 101, 3, "hello".to_string());
-        store.clear(44, 101, 4);
+        store.set(101, 3, "hello".to_string());
+        store.clear(101, 4);
 
-        let (session_id, revision, visible, text) = store.get_for_engine(44);
-        assert_eq!(session_id, 101);
+        let (revision, visible, text) = store.get_for_session(101);
         assert_eq!(revision, 4);
         assert!(!visible);
         assert!(text.is_empty());

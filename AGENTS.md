@@ -94,19 +94,18 @@ Service:
 - Interface: `com.handy.Transcription`
 
 Methods:
-- `StartRecording()`
-- `StopRecording() -> string`
-- `StartRecordingSession() -> u64`
-- `StartRecordingSessionForTarget(u64 target_engine_id) -> u64`
-- `StopRecordingSession(u64) -> string`
-- `CancelRecording()`
+- `StartRecordingSessionForTarget(u64 target_engine_id) -> (u64 session_id, string claim_token)`
+- `StopRecordingSession(u64 session_id) -> bool`
+- `CancelRecordingSession(u64 session_id) -> bool`
 - `GetState() -> (bool is_recording, bool has_model_selected)`
 - `GetToggleDiagnostics() -> (bool, string, string, string, u64, bool, bool, u64, u64, u64)`
 - `GetToggleDiagnosticsVerbose() -> string` (JSON)
 - `GetToggleRecentEvents() -> array<string>`
-- `TakePendingCommitForEngine(u64 engine_id) -> (u64, string)`
+- `GetSessionStatus(u64 session_id) -> (string state, string message, u64 updated_ms)`
+- `TakePendingCommitForSession(u64 session_id, string claim_token) -> (bool has_text, string text)`
 - `GetPendingCommitStats() -> string` (JSON)
-- `GetLivePreeditForEngine(u64 engine_id) -> (u64 session_id, u64 revision, bool visible, string text)`
+- `GetLivePreeditForSession(u64 session_id, string claim_token) -> (u64 revision, bool visible, string text)`
+- `GetActiveSessionForEngine(u64 engine_id) -> (u64 session_id, string claim_token, bool allow_preedit)`
 - `SetFocusedEngine(u64 engine_id, bool focused)`
 - `GetFocusedEngine() -> (u64 focused_engine_id, u64 last_change_ms)`
 - `GetRecentLogs() -> array<string>`
@@ -120,14 +119,14 @@ Signals:
 
 ### Pending commit handoff
 
-`HandyState` stores final transcripts in:
-- `last_transcription_cache` (compatibility fallback)
-- `pending_commit` (bounded queue handoff consumed by engine via `TakePendingCommitForEngine`)
+`HandyState` stores final transcripts in a bounded `pending_commit` queue consumed via
+`TakePendingCommitForSession`.
 
 Important behavior:
 - Start recording does **not** clear pending commit.
-- `CancelRecording` does **not** clear pending commit.
-- `pending_commit` stores `(session_id, target_engine_id, text)` and keeps up to 32 items, dropping oldest when full.
+- `pending_commit` stores `(session_id, claim_token, text)` and keeps up to 32 items, dropping oldest when full.
+- Queue consume is session-claim scoped; a consumer must present both session id and claim token.
+- Session metadata is retained for a bounded TTL and cleaned up for terminal states.
 - Debug transcription testing does **not** drain pending commits.
 - Toggle recording does **not** block on pending queue drain before starting a new session.
 
@@ -145,14 +144,16 @@ Global toggle flow uses **evdev** (`src/global_shortcuts.rs`):
 3. On press while idle:
    - switch to Handy engine (verified),
    - verify focused-context activation via daemon `GetFocusedEngine`,
-   - call `StartRecordingSessionForTarget(focused_engine_id)`.
+   - call `StartRecordingSessionForTarget(focused_engine_id)` and store `(session_id, claim_token)`.
 4. On next press while recording:
-   - call `StopRecordingSession` and wait for result,
+   - call `StopRecordingSession(session_id)` and wait for ack,
    - do **not** auto-restore input source in toggle flow.
 5. Final text delivery:
-   - engine-side pending commit listener (`src/ibus_engine/context.rs`) polls `TakePendingCommitForEngine(engine_id)`,
+   - engine-side listener resolves `(session_id, claim_token)` via `GetActiveSessionForEngine(engine_id)`,
+   - live preedit polls `GetLivePreeditForSession(session_id, claim_token)`,
+   - final commits poll `TakePendingCommitForSession(session_id, claim_token)`,
    - commits via `ibus_engine_commit_text` while engine is active.
-6. `disable()` still performs a final bounded `TakePendingCommitForEngine(engine_id)` fallback consume.
+6. `disable()` performs one final `TakePendingCommitForSession` using the last known session claim.
 
 This architecture intentionally avoids autoswitch restore races.
 

@@ -50,6 +50,7 @@ enum ToggleState {
     Recording {
         toggle_session_id: u64,
         daemon_session_id: u64,
+        claim_token: String,
     },
     Stopping {
         toggle_session_id: u64,
@@ -60,7 +61,7 @@ enum ToggleState {
 enum InternalEvent {
     StartRecording {
         toggle_session_id: u64,
-        result: std::result::Result<u64, String>,
+        result: std::result::Result<(u64, String), String>,
     },
     StopRecording {
         toggle_session_id: u64,
@@ -69,7 +70,7 @@ enum InternalEvent {
 }
 
 enum StopRecordingOutcome {
-    Completed(String),
+    Acknowledged,
     Finalizing { reason: String, timed_out: bool },
     Failed(String),
 }
@@ -764,9 +765,11 @@ fn on_global_pressed(
         ToggleState::Recording {
             toggle_session_id,
             daemon_session_id,
+            claim_token,
         } => {
             let current_session = *toggle_session_id;
             let daemon_session = *daemon_session_id;
+            let stop_claim_token = claim_token.clone();
             info!(
                 "[toggle:{}] Toggle pressed; waiting for StopRecordingSession({})",
                 current_session, daemon_session
@@ -775,7 +778,12 @@ fn on_global_pressed(
                 "toggle:{} toggle stop requested; stopping daemon session {}",
                 current_session, daemon_session
             ));
-            spawn_stop_recording(current_session, daemon_session, internal_tx.clone());
+            spawn_stop_recording(
+                current_session,
+                daemon_session,
+                stop_claim_token.clone(),
+                internal_tx.clone(),
+            );
             *toggle_state = ToggleState::Stopping {
                 toggle_session_id: current_session,
                 daemon_session_id: daemon_session,
@@ -933,13 +941,13 @@ fn handle_internal_event(toggle_state: &mut ToggleState, internal: InternalEvent
 fn on_start_recording_result(
     toggle_state: &mut ToggleState,
     toggle_session_id: u64,
-    result: std::result::Result<u64, String>,
+    result: std::result::Result<(u64, String), String>,
 ) {
     match toggle_state {
         ToggleState::Pending {
             toggle_session_id: active_session,
         } if *active_session == toggle_session_id => match result {
-            Ok(daemon_session_id) => {
+            Ok((daemon_session_id, claim_token)) => {
                 clear_start_failure();
                 clear_stop_failure();
                 info!(
@@ -949,6 +957,7 @@ fn on_start_recording_result(
                 *toggle_state = ToggleState::Recording {
                     toggle_session_id,
                     daemon_session_id,
+                    claim_token,
                 };
                 mark_toggle_state("recording");
                 push_toggle_event(format!(
@@ -975,19 +984,18 @@ fn on_start_recording_result(
                     "toggle:{} start failed: {}",
                     toggle_session_id, err
                 ));
-                spawn_cancel_recording(toggle_session_id, "start failed");
                 *toggle_state = ToggleState::Idle;
                 mark_toggle_state("idle");
                 clear_pending_commit();
             }
         },
         _ => {
-            if result.is_ok() {
+            if let Ok((daemon_session_id, _claim_token)) = result {
                 warn!(
                     "[toggle:{}] Received stale start success, cancelling recording to avoid orphan state",
                     toggle_session_id
                 );
-                spawn_cancel_recording(toggle_session_id, "stale start success");
+                spawn_cancel_recording(daemon_session_id, "stale start success");
                 push_toggle_event(format!(
                     "toggle:{} stale start success cancelled",
                     toggle_session_id
@@ -1017,18 +1025,16 @@ fn on_stop_recording_result(
             daemon_session_id,
         } if *active_session == toggle_session_id => {
             match result {
-                StopRecordingOutcome::Completed(text) => {
+                StopRecordingOutcome::Acknowledged => {
                     info!(
-                        "[toggle:{}] StopRecordingSession({}) completed",
+                        "[toggle:{}] StopRecordingSession({}) acknowledged",
                         toggle_session_id, daemon_session_id
                     );
                     clear_stop_failure();
                     mark_pending_commit(*daemon_session_id);
                     push_toggle_event(format!(
-                        "toggle:{} stopped daemon session {} (text_len={})",
-                        toggle_session_id,
-                        daemon_session_id,
-                        text.chars().count()
+                        "toggle:{} stop acknowledged for daemon session {}",
+                        toggle_session_id, daemon_session_id
                     ));
                     push_toggle_event(format!(
                         "toggle:{} stop-complete for session {}; commit is delivered by engine-side pending commit listener",
@@ -1094,22 +1100,22 @@ fn on_stop_recording_result(
 fn cleanup_state(toggle_state: &mut ToggleState) {
     match toggle_state {
         ToggleState::Idle => {}
-        ToggleState::Pending { toggle_session_id } => {
-            let sid = *toggle_session_id;
-            spawn_cancel_recording(sid, "cleanup");
+        ToggleState::Pending { .. } => {
+            // Start request is still in flight and no daemon session id is known yet.
         }
         ToggleState::Recording {
-            toggle_session_id,
-            daemon_session_id: _,
+            toggle_session_id: _,
+            daemon_session_id,
+            claim_token: _,
         } => {
-            let sid = *toggle_session_id;
+            let sid = *daemon_session_id;
             spawn_cancel_recording(sid, "cleanup");
         }
         ToggleState::Stopping {
-            toggle_session_id,
-            daemon_session_id: _,
+            toggle_session_id: _,
+            daemon_session_id,
         } => {
-            let sid = *toggle_session_id;
+            let sid = *daemon_session_id;
             spawn_cancel_recording(sid, "cleanup after stop pending");
         }
     }
@@ -1138,6 +1144,7 @@ fn spawn_start_recording(
 fn spawn_stop_recording(
     toggle_session_id: u64,
     daemon_session_id: u64,
+    _claim_token: String,
     tx: mpsc::UnboundedSender<InternalEvent>,
 ) {
     std::thread::spawn(move || {
@@ -1145,7 +1152,19 @@ fn spawn_stop_recording(
             daemon_session_id,
             Duration::from_millis(STOP_RECORDING_TIMEOUT_MS),
         ) {
-            Ok(text) => StopRecordingOutcome::Completed(text),
+            Ok(true) => StopRecordingOutcome::Acknowledged,
+            Ok(false) => {
+                let cancel_result = call_handy_cancel_recording_session(daemon_session_id);
+                StopRecordingOutcome::Failed(match cancel_result {
+                    Ok(()) => {
+                        "StopRecordingSession returned false; fallback CancelRecordingSession succeeded".to_string()
+                    }
+                    Err(cancel_err) => format!(
+                        "StopRecordingSession returned false; fallback CancelRecordingSession failed: {}",
+                        cancel_err
+                    ),
+                })
+            }
             Err(stop_err) => {
                 let is_recording = call_handy_get_state()
                     .map(|(active, _)| active)
@@ -1177,15 +1196,16 @@ fn spawn_stop_recording(
                         }
                         StopRecordingCallError::Failed(err) => err,
                     };
-                    let cancel_result = call_handy_method_no_args("CancelRecording");
+                    let cancel_result = call_handy_cancel_recording_session(daemon_session_id);
                     StopRecordingOutcome::Failed(match cancel_result {
-                        Ok(()) => {
-                            format!("{}; fallback CancelRecording succeeded", stop_detail)
-                        }
+                        Ok(()) => format!(
+                            "{}; fallback CancelRecordingSession({}) succeeded",
+                            stop_detail, daemon_session_id
+                        ),
                         Err(cancel_err) => {
                             format!(
-                                "{}; fallback CancelRecording failed: {}",
-                                stop_detail, cancel_err
+                                "{}; fallback CancelRecordingSession({}) failed: {}",
+                                stop_detail, daemon_session_id, cancel_err
                             )
                         }
                     })
@@ -1200,43 +1220,57 @@ fn spawn_stop_recording(
 }
 
 fn spawn_cancel_recording(session_id: u64, reason: &'static str) {
-    std::thread::spawn(move || match call_handy_method_no_args("CancelRecording") {
-        Ok(()) => {
-            info!("[toggle:{}] Cancelled recording ({})", session_id, reason);
-        }
-        Err(e) => {
-            warn!(
-                "[toggle:{}] Failed to cancel recording ({}): {}",
-                session_id, reason, e
-            );
-        }
-    });
+    std::thread::spawn(
+        move || match call_handy_cancel_recording_session(session_id) {
+            Ok(()) => {
+                info!("[toggle:{}] Cancelled recording ({})", session_id, reason);
+            }
+            Err(e) => {
+                warn!(
+                    "[toggle:{}] Failed to cancel recording ({}): {}",
+                    session_id, reason, e
+                );
+            }
+        },
+    );
 }
 
-fn call_handy_method_no_args(method: &str) -> std::result::Result<(), String> {
+fn call_handy_cancel_recording_session(session_id: u64) -> std::result::Result<(), String> {
     let conn = zbus::blocking::Connection::session().map_err(|e| {
         let msg = format!("Failed to open session bus: {}", e);
-        mark_dbus_error(method, &msg);
+        mark_dbus_error("CancelRecordingSession", &msg);
         msg
     })?;
-    conn.call_method(
-        Some(HANDY_BUS_NAME),
-        HANDY_OBJECT_PATH,
-        Some(HANDY_INTERFACE),
-        method,
-        &(),
-    )
-    .map_err(|e| {
-        let msg = format!("{} call failed: {}", method, e);
-        mark_dbus_error(method, &msg);
+    let reply = conn
+        .call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "CancelRecordingSession",
+            &(session_id,),
+        )
+        .map_err(|e| {
+            let msg = format!("CancelRecordingSession call failed: {}", e);
+            mark_dbus_error("CancelRecordingSession", &msg);
+            msg
+        })?;
+    let cancelled = reply.body().deserialize::<bool>().map_err(|e| {
+        let msg = format!("CancelRecordingSession decode failed: {}", e);
+        mark_dbus_error("CancelRecordingSession", &msg);
         msg
     })?;
+    if !cancelled {
+        return Err(format!(
+            "CancelRecordingSession returned false for session {}",
+            session_id
+        ));
+    }
     Ok(())
 }
 
 fn call_handy_start_recording_session_for_target(
     target_engine_id: u64,
-) -> std::result::Result<u64, String> {
+) -> std::result::Result<(u64, String), String> {
     let conn = zbus::blocking::Connection::session().map_err(|e| {
         let msg = format!("Failed to open session bus: {}", e);
         mark_dbus_error("StartRecordingSessionForTarget", &msg);
@@ -1255,7 +1289,7 @@ fn call_handy_start_recording_session_for_target(
             mark_dbus_error("StartRecordingSessionForTarget", &msg);
             msg
         })?;
-    reply.body().deserialize::<u64>().map_err(|e| {
+    reply.body().deserialize::<(u64, String)>().map_err(|e| {
         let msg = format!("StartRecordingSessionForTarget decode failed: {}", e);
         mark_dbus_error("StartRecordingSessionForTarget", &msg);
         msg
@@ -1354,7 +1388,7 @@ fn wait_for_focused_engine(
     ))
 }
 
-fn call_handy_stop_recording_session(session_id: u64) -> std::result::Result<String, String> {
+fn call_handy_stop_recording_session(session_id: u64) -> std::result::Result<bool, String> {
     let conn = zbus::blocking::Connection::session().map_err(|e| {
         let msg = format!("Failed to open session bus: {}", e);
         mark_dbus_error("StopRecordingSession", &msg);
@@ -1373,7 +1407,7 @@ fn call_handy_stop_recording_session(session_id: u64) -> std::result::Result<Str
             mark_dbus_error("StopRecordingSession", &msg);
             msg
         })?;
-    reply.body().deserialize::<String>().map_err(|e| {
+    reply.body().deserialize::<bool>().map_err(|e| {
         let msg = format!("StopRecordingSession decode failed: {}", e);
         mark_dbus_error("StopRecordingSession", &msg);
         msg
@@ -1383,7 +1417,7 @@ fn call_handy_stop_recording_session(session_id: u64) -> std::result::Result<Str
 fn call_handy_stop_recording_session_with_timeout(
     session_id: u64,
     timeout: Duration,
-) -> std::result::Result<String, StopRecordingCallError> {
+) -> std::result::Result<bool, StopRecordingCallError> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(call_handy_stop_recording_session(session_id));

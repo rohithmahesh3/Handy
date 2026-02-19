@@ -15,10 +15,20 @@ const HANDY_OBJECT_PATH: &str = "/com/handy/Transcription";
 const HANDY_INTERFACE: &str = "com.handy.Transcription";
 const MAX_LOG_LINES: usize = 400;
 const UI_POLL_INTERVAL_MS: u64 = 80;
+const DEBUG_ENGINE_ID: u64 = u64::MAX - 1;
+const DEBUG_STOP_WAIT_TIMEOUT_MS: u64 = 35_000;
+const DEBUG_STATUS_POLL_MS: u64 = 120;
+
+#[derive(Clone, Debug)]
+struct DebugSessionClaim {
+    session_id: u64,
+    claim_token: String,
+}
 
 pub struct DebugPage {
     container: Box,
     is_recording: Arc<AtomicBool>,
+    active_session: Arc<Mutex<Option<DebugSessionClaim>>>,
 }
 
 impl DebugPage {
@@ -96,7 +106,7 @@ impl DebugPage {
         container.append(&section_separator);
 
         let is_recording = Arc::new(AtomicBool::new(false));
-        let active_session_id = Arc::new(Mutex::new(None::<u64>));
+        let active_session = Arc::new(Mutex::new(None::<DebugSessionClaim>));
         let request_in_flight = Arc::new(AtomicBool::new(false));
         let update_controls = Rc::new({
             let start_btn = start_btn.clone();
@@ -114,7 +124,7 @@ impl DebugPage {
         start_btn.connect_clicked({
             let status_label = status_label.clone();
             let is_recording = is_recording.clone();
-            let active_session_id = active_session_id.clone();
+            let active_session = active_session.clone();
             let request_in_flight = request_in_flight.clone();
             let update_controls = update_controls.clone();
             move |_| {
@@ -134,7 +144,7 @@ impl DebugPage {
 
                 let status_label = status_label.clone();
                 let is_recording = is_recording.clone();
-                let active_session_id = active_session_id.clone();
+                let active_session = active_session.clone();
                 let request_in_flight = request_in_flight.clone();
                 let update_controls = update_controls.clone();
                 glib::timeout_add_local(
@@ -143,16 +153,16 @@ impl DebugPage {
                         Ok(result) => {
                             request_in_flight.store(false, Ordering::SeqCst);
                             match result {
-                                Ok(session_id) => {
+                                Ok(session) => {
                                     is_recording.store(true, Ordering::SeqCst);
-                                    if let Ok(mut guard) = active_session_id.lock() {
-                                        *guard = Some(session_id);
+                                    if let Ok(mut guard) = active_session.lock() {
+                                        *guard = Some(session);
                                     }
                                     status_label.set_text("Recording...");
                                 }
                                 Err(e) => {
                                     is_recording.store(false, Ordering::SeqCst);
-                                    if let Ok(mut guard) = active_session_id.lock() {
+                                    if let Ok(mut guard) = active_session.lock() {
                                         *guard = None;
                                     }
                                     status_label.set_text(&format!("Error: {}", e));
@@ -178,7 +188,7 @@ impl DebugPage {
             let output_buffer = output_buffer.clone();
             let status_label = status_label.clone();
             let is_recording = is_recording.clone();
-            let active_session_id = active_session_id.clone();
+            let active_session = active_session.clone();
             let request_in_flight = request_in_flight.clone();
             let update_controls = update_controls.clone();
             move |_| {
@@ -191,12 +201,12 @@ impl DebugPage {
                 status_label.set_text("Stopping and transcribing...");
                 update_controls();
 
-                let session_id = active_session_id.lock().ok().and_then(|guard| *guard);
+                let session = active_session.lock().ok().and_then(|guard| guard.clone());
                 let (tx, rx) = std::sync::mpsc::channel();
                 std::thread::spawn(move || {
-                    let result = match session_id {
-                        Some(id) => call_stop_recording_and_finalize(id),
-                        None => Err("No active session id for stop".to_string()),
+                    let result = match session {
+                        Some(session_claim) => call_stop_recording_and_finalize(&session_claim),
+                        None => Err("No active session for stop".to_string()),
                     };
                     let _ = tx.send(result);
                 });
@@ -204,7 +214,7 @@ impl DebugPage {
                 let output_buffer = output_buffer.clone();
                 let status_label = status_label.clone();
                 let is_recording = is_recording.clone();
-                let active_session_id = active_session_id.clone();
+                let active_session = active_session.clone();
                 let request_in_flight = request_in_flight.clone();
                 let update_controls = update_controls.clone();
                 glib::timeout_add_local(
@@ -213,7 +223,7 @@ impl DebugPage {
                         Ok(result) => {
                             request_in_flight.store(false, Ordering::SeqCst);
                             is_recording.store(false, Ordering::SeqCst);
-                            if let Ok(mut guard) = active_session_id.lock() {
+                            if let Ok(mut guard) = active_session.lock() {
                                 *guard = None;
                             }
                             match result {
@@ -237,7 +247,7 @@ impl DebugPage {
                         Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                             request_in_flight.store(false, Ordering::SeqCst);
                             is_recording.store(false, Ordering::SeqCst);
-                            if let Ok(mut guard) = active_session_id.lock() {
+                            if let Ok(mut guard) = active_session.lock() {
                                 *guard = None;
                             }
                             status_label.set_text("Error: stop worker disconnected");
@@ -349,6 +359,7 @@ impl DebugPage {
         Self {
             container,
             is_recording,
+            active_session,
         }
     }
 }
@@ -362,9 +373,16 @@ impl Page for DebugPage {
 impl Drop for DebugPage {
     fn drop(&mut self) {
         if self.is_recording.load(Ordering::SeqCst) {
-            std::thread::spawn(|| {
-                let _ = call_cancel_recording();
-            });
+            let session = self
+                .active_session
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone());
+            if let Some(session) = session {
+                std::thread::spawn(move || {
+                    let _ = call_cancel_recording(session.session_id);
+                });
+            }
         }
     }
 }
@@ -642,24 +660,30 @@ fn render_debug_text(
     out
 }
 
-fn call_start_recording() -> Result<u64, String> {
+fn call_start_recording() -> Result<DebugSessionClaim, String> {
     let conn = Connection::session().map_err(|e| format!("Session bus unavailable: {}", e))?;
     let reply = conn
         .call_method(
             Some(HANDY_BUS_NAME),
             HANDY_OBJECT_PATH,
             Some(HANDY_INTERFACE),
-            "StartRecordingSession",
-            &(),
+            "StartRecordingSessionForTarget",
+            &(DEBUG_ENGINE_ID,),
         )
-        .map_err(|e| format!("StartRecordingSession failed: {}", e))?;
-    reply
-        .body()
-        .deserialize::<u64>()
-        .map_err(|e| format!("Failed to decode StartRecordingSession response: {}", e))
+        .map_err(|e| format!("StartRecordingSessionForTarget failed: {}", e))?;
+    let (session_id, claim_token) = reply.body().deserialize::<(u64, String)>().map_err(|e| {
+        format!(
+            "Failed to decode StartRecordingSessionForTarget response: {}",
+            e
+        )
+    })?;
+    Ok(DebugSessionClaim {
+        session_id,
+        claim_token,
+    })
 }
 
-fn call_stop_recording(session_id: u64) -> Result<String, String> {
+fn call_stop_recording(session_id: u64) -> Result<bool, String> {
     let conn = Connection::session().map_err(|e| format!("Session bus unavailable: {}", e))?;
     let reply = conn
         .call_method(
@@ -673,24 +697,105 @@ fn call_stop_recording(session_id: u64) -> Result<String, String> {
 
     reply
         .body()
-        .deserialize::<String>()
+        .deserialize::<bool>()
         .map_err(|e| format!("Failed to decode StopRecordingSession response: {}", e))
 }
 
-fn call_stop_recording_and_finalize(session_id: u64) -> Result<String, String> {
-    call_stop_recording(session_id)
+fn call_stop_recording_and_finalize(session: &DebugSessionClaim) -> Result<String, String> {
+    let acknowledged = call_stop_recording(session.session_id)?;
+    if !acknowledged {
+        return Err("StopRecordingSession returned false".to_string());
+    }
+
+    let started = std::time::Instant::now();
+    loop {
+        let (state, message, _) = call_session_status(session.session_id)?;
+        match state.as_str() {
+            "ready" | "committed" => break,
+            "failed" => return Err(format!("Session failed: {}", message)),
+            "cancelled" => return Err(format!("Session cancelled: {}", message)),
+            _ => {}
+        }
+
+        if started.elapsed().as_millis() as u64 > DEBUG_STOP_WAIT_TIMEOUT_MS {
+            return Err(format!(
+                "Timed out waiting for finalization (last status='{}' message='{}')",
+                state, message
+            ));
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(DEBUG_STATUS_POLL_MS));
+    }
+
+    let (has_text, text) =
+        call_take_pending_commit_for_session(session.session_id, session.claim_token.as_str())?;
+    if has_text {
+        Ok(text)
+    } else {
+        Ok(String::new())
+    }
 }
 
-fn call_cancel_recording() -> Result<(), String> {
+fn call_session_status(session_id: u64) -> Result<(String, String, u64), String> {
     let conn = Connection::session().map_err(|e| format!("Session bus unavailable: {}", e))?;
-    conn.call_method(
-        Some(HANDY_BUS_NAME),
-        HANDY_OBJECT_PATH,
-        Some(HANDY_INTERFACE),
-        "CancelRecording",
-        &(),
-    )
-    .map_err(|e| format!("CancelRecording failed: {}", e))?;
+    let reply = conn
+        .call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "GetSessionStatus",
+            &(session_id,),
+        )
+        .map_err(|e| format!("GetSessionStatus failed: {}", e))?;
+    reply
+        .body()
+        .deserialize::<(String, String, u64)>()
+        .map_err(|e| format!("Failed to decode GetSessionStatus response: {}", e))
+}
+
+fn call_take_pending_commit_for_session(
+    session_id: u64,
+    claim_token: &str,
+) -> Result<(bool, String), String> {
+    let conn = Connection::session().map_err(|e| format!("Session bus unavailable: {}", e))?;
+    let reply = conn
+        .call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "TakePendingCommitForSession",
+            &(session_id, claim_token.to_string()),
+        )
+        .map_err(|e| format!("TakePendingCommitForSession failed: {}", e))?;
+    reply.body().deserialize::<(bool, String)>().map_err(|e| {
+        format!(
+            "Failed to decode TakePendingCommitForSession response: {}",
+            e
+        )
+    })
+}
+
+fn call_cancel_recording(session_id: u64) -> Result<(), String> {
+    let conn = Connection::session().map_err(|e| format!("Session bus unavailable: {}", e))?;
+    let reply = conn
+        .call_method(
+            Some(HANDY_BUS_NAME),
+            HANDY_OBJECT_PATH,
+            Some(HANDY_INTERFACE),
+            "CancelRecordingSession",
+            &(session_id,),
+        )
+        .map_err(|e| format!("CancelRecordingSession failed: {}", e))?;
+    let cancelled = reply
+        .body()
+        .deserialize::<bool>()
+        .map_err(|e| format!("Failed to decode CancelRecordingSession response: {}", e))?;
+    if !cancelled {
+        return Err(format!(
+            "CancelRecordingSession returned false for session {}",
+            session_id
+        ));
+    }
     Ok(())
 }
 
