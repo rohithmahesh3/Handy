@@ -866,7 +866,6 @@ fn update_preedit_text(engine: *mut IBusEngine, text: &str, cursor_pos: u32) {
                 1 as gboolean,
             );
             ibus_sys::ibus_engine_show_preedit_text(engine);
-            g_object_unref(ibus_text as gpointer);
         }
     }
 }
@@ -896,7 +895,6 @@ fn commit_text_to_engine(engine: *mut IBusEngine, text: &str) {
         let ibus_text = ibus_sys::ibus_text_new_from_string(c_text.as_ptr());
         if !ibus_text.is_null() {
             ibus_sys::ibus_engine_commit_text(engine, ibus_text);
-            g_object_unref(ibus_text as gpointer);
         }
     }
 }

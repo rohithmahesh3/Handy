@@ -2,6 +2,7 @@ use gtk4::prelude::*;
 use gtk4::{Align, Box, ComboBoxText, Orientation, PolicyType, ScrolledWindow, Switch, Widget};
 use libadwaita::prelude::{ActionRowExt, PreferencesGroupExt};
 use libadwaita::{ActionRow, Clamp, PreferencesGroup};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zbus::blocking::Connection;
@@ -136,9 +137,14 @@ impl AdvancedPage {
             .build();
         let refresh_button = gtk4::Button::with_label("Refresh");
         refresh_button.add_css_class("flat");
+        let diagnostics_refresh_in_flight = Arc::new(AtomicBool::new(false));
         let status_row_for_click = status_row.clone();
+        let diagnostics_refresh_in_flight_for_click = diagnostics_refresh_in_flight.clone();
         refresh_button.connect_clicked(move |_| {
-            status_row_for_click.set_subtitle(&load_toggle_diagnostics_subtitle());
+            request_toggle_diagnostics_refresh(
+                &status_row_for_click,
+                &diagnostics_refresh_in_flight_for_click,
+            );
         });
         status_row.add_suffix(&refresh_button);
         diagnostics_group.add(&status_row);
@@ -197,10 +203,14 @@ impl AdvancedPage {
         diagnostics_group.add(&authorize_row);
         main_box.append(&diagnostics_group);
 
-        status_row.set_subtitle(&load_toggle_diagnostics_subtitle());
+        request_toggle_diagnostics_refresh(&status_row, &diagnostics_refresh_in_flight);
         let status_row_for_timer = status_row.clone();
+        let diagnostics_refresh_in_flight_for_timer = diagnostics_refresh_in_flight.clone();
         glib::timeout_add_local(Duration::from_secs(4), move || {
-            status_row_for_timer.set_subtitle(&load_toggle_diagnostics_subtitle());
+            request_toggle_diagnostics_refresh(
+                &status_row_for_timer,
+                &diagnostics_refresh_in_flight_for_timer,
+            );
             glib::ControlFlow::Continue
         });
 
@@ -223,6 +233,36 @@ impl Page for AdvancedPage {
     fn widget(&self) -> &Widget {
         self.container.upcast_ref()
     }
+}
+
+fn request_toggle_diagnostics_refresh(status_row: &ActionRow, refresh_in_flight: &Arc<AtomicBool>) {
+    if refresh_in_flight
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+
+    let status_row = status_row.clone();
+    let refresh_in_flight = refresh_in_flight.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(load_toggle_diagnostics_subtitle());
+    });
+
+    glib::timeout_add_local(Duration::from_millis(120), move || match rx.try_recv() {
+        Ok(subtitle) => {
+            status_row.set_subtitle(&subtitle);
+            refresh_in_flight.store(false, Ordering::SeqCst);
+            glib::ControlFlow::Break
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            status_row.set_subtitle("Unavailable: diagnostics worker disconnected");
+            refresh_in_flight.store(false, Ordering::SeqCst);
+            glib::ControlFlow::Break
+        }
+    });
 }
 
 fn load_toggle_diagnostics_subtitle() -> String {
