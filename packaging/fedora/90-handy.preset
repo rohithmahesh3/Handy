@@ -1,0 +1,2 @@
+# Enable Handy daemon at user session startup by default.
+enable handy.service

@@ -1,6 +1,6 @@
 [package]
 name = "handy"
-version = "0.7.11"
+version = "0.10.0"
 description = "Speech-to-text for GNOME/Wayland via IBus"
 authors = ["cjpais", "rohithmahesh"]
 edition = "2021"

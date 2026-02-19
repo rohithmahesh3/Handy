@@ -48,6 +48,7 @@ install -Dm644 resources/pop_start.wav %{buildroot}%{_datadir}/handy/sounds/pop_
 install -Dm644 resources/pop_stop.wav %{buildroot}%{_datadir}/handy/sounds/pop_stop.wav
 install -Dm644 packaging/fedora/com.handy.Transcription.service %{buildroot}%{_datadir}/dbus-1/services/com.handy.Transcription.service
 install -Dm644 packaging/fedora/handy.service %{buildroot}%{_userunitdir}/handy.service
+install -Dm644 packaging/fedora/90-handy.preset %{buildroot}%{_userpresetdir}/90-handy.preset
 install -Dm644 packaging/fedora/handy.xml %{buildroot}%{_datadir}/ibus/component/org.freedesktop.IBus.Handy.xml
 install -Dm644 data/com.handy.Transcription.gschema.xml %{buildroot}%{_datadir}/glib-2.0/schemas/com.handy.Transcription.gschema.xml
 
@@ -81,6 +82,7 @@ glib-compile-schemas %{_datadir}/glib-2.0/schemas 2>/dev/null || :
 %{_datadir}/dbus-1/services/com.handy.Transcription.service
 %{_datadir}/glib-2.0/schemas/com.handy.Transcription.gschema.xml
 %{_userunitdir}/handy.service
+%{_userpresetdir}/90-handy.preset
 
 %changelog
 * Tue Feb 17 2026 Handy Team <handy@example.com> - 0.7.5-10
